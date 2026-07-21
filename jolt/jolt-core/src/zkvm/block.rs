@@ -3852,6 +3852,66 @@ pub struct NovaBlockProofPipelineFinalProofSizeBenchmarkArtifact {
     pub serialized_report: String,
 }
 
+impl NovaBlockProofPipelineFinalProofSizeBenchmarkArtifact {
+    /// Returns the canonical filename extension for this serialized artifact.
+    pub fn file_extension(&self) -> &'static str {
+        self.output_format.as_str()
+    }
+
+    /// Returns the serialized artifact bytes ready for file output.
+    pub fn serialized_bytes(&self) -> &[u8] {
+        self.serialized_report.as_bytes()
+    }
+
+    /// Writes the serialized artifact to disk, creating parent directories when
+    /// the target path includes them.
+    pub fn write_to_path(&self, path: impl AsRef<std::path::Path>) -> std::io::Result<()> {
+        let path = path.as_ref();
+        if let Some(parent) = path.parent() {
+            if !parent.as_os_str().is_empty() {
+                std::fs::create_dir_all(parent)?;
+            }
+        }
+
+        std::fs::write(path, self.serialized_bytes())
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum NovaBlockProofPipelineBenchmarkArtifactError {
+    Pipeline(BlockTraceError),
+    ArtifactIo { path: String, reason: String },
+}
+
+impl From<BlockTraceError> for NovaBlockProofPipelineBenchmarkArtifactError {
+    fn from(error: BlockTraceError) -> Self {
+        Self::Pipeline(error)
+    }
+}
+
+impl fmt::Display for NovaBlockProofPipelineBenchmarkArtifactError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Pipeline(error) => error.fmt(f),
+            Self::ArtifactIo { path, reason } => {
+                write!(
+                    f,
+                    "failed to write Jolt-Nova benchmark artifact to {path}: {reason}"
+                )
+            }
+        }
+    }
+}
+
+impl Error for NovaBlockProofPipelineBenchmarkArtifactError {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        match self {
+            Self::Pipeline(error) => Some(error),
+            Self::ArtifactIo { .. } => None,
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct BlockProofPipeline<Digest = [u8; 32], F = ark_bn254::Fr, Backend = MockFoldingBackend> {
     bundle_prover: BlockProofBundleProver<Digest, F>,
@@ -4014,6 +4074,37 @@ where
             report,
             serialized_report,
         })
+    }
+
+    /// Runs the final proof size scaling benchmark and writes the serialized
+    /// artifact to disk.
+    pub fn prove_block_prefixes_and_write_final_proof_size_benchmark_artifact(
+        &self,
+        bytecode_preprocessing: &BytecodePreprocessing,
+        blocks: &[TraceBlock],
+        block_counts: &[usize],
+        output_format: JoltNovaReportOutputFormat,
+        output_path: impl AsRef<std::path::Path>,
+    ) -> Result<
+        NovaBlockProofPipelineFinalProofSizeBenchmarkArtifact,
+        NovaBlockProofPipelineBenchmarkArtifactError,
+    > {
+        let output_path = output_path.as_ref();
+        let artifact = self.prove_block_prefixes_with_final_proof_size_benchmark_artifact(
+            bytecode_preprocessing,
+            blocks,
+            block_counts,
+            output_format,
+        )?;
+
+        artifact.write_to_path(output_path).map_err(|error| {
+            NovaBlockProofPipelineBenchmarkArtifactError::ArtifactIo {
+                path: output_path.display().to_string(),
+                reason: error.to_string(),
+            }
+        })?;
+
+        Ok(artifact)
     }
 }
 
@@ -6824,6 +6915,20 @@ mod tests {
         [byte; 32]
     }
 
+    fn temp_artifact_path(test_name: &str, file_name: &str) -> std::path::PathBuf {
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let mut path = std::env::temp_dir();
+        path.push(format!(
+            "jolt-nova-{test_name}-{}-{nonce}",
+            std::process::id()
+        ));
+        path.push(file_name);
+        path
+    }
+
     fn sample_final_proof_size_baseline(
         configured_backend_name: &'static str,
         proof_system: &'static str,
@@ -6953,6 +7058,27 @@ mod tests {
                 reason: "CSV report export is not implemented yet",
             }
         );
+    }
+
+    #[test]
+    fn jolt_nova_final_proof_size_benchmark_artifact_writes_serialized_report() {
+        let report = sample_final_proof_size_scaling_report();
+        let serialized_report = export_nova_final_proof_size_scaling_report_json(&report);
+        let artifact = NovaBlockProofPipelineFinalProofSizeBenchmarkArtifact {
+            output_format: JoltNovaReportOutputFormat::Json,
+            report,
+            serialized_report: serialized_report.clone(),
+        };
+        let path = temp_artifact_path("final-proof-size-benchmark-artifact-writes", "report.json");
+
+        artifact.write_to_path(&path).unwrap();
+        let written_report = std::fs::read_to_string(&path).unwrap();
+        std::fs::remove_file(&path).unwrap();
+        std::fs::remove_dir(path.parent().unwrap()).unwrap();
+
+        assert_eq!(artifact.file_extension(), "json");
+        assert_eq!(artifact.serialized_bytes(), serialized_report.as_bytes());
+        assert_eq!(written_report, serialized_report);
     }
 
     #[test]
@@ -9923,6 +10049,42 @@ mod tests {
         assert!(artifact
             .serialized_report
             .contains("\"spartan-final-proof\""));
+    }
+
+    #[cfg(feature = "nova")]
+    #[test]
+    fn nova_block_proof_pipeline_final_proof_size_benchmark_artifact_writes_json_file() {
+        let bytecode = BytecodePreprocessing::default();
+        let block0 = trace_block(0, boundary(0, 0), boundary(2, 0));
+        let backend = NovaFoldingBackend::default();
+        let pipeline = BlockProofPipeline::<_, ark_bn254::Fr, NovaFoldingBackend>::with_backend(
+            [9u8; 32], backend,
+        );
+        let path = temp_artifact_path(
+            "nova-final-proof-size-benchmark-artifact-writes",
+            "report.json",
+        );
+
+        let artifact = pipeline
+            .prove_block_prefixes_and_write_final_proof_size_benchmark_artifact(
+                &bytecode,
+                &[block0],
+                &[1],
+                JoltNovaReportOutputFormat::Json,
+                &path,
+            )
+            .unwrap();
+        let written_report = std::fs::read_to_string(&path).unwrap();
+        std::fs::remove_file(&path).unwrap();
+        std::fs::remove_dir(path.parent().unwrap()).unwrap();
+
+        assert_eq!(artifact.output_format, JoltNovaReportOutputFormat::Json);
+        assert_eq!(artifact.report.rows.len(), 1);
+        assert_eq!(artifact.report.rows[0].block_count, 1);
+        assert_eq!(written_report, artifact.serialized_report);
+        assert!(written_report.contains("\"schema_version\":\"jolt-nova-report-v1\""));
+        assert!(written_report.contains("\"report_kind\":\"final-proof-size-scaling\""));
+        assert!(written_report.contains("\"row_count\":1"));
     }
 
     #[cfg(feature = "nova")]
