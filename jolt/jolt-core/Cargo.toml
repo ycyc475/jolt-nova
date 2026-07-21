@@ -148,6 +148,11 @@ harness = false
 name = "challenge_mult_performance"
 harness = false
 
+[[example]]
+name = "jolt_nova_final_proof_size_benchmark"
+path = "examples/jolt_nova_final_proof_size_benchmark.rs"
+required-features = ["nova"]
+
 [lib]
 name = "jolt_core"
 path = "src/lib.rs"
