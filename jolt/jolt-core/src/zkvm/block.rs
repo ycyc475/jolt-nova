@@ -968,6 +968,7 @@ impl fmt::Display for JoltNovaReportOutputFormat {
 pub const JOLT_NOVA_REPORT_SCHEMA_VERSION: &str = "jolt-nova-report-v1";
 pub const JOLT_NOVA_REPORT_CANONICAL_OUTPUT_FORMAT: JoltNovaReportOutputFormat =
     JoltNovaReportOutputFormat::Json;
+pub const JOLT_NOVA_FINAL_PROOF_SIZE_SCALING_REPORT_KIND: &str = "final-proof-size-scaling";
 
 pub const FINAL_FOLDED_INSTANCE_VERSION: &str = "jolt-nova-final-folded-instance-v1";
 pub const SPARTAN_FINAL_INSTANCE_ENCODING_VERSION: &str =
@@ -4024,6 +4025,273 @@ fn validate_final_proof_size_scaling_block_counts(
     Ok(())
 }
 
+pub fn export_nova_final_proof_size_scaling_report(
+    report: &NovaBlockProofPipelineFinalProofSizeScalingReport,
+    format: JoltNovaReportOutputFormat,
+) -> Result<String, BlockTraceError> {
+    match format {
+        JoltNovaReportOutputFormat::Json => {
+            Ok(export_nova_final_proof_size_scaling_report_json(report))
+        }
+        JoltNovaReportOutputFormat::Csv => Err(BlockTraceError::NovaFoldingBackendError {
+            block_index: 0,
+            reason: "CSV report export is not implemented yet",
+        }),
+    }
+}
+
+/// Exports a final proof size scaling report as stable, deterministic JSON.
+///
+/// Field order is intentionally fixed so small benchmark artifacts are easy to
+/// diff in Git and across runs.
+pub fn export_nova_final_proof_size_scaling_report_json(
+    report: &NovaBlockProofPipelineFinalProofSizeScalingReport,
+) -> String {
+    let mut output = String::new();
+    output.push('{');
+    append_json_string_field(
+        &mut output,
+        "schema_version",
+        JOLT_NOVA_REPORT_SCHEMA_VERSION,
+    );
+    output.push(',');
+    append_json_string_field(
+        &mut output,
+        "format",
+        JoltNovaReportOutputFormat::Json.as_str(),
+    );
+    output.push(',');
+    append_json_string_field(
+        &mut output,
+        "report_kind",
+        JOLT_NOVA_FINAL_PROOF_SIZE_SCALING_REPORT_KIND,
+    );
+    output.push(',');
+    append_json_usize_field(&mut output, "row_count", report.rows.len());
+    output.push(',');
+    append_json_string(&mut output, "rows");
+    output.push_str(":[");
+    for (index, row) in report.rows.iter().enumerate() {
+        if index > 0 {
+            output.push(',');
+        }
+        append_final_proof_size_scaling_row_json(&mut output, row);
+    }
+    output.push_str("]}");
+    output
+}
+
+fn append_final_proof_size_scaling_row_json(
+    output: &mut String,
+    row: &NovaBlockProofPipelineFinalProofSizeScalingRow,
+) {
+    output.push('{');
+    append_json_usize_field(output, "block_count", row.block_count);
+    output.push(',');
+    append_json_optional_usize_field(output, "first_block_index", row.first_block_index);
+    output.push(',');
+    append_json_optional_usize_field(output, "last_block_index", row.last_block_index);
+    output.push(',');
+    append_json_usize_field(output, "total_active_cycles", row.total_active_cycles);
+    output.push(',');
+    append_json_optional_usize_field(
+        output,
+        "recursive_snark_bytes_len",
+        row.recursive_snark_bytes_len,
+    );
+    output.push(',');
+    append_json_string(output, "final_proof_size_comparison");
+    output.push(':');
+    append_final_proof_size_comparison_json(output, &row.final_proof_size_comparison);
+    output.push('}');
+}
+
+fn append_final_proof_size_comparison_json(
+    output: &mut String,
+    comparison: &JoltNovaFinalProofSizeComparison,
+) {
+    output.push('{');
+    append_json_digest_field(
+        output,
+        "folded_accumulator_digest",
+        &comparison.folded_accumulator_digest,
+    );
+    output.push(',');
+    append_json_usize_field(output, "absorbed_blocks", comparison.absorbed_blocks);
+    output.push(',');
+    append_json_usize_field(
+        output,
+        "total_active_cycles",
+        comparison.total_active_cycles,
+    );
+    output.push(',');
+    append_json_optional_usize_field(
+        output,
+        "recursive_snark_bytes_len",
+        comparison.recursive_snark_bytes_len,
+    );
+    output.push(',');
+    append_json_string(output, "placeholder");
+    output.push(':');
+    append_final_proof_size_baseline_json(output, &comparison.placeholder);
+    output.push(',');
+    append_json_string(output, "spartan");
+    output.push(':');
+    append_final_proof_size_baseline_json(output, &comparison.spartan);
+    output.push(',');
+    append_json_usize_field(
+        output,
+        "spartan_payload_extra_bytes",
+        comparison.spartan_payload_extra_bytes,
+    );
+    output.push(',');
+    append_json_i128_field(
+        output,
+        "spartan_total_extra_bytes",
+        comparison.spartan_total_extra_bytes,
+    );
+    output.push('}');
+}
+
+fn append_final_proof_size_baseline_json(
+    output: &mut String,
+    baseline: &JoltNovaFinalProofSizeBaseline,
+) {
+    output.push('{');
+    append_json_string_field(
+        output,
+        "configured_backend_name",
+        baseline.configured_backend_name,
+    );
+    output.push(',');
+    append_json_string_field(output, "proof_system", baseline.proof_system);
+    output.push(',');
+    append_json_usize_field(output, "absorbed_blocks", baseline.absorbed_blocks);
+    output.push(',');
+    append_json_usize_field(output, "total_active_cycles", baseline.total_active_cycles);
+    output.push(',');
+    append_json_optional_usize_field(
+        output,
+        "recursive_snark_bytes_len",
+        baseline.recursive_snark_bytes_len,
+    );
+    output.push(',');
+    append_json_usize_field(
+        output,
+        "final_public_input_bytes_len",
+        baseline.final_public_input_bytes_len,
+    );
+    output.push(',');
+    append_json_usize_field(
+        output,
+        "final_witness_bytes_len",
+        baseline.final_witness_bytes_len,
+    );
+    output.push(',');
+    append_json_usize_field(
+        output,
+        "proof_envelope_bytes_len",
+        baseline.proof_envelope_bytes_len,
+    );
+    output.push(',');
+    append_json_usize_field(
+        output,
+        "proof_payload_bytes_len",
+        baseline.proof_payload_bytes_len,
+    );
+    output.push(',');
+    append_json_usize_field(
+        output,
+        "proof_total_bytes_len",
+        baseline.proof_total_bytes_len,
+    );
+    output.push(',');
+    append_json_digest_field(
+        output,
+        "final_instance_digest",
+        &baseline.final_instance_digest,
+    );
+    output.push(',');
+    append_json_digest_field(
+        output,
+        "spartan_encoding_digest",
+        &baseline.spartan_encoding_digest,
+    );
+    output.push(',');
+    append_json_digest_field(output, "proof_digest", &baseline.proof_digest);
+    output.push('}');
+}
+
+fn append_json_string_field(output: &mut String, name: &str, value: &str) {
+    append_json_string(output, name);
+    output.push(':');
+    append_json_string(output, value);
+}
+
+fn append_json_usize_field(output: &mut String, name: &str, value: usize) {
+    append_json_string(output, name);
+    output.push(':');
+    output.push_str(&value.to_string());
+}
+
+fn append_json_i128_field(output: &mut String, name: &str, value: i128) {
+    append_json_string(output, name);
+    output.push(':');
+    output.push_str(&value.to_string());
+}
+
+fn append_json_optional_usize_field(output: &mut String, name: &str, value: Option<usize>) {
+    append_json_string(output, name);
+    output.push(':');
+    match value {
+        Some(value) => output.push_str(&value.to_string()),
+        None => output.push_str("null"),
+    }
+}
+
+fn append_json_digest_field(output: &mut String, name: &str, digest: &[u8; 32]) {
+    append_json_string(output, name);
+    output.push(':');
+    output.push('"');
+    append_hex_digest(output, digest);
+    output.push('"');
+}
+
+fn append_json_string(output: &mut String, value: &str) {
+    output.push('"');
+    for ch in value.chars() {
+        match ch {
+            '"' => output.push_str("\\\""),
+            '\\' => output.push_str("\\\\"),
+            '\u{08}' => output.push_str("\\b"),
+            '\u{0C}' => output.push_str("\\f"),
+            '\n' => output.push_str("\\n"),
+            '\r' => output.push_str("\\r"),
+            '\t' => output.push_str("\\t"),
+            ch if ch.is_control() => append_json_unicode_escape(output, ch as u32),
+            ch => output.push(ch),
+        }
+    }
+    output.push('"');
+}
+
+fn append_json_unicode_escape(output: &mut String, codepoint: u32) {
+    output.push_str("\\u");
+    for shift in [12, 8, 4, 0] {
+        let nibble = ((codepoint >> shift) & 0xF) as usize;
+        output.push(HEX_CHARS[nibble] as char);
+    }
+}
+
+fn append_hex_digest(output: &mut String, digest: &[u8; 32]) {
+    for byte in digest {
+        output.push(HEX_CHARS[(byte >> 4) as usize] as char);
+        output.push(HEX_CHARS[(byte & 0x0F) as usize] as char);
+    }
+}
+
+const HEX_CHARS: &[u8; 16] = b"0123456789abcdef";
+
 pub fn verify_block_proof_pipeline<Digest, F>(
     bytecode_preprocessing: &BytecodePreprocessing,
     blocks: &[TraceBlock],
@@ -6513,6 +6781,72 @@ mod tests {
         }
     }
 
+    fn repeated_digest(byte: u8) -> [u8; 32] {
+        [byte; 32]
+    }
+
+    fn sample_final_proof_size_baseline(
+        configured_backend_name: &'static str,
+        proof_system: &'static str,
+        proof_payload_bytes_len: usize,
+        proof_total_bytes_len: usize,
+        digest_byte: u8,
+    ) -> JoltNovaFinalProofSizeBaseline {
+        JoltNovaFinalProofSizeBaseline {
+            configured_backend_name,
+            proof_system,
+            absorbed_blocks: 2,
+            total_active_cycles: 4,
+            recursive_snark_bytes_len: Some(128),
+            final_public_input_bytes_len: 64,
+            final_witness_bytes_len: 96,
+            proof_envelope_bytes_len: proof_total_bytes_len - proof_payload_bytes_len,
+            proof_payload_bytes_len,
+            proof_total_bytes_len,
+            final_instance_digest: repeated_digest(digest_byte),
+            spartan_encoding_digest: repeated_digest(digest_byte + 1),
+            proof_digest: repeated_digest(digest_byte + 2),
+        }
+    }
+
+    fn sample_final_proof_size_scaling_report() -> NovaBlockProofPipelineFinalProofSizeScalingReport
+    {
+        let placeholder = sample_final_proof_size_baseline(
+            SPARTAN_PLACEHOLDER_PROOF_SYSTEM_NAME,
+            SPARTAN_PLACEHOLDER_PROOF_SYSTEM_NAME,
+            0,
+            80,
+            3,
+        );
+        let spartan = sample_final_proof_size_baseline(
+            SPARTAN_FINAL_PROOF_SYSTEM_NAME,
+            SPARTAN_FINAL_PROOF_SYSTEM_NAME,
+            512,
+            600,
+            6,
+        );
+
+        NovaBlockProofPipelineFinalProofSizeScalingReport {
+            rows: vec![NovaBlockProofPipelineFinalProofSizeScalingRow {
+                block_count: 2,
+                first_block_index: Some(0),
+                last_block_index: Some(1),
+                total_active_cycles: 4,
+                recursive_snark_bytes_len: Some(128),
+                final_proof_size_comparison: JoltNovaFinalProofSizeComparison {
+                    folded_accumulator_digest: repeated_digest(1),
+                    absorbed_blocks: 2,
+                    total_active_cycles: 4,
+                    recursive_snark_bytes_len: Some(128),
+                    placeholder,
+                    spartan,
+                    spartan_payload_extra_bytes: 512,
+                    spartan_total_extra_bytes: 520,
+                },
+            }],
+        }
+    }
+
     #[test]
     fn jolt_nova_report_output_format_uses_json_as_canonical_schema_format() {
         assert_eq!(JOLT_NOVA_REPORT_SCHEMA_VERSION, "jolt-nova-report-v1");
@@ -6534,6 +6868,52 @@ mod tests {
             Some(JoltNovaReportOutputFormat::Csv)
         );
         assert_eq!(JoltNovaReportOutputFormat::parse("debug"), None);
+    }
+
+    #[test]
+    fn jolt_nova_final_proof_size_scaling_report_exports_stable_json() {
+        let report = sample_final_proof_size_scaling_report();
+        let json =
+            export_nova_final_proof_size_scaling_report(&report, JoltNovaReportOutputFormat::Json)
+                .unwrap();
+
+        assert_eq!(
+            json,
+            export_nova_final_proof_size_scaling_report_json(&report)
+        );
+        assert!(json.starts_with(
+            "{\"schema_version\":\"jolt-nova-report-v1\",\"format\":\"json\",\"report_kind\":\"final-proof-size-scaling\",\"row_count\":1,\"rows\":[{\"block_count\":2"
+        ));
+        assert!(json.contains("\"first_block_index\":0"));
+        assert!(json.contains("\"last_block_index\":1"));
+        assert!(json.contains("\"recursive_snark_bytes_len\":128"));
+        assert!(json.contains(
+            "\"folded_accumulator_digest\":\"0101010101010101010101010101010101010101010101010101010101010101\""
+        ));
+        assert!(json.contains("\"configured_backend_name\":\"spartan-placeholder\""));
+        assert!(json.contains("\"configured_backend_name\":\"spartan-final-proof\""));
+        assert!(json.contains(
+            "\"final_instance_digest\":\"0303030303030303030303030303030303030303030303030303030303030303\""
+        ));
+        assert!(json.contains(
+            "\"spartan_encoding_digest\":\"0707070707070707070707070707070707070707070707070707070707070707\""
+        ));
+        assert!(json.contains("\"spartan_payload_extra_bytes\":512"));
+        assert!(json.contains("\"spartan_total_extra_bytes\":520"));
+    }
+
+    #[test]
+    fn jolt_nova_final_proof_size_scaling_report_rejects_csv_until_stage8_csv_export() {
+        let report = sample_final_proof_size_scaling_report();
+
+        assert_eq!(
+            export_nova_final_proof_size_scaling_report(&report, JoltNovaReportOutputFormat::Csv)
+                .unwrap_err(),
+            BlockTraceError::NovaFoldingBackendError {
+                block_index: 0,
+                reason: "CSV report export is not implemented yet",
+            }
+        );
     }
 
     #[test]
