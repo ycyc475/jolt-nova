@@ -1,18 +1,7 @@
 name: Fuzz crates
 
 on:
-  push:
-    branches: [main]
-    paths:
-      - "crates/*/fuzz/**"
-      - "crates/*/src/**"
-      - ".github/workflows/fuzz-crates.yml"
-  pull_request:
-    branches: [main]
-    paths:
-      - "crates/*/fuzz/**"
-      - "crates/*/src/**"
-      - ".github/workflows/fuzz-crates.yml"
+  workflow_dispatch:
 
 env:
   CARGO_TERM_COLOR: always

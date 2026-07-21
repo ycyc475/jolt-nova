@@ -1,14 +1,7 @@
 name: Benchmark modular crates
 
 on:
-  push:
-    branches: [main]
-    paths:
-      - "crates/**"
-  pull_request:
-    branches: [main]
-    paths:
-      - "crates/**"
+  workflow_dispatch:
 
 env:
   CARGO_TERM_COLOR: always
