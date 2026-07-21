@@ -928,6 +928,47 @@ pub struct JoltNovaFinalProofSizeComparison {
     pub spartan_total_extra_bytes: i128,
 }
 
+/// Stable output format selector for Jolt-Nova benchmark/report artifacts.
+///
+/// JSON is the canonical format because the stage-7 reports are nested. CSV is
+/// reserved for later table-oriented exports used in papers or spreadsheets.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum JoltNovaReportOutputFormat {
+    Json,
+    Csv,
+}
+
+impl JoltNovaReportOutputFormat {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Json => "json",
+            Self::Csv => "csv",
+        }
+    }
+
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "json" => Some(Self::Json),
+            "csv" => Some(Self::Csv),
+            _ => None,
+        }
+    }
+
+    pub fn is_canonical(self) -> bool {
+        self == JOLT_NOVA_REPORT_CANONICAL_OUTPUT_FORMAT
+    }
+}
+
+impl fmt::Display for JoltNovaReportOutputFormat {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+pub const JOLT_NOVA_REPORT_SCHEMA_VERSION: &str = "jolt-nova-report-v1";
+pub const JOLT_NOVA_REPORT_CANONICAL_OUTPUT_FORMAT: JoltNovaReportOutputFormat =
+    JoltNovaReportOutputFormat::Json;
+
 pub const FINAL_FOLDED_INSTANCE_VERSION: &str = "jolt-nova-final-folded-instance-v1";
 pub const SPARTAN_FINAL_INSTANCE_ENCODING_VERSION: &str =
     "jolt-nova-spartan-final-instance-encoding-v1";
@@ -6470,6 +6511,29 @@ mod tests {
             cycles: vec![Cycle::NoOp; active_cycles],
             ended_at_tick_boundary: true,
         }
+    }
+
+    #[test]
+    fn jolt_nova_report_output_format_uses_json_as_canonical_schema_format() {
+        assert_eq!(JOLT_NOVA_REPORT_SCHEMA_VERSION, "jolt-nova-report-v1");
+        assert_eq!(
+            JOLT_NOVA_REPORT_CANONICAL_OUTPUT_FORMAT,
+            JoltNovaReportOutputFormat::Json
+        );
+        assert!(JoltNovaReportOutputFormat::Json.is_canonical());
+        assert!(!JoltNovaReportOutputFormat::Csv.is_canonical());
+        assert_eq!(JoltNovaReportOutputFormat::Json.as_str(), "json");
+        assert_eq!(JoltNovaReportOutputFormat::Csv.as_str(), "csv");
+        assert_eq!(JoltNovaReportOutputFormat::Json.to_string(), "json");
+        assert_eq!(
+            JoltNovaReportOutputFormat::parse("json"),
+            Some(JoltNovaReportOutputFormat::Json)
+        );
+        assert_eq!(
+            JoltNovaReportOutputFormat::parse("csv"),
+            Some(JoltNovaReportOutputFormat::Csv)
+        );
+        assert_eq!(JoltNovaReportOutputFormat::parse("debug"), None);
     }
 
     #[test]
