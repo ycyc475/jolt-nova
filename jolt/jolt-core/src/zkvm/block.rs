@@ -3841,6 +3841,17 @@ pub struct NovaBlockProofPipelineFinalProofSizeScalingReport {
     pub rows: Vec<NovaBlockProofPipelineFinalProofSizeScalingRow>,
 }
 
+/// Serialized benchmark artifact for final proof size scaling.
+///
+/// This is the stage-8 runner surface: the same call returns the structured
+/// scaling report and a serialized representation ready to write to disk.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct NovaBlockProofPipelineFinalProofSizeBenchmarkArtifact {
+    pub output_format: JoltNovaReportOutputFormat,
+    pub report: NovaBlockProofPipelineFinalProofSizeScalingReport,
+    pub serialized_report: String,
+}
+
 #[derive(Clone, Debug)]
 pub struct BlockProofPipeline<Digest = [u8; 32], F = ark_bn254::Fr, Backend = MockFoldingBackend> {
     bundle_prover: BlockProofBundleProver<Digest, F>,
@@ -3975,6 +3986,34 @@ where
             .collect::<Result<Vec<_>, BlockTraceError>>()?;
 
         Ok(NovaBlockProofPipelineFinalProofSizeScalingReport { rows })
+    }
+
+    /// Runs the final proof size scaling benchmark and serializes the result.
+    ///
+    /// This is a lightweight runner/helper rather than a wall-clock benchmark:
+    /// it executes the proving/reporting path for the requested block prefixes
+    /// and returns both the structured scaling report and the requested output
+    /// artifact. JSON is currently the canonical supported format.
+    pub fn prove_block_prefixes_with_final_proof_size_benchmark_artifact(
+        &self,
+        bytecode_preprocessing: &BytecodePreprocessing,
+        blocks: &[TraceBlock],
+        block_counts: &[usize],
+        output_format: JoltNovaReportOutputFormat,
+    ) -> Result<NovaBlockProofPipelineFinalProofSizeBenchmarkArtifact, BlockTraceError> {
+        let report = self.prove_block_prefixes_with_final_proof_size_scaling_report(
+            bytecode_preprocessing,
+            blocks,
+            block_counts,
+        )?;
+        let serialized_report =
+            export_nova_final_proof_size_scaling_report(&report, output_format)?;
+
+        Ok(NovaBlockProofPipelineFinalProofSizeBenchmarkArtifact {
+            output_format,
+            report,
+            serialized_report,
+        })
     }
 }
 
@@ -9842,6 +9881,48 @@ mod tests {
                         .proof_total_bytes_len
             );
         }
+    }
+
+    #[cfg(feature = "nova")]
+    #[test]
+    fn nova_block_proof_pipeline_final_proof_size_benchmark_artifact_exports_json() {
+        let bytecode = BytecodePreprocessing::default();
+        let block0 = trace_block(0, boundary(0, 0), boundary(2, 0));
+        let block1 = trace_block(1, block0.end_state.clone(), boundary(4, 0));
+        let backend = NovaFoldingBackend::default();
+        let pipeline = BlockProofPipeline::<_, ark_bn254::Fr, NovaFoldingBackend>::with_backend(
+            [9u8; 32], backend,
+        );
+
+        let artifact = pipeline
+            .prove_block_prefixes_with_final_proof_size_benchmark_artifact(
+                &bytecode,
+                &[block0, block1],
+                &[1, 2],
+                JoltNovaReportOutputFormat::Json,
+            )
+            .unwrap();
+
+        assert_eq!(artifact.output_format, JoltNovaReportOutputFormat::Json);
+        assert_eq!(artifact.report.rows.len(), 2);
+        assert_eq!(artifact.report.rows[0].block_count, 1);
+        assert_eq!(artifact.report.rows[1].block_count, 2);
+        assert_eq!(
+            artifact.serialized_report,
+            export_nova_final_proof_size_scaling_report_json(&artifact.report)
+        );
+        assert!(artifact
+            .serialized_report
+            .contains("\"schema_version\":\"jolt-nova-report-v1\""));
+        assert!(artifact
+            .serialized_report
+            .contains("\"report_kind\":\"final-proof-size-scaling\""));
+        assert!(artifact.serialized_report.contains("\"row_count\":2"));
+        assert!(artifact.serialized_report.contains("\"block_count\":1"));
+        assert!(artifact.serialized_report.contains("\"block_count\":2"));
+        assert!(artifact
+            .serialized_report
+            .contains("\"spartan-final-proof\""));
     }
 
     #[cfg(feature = "nova")]
