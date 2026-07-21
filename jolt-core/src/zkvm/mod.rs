@@ -50,6 +50,7 @@ use std::path::PathBuf;
 use tracer::JoltDevice;
 use verifier::JoltVerifier;
 
+pub mod block;
 pub mod bytecode;
 pub mod claim_reductions;
 pub mod config;

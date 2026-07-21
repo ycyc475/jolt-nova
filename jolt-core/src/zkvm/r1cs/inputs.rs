@@ -263,21 +263,33 @@ impl R1CSCycleInputs {
     where
         F: JoltField,
     {
-        let len = trace.len();
-        let cycle = JoltTraceCycle::try_new(&trace[t])
+        Self::from_cycle_with_next::<F>(bytecode_preprocessing, &trace[t], trace.get(t + 1))
+    }
+
+    /// Build one R1CS row from a cycle plus an explicit optional lookahead row.
+    ///
+    /// This is equivalent to [`Self::from_trace`] when `lookahead_cycle` is
+    /// `trace.get(t + 1)`, but it is also suitable for block proving: the last
+    /// row of a block can be checked against the first row of the following
+    /// block instead of being treated as the last row of the whole trace.
+    pub fn from_cycle_with_next<F>(
+        bytecode_preprocessing: &BytecodePreprocessing,
+        current_cycle: &Cycle,
+        lookahead_cycle: Option<&Cycle>,
+    ) -> Self
+    where
+        F: JoltField,
+    {
+        let cycle = JoltTraceCycle::try_new(current_cycle)
             .expect("trace cycle must be backed by a final Jolt instruction row");
         let flags_view = cycle.circuit_flags();
         let instruction_flags = cycle.instruction_flags();
         let norm = cycle.instruction();
 
-        let next_cycle = if t + 1 < len {
-            Some(
-                JoltTraceCycle::try_new(&trace[t + 1])
-                    .expect("trace cycle must be backed by a final Jolt instruction row"),
-            )
-        } else {
-            None
-        };
+        let next_cycle = lookahead_cycle.map(|cycle| {
+            JoltTraceCycle::try_new(cycle)
+                .expect("trace cycle must be backed by a final Jolt instruction row")
+        });
 
         // Instruction inputs and product
         let (left_input, right_i128) = LookupQuery::<XLEN>::to_instruction_inputs(&cycle);
@@ -285,7 +297,7 @@ impl R1CSCycleInputs {
         let right_mag = right_i128.unsigned_abs();
         debug_assert!(
             right_mag <= u64::MAX as u128,
-            "RightInstructionInput overflow at row {t}: |{right_i128}| > 2^64-1"
+            "RightInstructionInput overflow: |{right_i128}| > 2^64-1"
         );
         let right_input = S64::from_u64_with_sign(right_mag as u64, right_i128 >= 0);
         let right_s128: S128 = S128::from_i128(right_i128);
@@ -325,7 +337,7 @@ impl R1CSCycleInputs {
         let imm_mag = imm_i128.unsigned_abs();
         debug_assert!(
             imm_mag <= u64::MAX as u128,
-            "Imm overflow at row {t}: |{imm_i128}| > 2^64-1"
+            "Imm overflow: |{imm_i128}| > 2^64-1"
         );
         let imm = S64::from_u64_with_sign(imm_mag as u64, imm_i128 >= 0);
 

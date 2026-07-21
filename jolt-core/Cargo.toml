@@ -51,6 +51,7 @@ field-inline = [
 transcript-poseidon = ["dep:light-poseidon", "challenge-254-bit"]
 transcript-keccak = []
 transcript-blake2b = []
+nova = ["minimal", "dep:nova-snark"]
 
 [dependencies]
 ark-bn254.workspace = true
@@ -102,6 +103,7 @@ pprof = { version = "0.15", features = [
   "frame-pointer",
 ], optional = true }
 prost = { version = "0.14", optional = true }
+nova-snark = { path = "../../Nova", default-features = false, optional = true }
 
 [package.metadata.cargo-machete]
 ignored = ["prost"]

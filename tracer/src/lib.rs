@@ -11,7 +11,7 @@ use tracing::{error, info};
 #[cfg(not(feature = "std"))]
 use alloc::{boxed::Box, vec::Vec};
 
-use common::{self, jolt_device::MemoryConfig};
+use common::{self, constants::REGISTER_COUNT, jolt_device::MemoryConfig};
 use emulator::{cpu, default_terminal::DefaultTerminal};
 use instruction::{Cycle, Instruction};
 use jolt_riscv::RV64IMAC_JOLT;
@@ -180,6 +180,29 @@ pub fn trace_lazy(
 }
 
 #[tracing::instrument(skip_all)]
+pub fn trace_blocks(
+    elf_contents: &[u8],
+    elf_path: Option<&std::path::PathBuf>,
+    inputs: &[u8],
+    untrusted_advice: &[u8],
+    trusted_advice: &[u8],
+    memory_config: &MemoryConfig,
+    advice_tape: Option<cpu::AdviceTape>,
+    target_size: usize,
+) -> TraceBlockIterator<CheckpointingTracer> {
+    trace_lazy(
+        elf_contents,
+        elf_path,
+        inputs,
+        untrusted_advice,
+        trusted_advice,
+        memory_config,
+        advice_tape,
+    )
+    .iter_blocks(target_size)
+}
+
+#[tracing::instrument(skip_all)]
 pub fn trace_checkpoints(
     elf_contents: &[u8],
     inputs: &[u8],
@@ -301,6 +324,12 @@ pub trait LazyTracer {
     /// Check if the program execution has panicked.
     fn has_panicked(&self) -> bool;
 
+    /// Snapshot machine state at a trace-block boundary.
+    ///
+    /// This should only be called when [`LazyTracer::at_tick_boundary`] is true. The
+    /// `global_cycle` argument is the global trace-row offset maintained by the block iterator.
+    fn boundary_state(&self, global_cycle: usize) -> MachineBoundaryState;
+
     /// Returns whether the next execution of [`LazyTracer::lazy_step_cycle`] will emulate a new
     /// instruction or return the next [`Cycle`] in the last executed instruction.
     fn at_tick_boundary(&self) -> bool;
@@ -332,6 +361,53 @@ pub struct GeneralizedLazyTraceIter<T> {
 pub type LazyTraceIterator = GeneralizedLazyTraceIter<CheckpointingTracer>;
 
 unsafe impl<T: Send> Send for GeneralizedLazyTraceIter<T> {}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct MachineBoundaryState {
+    pub global_cycle: usize,
+    pub emulator_trace_len: usize,
+    pub pc: u64,
+    pub registers: [i64; REGISTER_COUNT as usize],
+    pub terminated: bool,
+}
+
+impl MachineBoundaryState {
+    fn from_emulator(emulator: &Emulator, global_cycle: usize, terminated: bool) -> Self {
+        let cpu = emulator.get_cpu();
+        Self {
+            global_cycle,
+            emulator_trace_len: cpu.trace_len,
+            pc: cpu.read_pc(),
+            registers: cpu.x,
+            terminated,
+        }
+    }
+}
+
+/// A contiguous chunk of execution trace cycles cut only at tracer tick boundaries.
+///
+/// `target_size` is intentionally a soft target: if a single emulated instruction expands into
+/// more cycles than the requested size, the block may grow beyond `target_size` so that virtual
+/// and inline instruction sequences are not split across block boundaries.
+#[derive(Clone, Debug, PartialEq)]
+pub struct TraceBlock {
+    pub block_index: usize,
+    pub global_cycle_start: usize,
+    pub active_cycles: usize,
+    pub target_size: usize,
+    pub start_state: MachineBoundaryState,
+    pub end_state: MachineBoundaryState,
+    pub cycles: Vec<Cycle>,
+    pub ended_at_tick_boundary: bool,
+}
+
+/// Iterator adapter that groups a lazy trace into [`TraceBlock`]s.
+pub struct TraceBlockIterator<T> {
+    trace_iter: GeneralizedLazyTraceIter<T>,
+    target_size: usize,
+    block_index: usize,
+    global_cycle_start: usize,
+}
 
 impl<T: LazyTracer> Iterator for GeneralizedLazyTraceIter<T> {
     type Item = Cycle;
@@ -370,6 +446,80 @@ impl<T: LazyTracer> Iterator for GeneralizedLazyTraceIter<T> {
 impl<T> GeneralizedLazyTraceIter<T> {
     pub fn new(lazy_tracer: T) -> Self {
         Self { lazy_tracer }
+    }
+}
+
+impl<T: LazyTracer> GeneralizedLazyTraceIter<T> {
+    pub fn iter_blocks(self, target_size: usize) -> TraceBlockIterator<T> {
+        TraceBlockIterator::new(self, target_size)
+    }
+}
+
+impl<T: LazyTracer> TraceBlockIterator<T> {
+    pub fn new(trace_iter: GeneralizedLazyTraceIter<T>, target_size: usize) -> Self {
+        assert!(target_size != 0, "trace block target size must be non-zero");
+        Self {
+            trace_iter,
+            target_size,
+            block_index: 0,
+            global_cycle_start: 0,
+        }
+    }
+
+    pub fn into_inner(self) -> GeneralizedLazyTraceIter<T> {
+        self.trace_iter
+    }
+}
+
+impl<T: LazyTracer> Iterator for TraceBlockIterator<T> {
+    type Item = TraceBlock;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.trace_iter.lazy_tracer.has_terminated() {
+            return None;
+        }
+
+        assert!(
+            self.trace_iter.lazy_tracer.at_tick_boundary(),
+            "trace blocks must start at a tick boundary"
+        );
+
+        let start_state = self
+            .trace_iter
+            .lazy_tracer
+            .boundary_state(self.global_cycle_start);
+        let mut cycles = Vec::with_capacity(self.target_size);
+
+        while cycles.len() < self.target_size || !self.trace_iter.lazy_tracer.at_tick_boundary() {
+            match self.trace_iter.next() {
+                Some(cycle) => cycles.push(cycle),
+                None => break,
+            }
+        }
+
+        if cycles.is_empty() {
+            return None;
+        }
+
+        let global_cycle_end = self.global_cycle_start + cycles.len();
+        let end_state = self.trace_iter.lazy_tracer.boundary_state(global_cycle_end);
+
+        let block = TraceBlock {
+            block_index: self.block_index,
+            global_cycle_start: self.global_cycle_start,
+            active_cycles: cycles.len(),
+            target_size: self.target_size,
+            start_state,
+            end_state,
+            ended_at_tick_boundary: self.trace_iter.lazy_tracer.at_tick_boundary()
+                || self.trace_iter.lazy_tracer.has_terminated(),
+            cycles,
+        };
+
+        self.block_index += 1;
+        self.global_cycle_start += block.active_cycles;
+
+        Some(block)
     }
 }
 
@@ -427,6 +577,14 @@ impl LazyTracer for Checkpoint {
             .as_ref()
             .unwrap()
             .panic
+    }
+
+    fn boundary_state(&self, global_cycle: usize) -> MachineBoundaryState {
+        MachineBoundaryState::from_emulator(
+            &self.emulator_state,
+            global_cycle,
+            self.has_terminated(),
+        )
     }
 
     fn at_tick_boundary(&self) -> bool {
@@ -602,6 +760,14 @@ impl LazyTracer for CheckpointingTracer {
             .panic
     }
 
+    fn boundary_state(&self, global_cycle: usize) -> MachineBoundaryState {
+        MachineBoundaryState::from_emulator(
+            &self.emulator_state,
+            global_cycle,
+            self.has_terminated(),
+        )
+    }
+
     fn at_tick_boundary(&self) -> bool {
         self.current_traces.is_empty()
     }
@@ -709,6 +875,138 @@ impl<I: Iterator<Item: Clone>> Iterator for IterChunks<I> {
 mod tests {
     use super::*;
     use common::jolt_device::MemoryConfig;
+
+    #[derive(Clone, Debug)]
+    struct ScriptedTracer {
+        sequence_lengths: Vec<usize>,
+        sequence_index: usize,
+        offset_in_sequence: usize,
+        emitted_cycles: usize,
+    }
+
+    impl ScriptedTracer {
+        fn new(sequence_lengths: Vec<usize>) -> Self {
+            assert!(
+                sequence_lengths.iter().all(|len| *len != 0),
+                "scripted trace sequence lengths must be non-zero"
+            );
+            Self {
+                sequence_lengths,
+                sequence_index: 0,
+                offset_in_sequence: 0,
+                emitted_cycles: 0,
+            }
+        }
+    }
+
+    impl LazyTracer for ScriptedTracer {
+        fn has_terminated(&self) -> bool {
+            self.sequence_index >= self.sequence_lengths.len()
+        }
+
+        fn has_panicked(&self) -> bool {
+            false
+        }
+
+        fn boundary_state(&self, global_cycle: usize) -> MachineBoundaryState {
+            let mut registers = [0i64; REGISTER_COUNT as usize];
+            registers[1] = self.sequence_index as i64;
+
+            MachineBoundaryState {
+                global_cycle,
+                emulator_trace_len: self.emitted_cycles,
+                pc: self.sequence_index as u64,
+                registers,
+                terminated: self.has_terminated(),
+            }
+        }
+
+        fn at_tick_boundary(&self) -> bool {
+            self.offset_in_sequence == 0
+        }
+
+        fn print_panic_log(&self) {}
+
+        fn lazy_step_cycle(&mut self) -> Option<Cycle> {
+            if self.has_terminated() {
+                return None;
+            }
+
+            let sequence_len = self.sequence_lengths[self.sequence_index];
+            self.offset_in_sequence += 1;
+            self.emitted_cycles += 1;
+            if self.offset_in_sequence == sequence_len {
+                self.sequence_index += 1;
+                self.offset_in_sequence = 0;
+            }
+
+            Some(Cycle::NoOp)
+        }
+
+        fn get_jolt_device(self) -> JoltDevice {
+            unreachable!("scripted tracer tests do not consume a JoltDevice")
+        }
+    }
+
+    #[test]
+    fn trace_blocks_respect_tick_boundaries_and_offsets() {
+        let blocks = GeneralizedLazyTraceIter::new(ScriptedTracer::new(vec![2, 1, 3, 1]))
+            .iter_blocks(3)
+            .collect::<Vec<_>>();
+
+        assert_eq!(blocks.len(), 3);
+        assert_eq!(
+            blocks
+                .iter()
+                .map(|block| block.active_cycles)
+                .collect::<Vec<_>>(),
+            vec![3, 3, 1]
+        );
+        assert_eq!(
+            blocks
+                .iter()
+                .map(|block| block.global_cycle_start)
+                .collect::<Vec<_>>(),
+            vec![0, 3, 6]
+        );
+        assert_eq!(
+            blocks
+                .iter()
+                .map(|block| block.block_index)
+                .collect::<Vec<_>>(),
+            vec![0, 1, 2]
+        );
+        assert_eq!(blocks[0].start_state.global_cycle, 0);
+        assert_eq!(blocks[0].end_state.global_cycle, 3);
+        assert_eq!(blocks[1].start_state, blocks[0].end_state);
+        assert_eq!(blocks[2].start_state, blocks[1].end_state);
+        assert_eq!(blocks[2].end_state.global_cycle, 7);
+        assert_eq!(blocks[2].end_state.emulator_trace_len, 7);
+        assert!(blocks[2].end_state.terminated);
+        assert!(blocks.iter().all(|block| block.ended_at_tick_boundary));
+    }
+
+    #[test]
+    fn trace_blocks_do_not_split_long_instruction_sequence() {
+        let blocks = GeneralizedLazyTraceIter::new(ScriptedTracer::new(vec![5, 1]))
+            .iter_blocks(3)
+            .collect::<Vec<_>>();
+
+        assert_eq!(blocks.len(), 2);
+        assert_eq!(blocks[0].active_cycles, 5);
+        assert_eq!(blocks[1].active_cycles, 1);
+        assert_eq!(blocks[0].start_state.global_cycle, 0);
+        assert_eq!(blocks[0].end_state.global_cycle, 5);
+        assert_eq!(blocks[1].start_state, blocks[0].end_state);
+        assert_eq!(blocks[1].end_state.global_cycle, 6);
+        assert!(blocks.iter().all(|block| block.ended_at_tick_boundary));
+    }
+
+    #[test]
+    #[should_panic(expected = "trace block target size must be non-zero")]
+    fn trace_blocks_reject_zero_target_size() {
+        let _ = GeneralizedLazyTraceIter::new(ScriptedTracer::new(vec![1])).iter_blocks(0);
+    }
 
     fn minimal_elf() -> Vec<u8> {
         vec![
