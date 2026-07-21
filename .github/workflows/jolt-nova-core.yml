@@ -22,12 +22,17 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
+      - name: Checkout Nova path dependency
+        run: |
+          git clone https://github.com/microsoft/Nova.git "$GITHUB_WORKSPACE/../Nova"
+          git -C "$GITHUB_WORKSPACE/../Nova" checkout 666e3b25bfb9f8b2106f8b4d8057010f28b1ee79
+
       - uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
           components: rustfmt
 
       - name: Check Rust formatting
-        run: cargo fmt --all --check
+        run: cargo fmt --check -p jolt-core -p tracer
 
       - name: Check jolt-core minimal
         run: cargo check --locked -p jolt-core --lib --no-default-features --features minimal
