@@ -3708,9 +3708,7 @@ where
             .iter()
             .enumerate()
             .map(|(index, block)| {
-                let lookahead = blocks
-                    .get(index + 1)
-                    .and_then(|next_block| next_block.cycles.first());
+                let lookahead = block_lookahead_cycle(blocks, index);
                 self.prove_block(bytecode_preprocessing, block, lookahead)
             })
             .collect::<Result<Vec<_>, _>>()?;
@@ -3723,6 +3721,20 @@ where
 
         Ok(proofs)
     }
+}
+
+static TERMINAL_LOOKAHEAD_CYCLE: Cycle = Cycle::NoOp;
+
+fn block_lookahead_cycle(blocks: &[TraceBlock], index: usize) -> Option<&Cycle> {
+    blocks
+        .get(index + 1)
+        .and_then(|next_block| next_block.cycles.first())
+        .or_else(|| {
+            blocks
+                .get(index)
+                .is_some_and(|block| block.end_state.terminated)
+                .then_some(&TERMINAL_LOOKAHEAD_CYCLE)
+        })
 }
 
 #[derive(Clone, Debug)]
@@ -3779,9 +3791,7 @@ where
             .iter()
             .enumerate()
             .map(|(index, block)| {
-                let lookahead = blocks
-                    .get(index + 1)
-                    .and_then(|next_block| next_block.cycles.first());
+                let lookahead = block_lookahead_cycle(blocks, index);
                 self.prove_block(bytecode_preprocessing, block, lookahead)
             })
             .collect::<Result<Vec<_>, _>>()?;
@@ -4681,9 +4691,7 @@ where
     validate_block_chain(&public_inputs)?;
 
     for (index, (block, bundle)) in blocks.iter().zip(bundles).enumerate() {
-        let lookahead = blocks
-            .get(index + 1)
-            .and_then(|next_block| next_block.cycles.first());
+        let lookahead = block_lookahead_cycle(blocks, index);
         verify_block_proof_bundle(bytecode_preprocessing, block, lookahead, bundle)?;
     }
 
@@ -4778,9 +4786,7 @@ where
     for (index, ((block, bundle), fold_input)) in
         blocks.iter().zip(bundles).zip(fold_inputs).enumerate()
     {
-        let lookahead = blocks
-            .get(index + 1)
-            .and_then(|next_block| next_block.cycles.first());
+        let lookahead = block_lookahead_cycle(blocks, index);
         verify_block_fold_input(bytecode_preprocessing, block, lookahead, bundle, fold_input)?;
     }
 
@@ -7220,6 +7226,25 @@ mod tests {
         assert!(!proofs[1].inner_proof.used_lookahead_cycle);
         verify_cpu_block_witness(&bytecode, &block0, block1.cycles.first(), &proofs[0]).unwrap();
         verify_cpu_block_witness(&bytecode, &block1, None, &proofs[1]).unwrap();
+    }
+
+    #[test]
+    fn block_cpu_prover_uses_noop_lookahead_for_terminal_block() {
+        let bytecode = BytecodePreprocessing::default();
+        let mut block = trace_block(0, boundary(0, 0), boundary(2, 0));
+        block.end_state.terminated = true;
+        let prover = BlockCpuProver::<_, ark_bn254::Fr>::new([9u8; 32]);
+
+        let proofs = prover.prove_blocks(&bytecode, &[block.clone()]).unwrap();
+
+        assert!(proofs[0].inner_proof.used_lookahead_cycle);
+        verify_cpu_block_witness(
+            &bytecode,
+            &block,
+            Some(&TERMINAL_LOOKAHEAD_CYCLE),
+            &proofs[0],
+        )
+        .unwrap();
     }
 
     #[test]

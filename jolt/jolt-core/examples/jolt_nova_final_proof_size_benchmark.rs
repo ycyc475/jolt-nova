@@ -5,7 +5,10 @@ use std::{
 };
 
 use clap::{Parser, ValueEnum};
-use common::constants::REGISTER_COUNT;
+use common::{
+    constants::{RAM_START_ADDRESS, REGISTER_COUNT},
+    jolt_device::MemoryConfig,
+};
 use jolt_core::{
     ark_bn254,
     zkvm::{
@@ -17,20 +20,24 @@ use jolt_core::{
         bytecode::BytecodePreprocessing,
     },
 };
-use serde::Deserialize;
+use jolt_riscv::RV64IMAC_JOLT;
+use serde::{Deserialize, Serialize};
 use sha3::{Digest as ShaDigest, Sha3_256};
-use tracer::{instruction::Cycle, MachineBoundaryState, TraceBlock};
+use tracer::{
+    instruction::Cycle, LazyTracer, MachineBoundaryState, TraceBlock, TracerInlineExpansionProvider,
+};
 
 const DEFAULT_OUTPUT_PATH: &str = "benchmark-runs/jolt-nova/final-proof-size-scaling.json";
 const RUNNER_NAME: &str = "jolt_nova_final_proof_size_benchmark";
-const MANIFEST_SCHEMA_VERSION: &str = "jolt-nova-benchmark-runner-v1";
+const MANIFEST_SCHEMA_VERSION: &str = "jolt-nova-benchmark-runner-v2";
 const TRACE_FILE_SCHEMA_VERSION: &str = "jolt-nova-trace-blocks-v1";
+const TRACE_BUNDLE_SCHEMA_VERSION: &str = "jolt-nova-trace-bundle-v1";
 
-/// Synthetic smoke runner for Jolt-Nova final proof size scaling artifacts.
+/// Jolt-Nova runner for synthetic, serialized, and real RV64 ELF trace blocks.
 ///
-/// This runner is intentionally small: it builds contiguous no-op trace blocks,
-/// runs the real Nova folding/final-proof-size reporting path, and writes the
-/// stage-8 JSON artifact under `benchmark-runs/` by default.
+/// ELF mode executes the program with Jolt's tracer, exports a bytecode-bound
+/// trace bundle, reads that bundle back, and runs the Nova folding/final-proof
+/// reporting path. Synthetic mode remains available for fast smoke tests.
 #[derive(Debug, Clone, Parser)]
 struct Args {
     /// Source used to obtain trace blocks.
@@ -44,6 +51,30 @@ struct Args {
     /// Input path for a versioned Jolt-Nova trace-block JSON document.
     #[arg(long)]
     trace_input: Option<PathBuf>,
+
+    /// RV64 ELF program to execute when `--trace-source elf` is selected.
+    #[arg(long)]
+    elf_input: Option<PathBuf>,
+
+    /// Versioned trace bundle written by the ELF exporter.
+    #[arg(long)]
+    trace_output: Option<PathBuf>,
+
+    /// Raw guest input bytes supplied to the ELF program.
+    #[arg(long)]
+    guest_input: Option<PathBuf>,
+
+    /// Raw untrusted-advice bytes supplied to the ELF program.
+    #[arg(long)]
+    untrusted_advice: Option<PathBuf>,
+
+    /// Raw trusted-advice bytes supplied to the ELF program.
+    #[arg(long)]
+    trusted_advice: Option<PathBuf>,
+
+    /// Soft target number of trace cycles per ELF trace block.
+    #[arg(long, default_value_t = 1024)]
+    trace_block_size: usize,
 
     /// Number of synthetic trace blocks to generate.
     #[arg(long, default_value_t = 2)]
@@ -81,6 +112,8 @@ enum TraceSource {
     Synthetic,
     /// Load trace blocks from a versioned JSON document.
     TraceFile,
+    /// Execute an RV64 ELF, export a trace bundle, then read it back for proving.
+    Elf,
 }
 
 impl TraceSource {
@@ -88,6 +121,7 @@ impl TraceSource {
         match self {
             Self::Synthetic => "synthetic",
             Self::TraceFile => "trace-file",
+            Self::Elf => "elf",
         }
     }
 }
@@ -121,6 +155,8 @@ impl fmt::Display for TraceProfile {
 #[derive(Debug)]
 struct LoadedTraceBlocks {
     blocks: Vec<TraceBlock>,
+    bytecode: BytecodePreprocessing,
+    program_digest: Option<[u8; 32]>,
     file_metadata: Option<TraceFileMetadata>,
 }
 
@@ -128,16 +164,27 @@ struct LoadedTraceBlocks {
 struct TraceFileMetadata {
     schema_version: String,
     sha3_256: [u8; 32],
+    elf_sha3_256: Option<[u8; 32]>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct TraceFileDocument {
     schema_version: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    program: Option<SerializedProgramBinding>,
     blocks: Vec<SerializedTraceBlock>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SerializedProgramBinding {
+    elf_sha3_256: String,
+    program_digest_sha3_256: String,
+    bytecode: BytecodePreprocessing,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct SerializedTraceBlock {
     block_index: usize,
@@ -150,7 +197,7 @@ struct SerializedTraceBlock {
     ended_at_tick_boundary: bool,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct SerializedMachineBoundaryState {
     global_cycle: usize,
@@ -158,6 +205,33 @@ struct SerializedMachineBoundaryState {
     pc: u64,
     registers: Vec<i64>,
     terminated: bool,
+}
+
+impl From<&MachineBoundaryState> for SerializedMachineBoundaryState {
+    fn from(state: &MachineBoundaryState) -> Self {
+        Self {
+            global_cycle: state.global_cycle,
+            emulator_trace_len: state.emulator_trace_len,
+            pc: state.pc,
+            registers: state.registers.to_vec(),
+            terminated: state.terminated,
+        }
+    }
+}
+
+impl From<&TraceBlock> for SerializedTraceBlock {
+    fn from(block: &TraceBlock) -> Self {
+        Self {
+            block_index: block.block_index,
+            global_cycle_start: block.global_cycle_start,
+            active_cycles: block.active_cycles,
+            target_size: block.target_size,
+            start_state: (&block.start_state).into(),
+            end_state: (&block.end_state).into(),
+            cycles: block.cycles.clone(),
+            ended_at_tick_boundary: block.ended_at_tick_boundary,
+        }
+    }
 }
 
 impl TryFrom<SerializedMachineBoundaryState> for MachineBoundaryState {
@@ -217,16 +291,20 @@ fn main() {
 fn run(args: Args) -> Result<(), Box<dyn Error>> {
     let loaded_trace = load_trace_blocks(&args).map_err(invalid_input)?;
     let blocks = &loaded_trace.blocks;
-    let block_counts = normalized_block_counts(&args, blocks.len()).map_err(invalid_input)?;
+    let block_counts =
+        normalized_block_counts(&args, blocks.len(), loaded_trace.program_digest.is_some())
+            .map_err(invalid_input)?;
     let manifest_output = normalized_manifest_output(&args.output, args.manifest_output.as_ref());
-    let bytecode = BytecodePreprocessing::default();
+    let program_digest = loaded_trace
+        .program_digest
+        .unwrap_or([args.program_digest_byte; 32]);
     let pipeline = BlockProofPipeline::<_, ark_bn254::Fr, NovaFoldingBackend>::with_backend(
-        [args.program_digest_byte; 32],
+        program_digest,
         NovaFoldingBackend::default(),
     );
 
     let artifact = pipeline.prove_block_prefixes_and_write_final_proof_size_benchmark_artifact(
-        &bytecode,
+        &loaded_trace.bytecode,
         blocks,
         &block_counts,
         JoltNovaReportOutputFormat::Json,
@@ -251,7 +329,11 @@ fn run(args: Args) -> Result<(), Box<dyn Error>> {
     if let Some(metadata) = &loaded_trace.file_metadata {
         println!("trace_file_schema {}", metadata.schema_version);
         println!("trace_input_sha3_256 {}", hex_digest(&metadata.sha3_256));
+        if let Some(elf_sha3_256) = metadata.elf_sha3_256 {
+            println!("elf_sha3_256 {}", hex_digest(&elf_sha3_256));
+        }
     }
+    println!("program_digest_sha3_256 {}", hex_digest(&program_digest));
     println!("format {}", artifact.output_format);
     println!("rows {}", artifact.report.rows.len());
     println!("bytes {}", artifact.serialized_bytes().len());
@@ -291,18 +373,31 @@ fn default_manifest_output_path(report_output: &Path) -> PathBuf {
     manifest_output
 }
 
-fn normalized_block_counts(args: &Args, loaded_blocks: usize) -> Result<Vec<usize>, String> {
+fn normalized_block_counts(
+    args: &Args,
+    loaded_blocks: usize,
+    has_program_binding: bool,
+) -> Result<Vec<usize>, String> {
     if loaded_blocks == 0 {
         return Err("loaded trace must contain at least one block".to_string());
     }
 
-    let block_counts = if args.block_counts.is_empty() {
+    let block_counts = if args.block_counts.is_empty() && has_program_binding {
+        vec![loaded_blocks]
+    } else if args.block_counts.is_empty() {
         (1..=loaded_blocks).collect::<Vec<_>>()
     } else {
         args.block_counts.clone()
     };
 
     validate_block_counts(loaded_blocks, &block_counts)?;
+    if has_program_binding && block_counts.iter().any(|&count| count != loaded_blocks) {
+        return Err(
+            "program-bound trace bundles currently support only the complete block sequence; \
+             partial prefixes require an external lookahead binding"
+                .to_string(),
+        );
+    }
     Ok(block_counts)
 }
 
@@ -330,24 +425,193 @@ fn validate_block_counts(blocks: usize, block_counts: &[usize]) -> Result<(), St
 fn load_trace_blocks(args: &Args) -> Result<LoadedTraceBlocks, String> {
     match args.trace_source {
         TraceSource::Synthetic => {
-            if let Some(trace_input) = &args.trace_input {
-                return Err(format!(
-                    "trace-input {} is only valid with --trace-source trace-file",
-                    manifest_path_string(trace_input)
-                ));
-            }
+            reject_non_synthetic_inputs(args)?;
             Ok(LoadedTraceBlocks {
                 blocks: build_trace_blocks(args.trace_profile, args.blocks, args.cycles_per_block)?,
+                bytecode: BytecodePreprocessing::default(),
+                program_digest: None,
                 file_metadata: None,
             })
         }
         TraceSource::TraceFile => {
+            reject_elf_inputs(args)?;
             let trace_input = args.trace_input.as_ref().ok_or_else(|| {
                 "trace-source trace-file requires --trace-input <path>".to_string()
             })?;
             load_trace_file(trace_input)
         }
+        TraceSource::Elf => export_elf_trace_bundle(args),
     }
+}
+
+fn reject_non_synthetic_inputs(args: &Args) -> Result<(), String> {
+    if let Some(trace_input) = &args.trace_input {
+        return Err(format!(
+            "trace-input {} is only valid with --trace-source trace-file",
+            manifest_path_string(trace_input)
+        ));
+    }
+    reject_elf_inputs(args)
+}
+
+fn reject_elf_inputs(args: &Args) -> Result<(), String> {
+    for (name, value) in [
+        ("elf-input", args.elf_input.as_ref()),
+        ("trace-output", args.trace_output.as_ref()),
+        ("guest-input", args.guest_input.as_ref()),
+        ("untrusted-advice", args.untrusted_advice.as_ref()),
+        ("trusted-advice", args.trusted_advice.as_ref()),
+    ] {
+        if let Some(path) = value {
+            return Err(format!(
+                "{name} {} is only valid with --trace-source elf",
+                manifest_path_string(path)
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn export_elf_trace_bundle(args: &Args) -> Result<LoadedTraceBlocks, String> {
+    if args.trace_input.is_some() {
+        return Err("trace-input is not valid with --trace-source elf".to_string());
+    }
+    if args.trace_block_size == 0 {
+        return Err("trace-block-size must be greater than zero".to_string());
+    }
+    let elf_input = args
+        .elf_input
+        .as_ref()
+        .ok_or_else(|| "trace-source elf requires --elf-input <path>".to_string())?;
+    let trace_output = args
+        .trace_output
+        .as_ref()
+        .ok_or_else(|| "trace-source elf requires --trace-output <path>".to_string())?;
+    let elf_bytes = read_input_bytes("ELF input", elf_input)?;
+    let guest_input = read_optional_input_bytes("guest input", args.guest_input.as_ref())?;
+    let untrusted_advice =
+        read_optional_input_bytes("untrusted advice", args.untrusted_advice.as_ref())?;
+    let trusted_advice = read_optional_input_bytes("trusted advice", args.trusted_advice.as_ref())?;
+
+    let mut inline_provider = TracerInlineExpansionProvider::new();
+    let program = jolt_program::build_jolt_program_with_inline_provider(
+        &elf_bytes,
+        &mut inline_provider,
+        RV64IMAC_JOLT,
+    )
+    .map_err(|error| format!("failed to decode and expand ELF program: {error}"))?;
+    let bytecode = BytecodePreprocessing::preprocess(
+        program.expanded_bytecode,
+        program.entry_address,
+        program.profile,
+    )
+    .map_err(|error| format!("failed to preprocess ELF bytecode: {error}"))?;
+    let program_size = program
+        .program_end
+        .checked_sub(RAM_START_ADDRESS)
+        .ok_or_else(|| "ELF program end is below the Jolt RAM start address".to_string())?;
+    let memory_config = MemoryConfig {
+        program_size: Some(program_size),
+        ..Default::default()
+    };
+
+    let mut block_iterator = tracer::trace_blocks(
+        &elf_bytes,
+        Some(elf_input),
+        &guest_input,
+        &untrusted_advice,
+        &trusted_advice,
+        &memory_config,
+        None,
+        args.trace_block_size,
+    );
+    let mut blocks = Vec::new();
+    for block in block_iterator.by_ref() {
+        blocks.push(block);
+    }
+    let tracer = block_iterator.into_inner().lazy_tracer;
+    if tracer.has_panicked() {
+        return Err("ELF guest panicked while generating trace blocks".to_string());
+    }
+    if !tracer.has_terminated() {
+        return Err("ELF tracer did not terminate after generating trace blocks".to_string());
+    }
+    if let Some(last_block) = blocks.last_mut() {
+        last_block.end_state =
+            tracer.boundary_state(last_block.global_cycle_start + last_block.active_cycles);
+    }
+    validate_loaded_trace_blocks(&blocks)?;
+
+    let elf_sha3_256 = Sha3_256::digest(&elf_bytes).into();
+    let program_digest = bytecode_digest(&bytecode)?;
+    write_trace_bundle(
+        trace_output,
+        &blocks,
+        bytecode,
+        elf_sha3_256,
+        program_digest,
+    )?;
+
+    let loaded = load_trace_file(trace_output)?;
+    if loaded.program_digest != Some(program_digest) {
+        return Err("exported trace bundle program digest changed during readback".to_string());
+    }
+    Ok(loaded)
+}
+
+fn read_input_bytes(label: &str, path: &Path) -> Result<Vec<u8>, String> {
+    std::fs::read(path).map_err(|error| {
+        format!(
+            "failed to read {label} {}: {error}",
+            manifest_path_string(path)
+        )
+    })
+}
+
+fn read_optional_input_bytes(label: &str, path: Option<&PathBuf>) -> Result<Vec<u8>, String> {
+    path.map_or_else(|| Ok(Vec::new()), |path| read_input_bytes(label, path))
+}
+
+fn write_trace_bundle(
+    trace_output: &Path,
+    blocks: &[TraceBlock],
+    bytecode: BytecodePreprocessing,
+    elf_sha3_256: [u8; 32],
+    program_digest: [u8; 32],
+) -> Result<(), String> {
+    if let Some(parent) = trace_output.parent() {
+        if !parent.as_os_str().is_empty() {
+            std::fs::create_dir_all(parent).map_err(|error| {
+                format!(
+                    "failed to create trace output directory {}: {error}",
+                    manifest_path_string(parent)
+                )
+            })?;
+        }
+    }
+    let document = TraceFileDocument {
+        schema_version: TRACE_BUNDLE_SCHEMA_VERSION.to_string(),
+        program: Some(SerializedProgramBinding {
+            elf_sha3_256: hex_digest(&elf_sha3_256),
+            program_digest_sha3_256: hex_digest(&program_digest),
+            bytecode,
+        }),
+        blocks: blocks.iter().map(SerializedTraceBlock::from).collect(),
+    };
+    let json = serde_json::to_vec_pretty(&document)
+        .map_err(|error| format!("failed to serialize trace bundle: {error}"))?;
+    std::fs::write(trace_output, json).map_err(|error| {
+        format!(
+            "failed to write trace bundle {}: {error}",
+            manifest_path_string(trace_output)
+        )
+    })
+}
+
+fn bytecode_digest(bytecode: &BytecodePreprocessing) -> Result<[u8; 32], String> {
+    let bytes = serde_json::to_vec(bytecode)
+        .map_err(|error| format!("failed to serialize bytecode for digest: {error}"))?;
+    Ok(Sha3_256::digest(bytes).into())
 }
 
 fn load_trace_file(trace_input: &Path) -> Result<LoadedTraceBlocks, String> {
@@ -363,13 +627,46 @@ fn load_trace_file(trace_input: &Path) -> Result<LoadedTraceBlocks, String> {
             manifest_path_string(trace_input)
         )
     })?;
-    if document.schema_version != TRACE_FILE_SCHEMA_VERSION {
+    if document.schema_version != TRACE_FILE_SCHEMA_VERSION
+        && document.schema_version != TRACE_BUNDLE_SCHEMA_VERSION
+    {
         return Err(format!(
-            "unsupported trace schema version {:?}; expected {:?}",
-            document.schema_version, TRACE_FILE_SCHEMA_VERSION
+            "unsupported trace schema version {:?}; expected {:?} or {:?}",
+            document.schema_version, TRACE_FILE_SCHEMA_VERSION, TRACE_BUNDLE_SCHEMA_VERSION
         ));
     }
 
+    let (bytecode, program_digest, elf_sha3_256) =
+        match (document.schema_version.as_str(), document.program) {
+            (TRACE_FILE_SCHEMA_VERSION, None) => (BytecodePreprocessing::default(), None, None),
+            (TRACE_FILE_SCHEMA_VERSION, Some(_)) => {
+                return Err(
+                    "legacy trace-block files must not contain a program binding".to_string(),
+                )
+            }
+            (TRACE_BUNDLE_SCHEMA_VERSION, Some(program)) => {
+                let declared_program_digest =
+                    parse_hex_digest("program_digest_sha3_256", &program.program_digest_sha3_256)?;
+                let actual_program_digest = bytecode_digest(&program.bytecode)?;
+                if declared_program_digest != actual_program_digest {
+                    return Err(format!(
+                        "trace bundle bytecode digest mismatch: declared {}, computed {}",
+                        hex_digest(&declared_program_digest),
+                        hex_digest(&actual_program_digest)
+                    ));
+                }
+                let elf_sha3_256 = parse_hex_digest("elf_sha3_256", &program.elf_sha3_256)?;
+                (
+                    program.bytecode,
+                    Some(declared_program_digest),
+                    Some(elf_sha3_256),
+                )
+            }
+            (TRACE_BUNDLE_SCHEMA_VERSION, None) => {
+                return Err("trace bundle is missing its program binding".to_string())
+            }
+            _ => unreachable!("trace schema was validated above"),
+        };
     let blocks = document
         .blocks
         .into_iter()
@@ -379,11 +676,29 @@ fn load_trace_file(trace_input: &Path) -> Result<LoadedTraceBlocks, String> {
 
     Ok(LoadedTraceBlocks {
         blocks,
+        bytecode,
+        program_digest,
         file_metadata: Some(TraceFileMetadata {
             schema_version: document.schema_version,
             sha3_256: Sha3_256::digest(&input_bytes).into(),
+            elf_sha3_256,
         }),
     })
+}
+
+fn parse_hex_digest(label: &str, value: &str) -> Result<[u8; 32], String> {
+    if value.len() != 64 {
+        return Err(format!(
+            "{label} must contain exactly 64 hexadecimal digits"
+        ));
+    }
+    let mut digest = [0u8; 32];
+    for (index, byte) in digest.iter_mut().enumerate() {
+        let offset = index * 2;
+        *byte = u8::from_str_radix(&value[offset..offset + 2], 16)
+            .map_err(|_| format!("{label} contains a non-hexadecimal digit"))?;
+    }
+    Ok(digest)
 }
 
 fn validate_loaded_trace_blocks(blocks: &[TraceBlock]) -> Result<(), String> {
@@ -526,7 +841,11 @@ fn build_manifest_json(
     json.push(',');
     append_json_optional_string_field(&mut json, "trace_profile", selected_trace_profile(args));
     json.push(',');
-    append_json_optional_path_field(&mut json, "trace_input_path", args.trace_input.as_ref());
+    append_json_optional_path_field(&mut json, "trace_input_path", selected_trace_path(args));
+    json.push(',');
+    append_json_optional_path_field(&mut json, "elf_input_path", args.elf_input.as_ref());
+    json.push(',');
+    append_json_optional_path_field(&mut json, "trace_output_path", args.trace_output.as_ref());
     json.push(',');
     append_json_optional_string_field(
         &mut json,
@@ -584,12 +903,21 @@ fn build_manifest_json(
         (args.trace_source == TraceSource::Synthetic).then_some(args.cycles_per_block),
     );
     json.push(',');
+    append_json_optional_usize_field(
+        &mut json,
+        "trace_block_size",
+        (args.trace_source == TraceSource::Elf).then_some(args.trace_block_size),
+    );
+    json.push(',');
     append_json_usize_array_field(&mut json, "block_counts", block_counts);
     json.push(',');
-    append_json_usize_field(
+    append_json_optional_usize_field(
         &mut json,
         "program_digest_byte",
-        args.program_digest_byte as usize,
+        (trace_file_metadata
+            .and_then(|metadata| metadata.elf_sha3_256)
+            .is_none())
+        .then_some(args.program_digest_byte as usize),
     );
     json.push(',');
     append_json_usize_field(&mut json, "row_count", artifact.report.rows.len());
@@ -617,6 +945,14 @@ fn manifest_path_string(path: &Path) -> String {
 
 fn selected_trace_profile(args: &Args) -> Option<&'static str> {
     (args.trace_source == TraceSource::Synthetic).then(|| args.trace_profile.as_str())
+}
+
+fn selected_trace_path(args: &Args) -> Option<&PathBuf> {
+    match args.trace_source {
+        TraceSource::Synthetic => None,
+        TraceSource::TraceFile => args.trace_input.as_ref(),
+        TraceSource::Elf => args.trace_output.as_ref(),
+    }
 }
 
 fn hex_digest(digest: &[u8; 32]) -> String {
@@ -716,6 +1052,7 @@ mod tests {
         NovaBlockProofPipelineFinalProofSizeScalingRow, SPARTAN_FINAL_PROOF_SYSTEM_NAME,
         SPARTAN_PLACEHOLDER_PROOF_SYSTEM_NAME,
     };
+    use jolt_core::zkvm::r1cs::inputs::R1CSCycleInputs;
 
     #[test]
     fn default_block_counts_cover_every_prefix() {
@@ -723,6 +1060,12 @@ mod tests {
             trace_source: TraceSource::Synthetic,
             trace_profile: TraceProfile::SyntheticNoop,
             trace_input: None,
+            elf_input: None,
+            trace_output: None,
+            guest_input: None,
+            untrusted_advice: None,
+            trusted_advice: None,
+            trace_block_size: 1024,
             blocks: 3,
             cycles_per_block: 2,
             block_counts: Vec::new(),
@@ -731,7 +1074,17 @@ mod tests {
             program_digest_byte: 9,
         };
 
-        assert_eq!(normalized_block_counts(&args, 3).unwrap(), vec![1, 2, 3]);
+        assert_eq!(
+            normalized_block_counts(&args, 3, false).unwrap(),
+            vec![1, 2, 3]
+        );
+        assert_eq!(normalized_block_counts(&args, 3, true).unwrap(), vec![3]);
+
+        let mut partial_real_trace = args;
+        partial_real_trace.block_counts = vec![1, 3];
+        assert!(normalized_block_counts(&partial_real_trace, 3, true)
+            .unwrap_err()
+            .contains("external lookahead binding"));
     }
 
     #[test]
@@ -772,6 +1125,12 @@ mod tests {
             trace_source: TraceSource::Synthetic,
             trace_profile: TraceProfile::SyntheticNoop,
             trace_input: None,
+            elf_input: None,
+            trace_output: None,
+            guest_input: None,
+            untrusted_advice: None,
+            trusted_advice: None,
+            trace_block_size: 1024,
             blocks: 3,
             cycles_per_block: 2,
             block_counts: Vec::new(),
@@ -807,6 +1166,12 @@ mod tests {
             trace_source: TraceSource::Synthetic,
             trace_profile: TraceProfile::SyntheticNoop,
             trace_input: Some(PathBuf::from("traces/demo.json")),
+            elf_input: None,
+            trace_output: None,
+            guest_input: None,
+            untrusted_advice: None,
+            trusted_advice: None,
+            trace_block_size: 1024,
             blocks: 1,
             cycles_per_block: 2,
             block_counts: Vec::new(),
@@ -822,6 +1187,12 @@ mod tests {
             trace_source: TraceSource::TraceFile,
             trace_profile: TraceProfile::SyntheticNoop,
             trace_input: None,
+            elf_input: None,
+            trace_output: None,
+            guest_input: None,
+            untrusted_advice: None,
+            trusted_advice: None,
+            trace_block_size: 1024,
             blocks: 1,
             cycles_per_block: 2,
             block_counts: Vec::new(),
@@ -841,6 +1212,12 @@ mod tests {
             trace_source: TraceSource::TraceFile,
             trace_profile: TraceProfile::SyntheticNoop,
             trace_input: Some(trace_input.clone()),
+            elf_input: None,
+            trace_output: None,
+            guest_input: None,
+            untrusted_advice: None,
+            trusted_advice: None,
+            trace_block_size: 1024,
             blocks: 1,
             cycles_per_block: 2,
             block_counts: Vec::new(),
@@ -868,7 +1245,125 @@ mod tests {
             metadata.sha3_256,
             <[u8; 32]>::from(Sha3_256::digest(input_bytes))
         );
-        assert_eq!(normalized_block_counts(&args, 2).unwrap(), vec![1, 2]);
+        assert_eq!(
+            normalized_block_counts(&args, 2, false).unwrap(),
+            vec![1, 2]
+        );
+    }
+
+    #[test]
+    fn elf_exporter_traces_binds_and_reads_back_real_program() {
+        let elf_path = temp_manifest_path("elf-export", "tiny-rv64.elf");
+        let trace_path = elf_path.with_file_name("tiny-rv64.trace.json");
+        std::fs::create_dir_all(elf_path.parent().unwrap()).unwrap();
+        let elf = tiny_rv64_elf();
+        std::fs::write(&elf_path, &elf).unwrap();
+        let args = Args {
+            trace_source: TraceSource::Elf,
+            trace_profile: TraceProfile::SyntheticNoop,
+            trace_input: None,
+            elf_input: Some(elf_path.clone()),
+            trace_output: Some(trace_path.clone()),
+            guest_input: None,
+            untrusted_advice: None,
+            trusted_advice: None,
+            trace_block_size: 1,
+            blocks: 1,
+            cycles_per_block: 1,
+            block_counts: Vec::new(),
+            output: PathBuf::from(DEFAULT_OUTPUT_PATH),
+            manifest_output: None,
+            program_digest_byte: 9,
+        };
+
+        let loaded = load_trace_blocks(&args).unwrap();
+        let metadata = loaded.file_metadata.as_ref().unwrap();
+        let expected_elf_digest = <[u8; 32]>::from(Sha3_256::digest(&elf));
+
+        assert_eq!(loaded.blocks.len(), 2);
+        assert_eq!(loaded.blocks[0].start_state.pc, RAM_START_ADDRESS);
+        assert_eq!(loaded.blocks[1].start_state.pc, RAM_START_ADDRESS + 4);
+        assert_eq!(loaded.blocks[0].end_state, loaded.blocks[1].start_state);
+        assert!(loaded.blocks[1].end_state.terminated);
+        assert!(loaded.bytecode.code_size >= 2);
+        let first_row = R1CSCycleInputs::from_cycle_with_next::<ark_bn254::Fr>(
+            &loaded.bytecode,
+            &loaded.blocks[0].cycles[0],
+            Some(&loaded.blocks[1].cycles[0]),
+        );
+        assert_eq!(first_row.unexpanded_pc, RAM_START_ADDRESS);
+        assert_eq!(first_row.next_unexpanded_pc, RAM_START_ADDRESS + 4);
+        assert!(!first_row.should_branch);
+        assert!(!first_row.flags[jolt_riscv::CircuitFlags::Jump as usize]);
+        assert!(!first_row.flags[jolt_riscv::CircuitFlags::DoNotUpdateUnexpandedPC as usize]);
+        assert!(!first_row.flags[jolt_riscv::CircuitFlags::IsCompressed as usize]);
+        assert_eq!(
+            loaded.program_digest,
+            Some(bytecode_digest(&loaded.bytecode).unwrap())
+        );
+        assert_eq!(metadata.schema_version, TRACE_BUNDLE_SCHEMA_VERSION);
+        assert_eq!(metadata.elf_sha3_256, Some(expected_elf_digest));
+        assert!(trace_path.is_file());
+
+        let declared_digest = hex_digest(&loaded.program_digest.unwrap());
+        let tampered_path = trace_path.with_file_name("tiny-rv64.tampered.trace.json");
+        let tampered = std::fs::read_to_string(&trace_path)
+            .unwrap()
+            .replace(&declared_digest, &"00".repeat(32));
+        std::fs::write(&tampered_path, tampered).unwrap();
+        assert!(load_trace_file(&tampered_path)
+            .unwrap_err()
+            .contains("bytecode digest mismatch"));
+
+        std::fs::remove_file(tampered_path).unwrap();
+        std::fs::remove_file(trace_path).unwrap();
+        std::fs::remove_file(elf_path).unwrap();
+        std::fs::remove_dir(args.elf_input.unwrap().parent().unwrap()).unwrap();
+    }
+
+    #[test]
+    fn elf_runner_reaches_nova_folding_and_spartan_report() {
+        let elf_path = temp_manifest_path("elf-e2e", "tiny-rv64.elf");
+        let directory = elf_path.parent().unwrap().to_path_buf();
+        let trace_path = directory.join("tiny-rv64.trace.json");
+        let report_path = directory.join("report.json");
+        let manifest_path = directory.join("report.manifest.json");
+        std::fs::create_dir_all(&directory).unwrap();
+        std::fs::write(&elf_path, tiny_rv64_elf()).unwrap();
+        let args = Args {
+            trace_source: TraceSource::Elf,
+            trace_profile: TraceProfile::SyntheticNoop,
+            trace_input: None,
+            elf_input: Some(elf_path.clone()),
+            trace_output: Some(trace_path.clone()),
+            guest_input: None,
+            untrusted_advice: None,
+            trusted_advice: None,
+            trace_block_size: 1,
+            blocks: 1,
+            cycles_per_block: 1,
+            block_counts: vec![2],
+            output: report_path.clone(),
+            manifest_output: Some(manifest_path.clone()),
+            program_digest_byte: 9,
+        };
+
+        run(args).unwrap();
+
+        let report = std::fs::read_to_string(&report_path).unwrap();
+        let manifest = std::fs::read_to_string(&manifest_path).unwrap();
+        assert!(report.contains("\"block_count\":2"));
+        assert!(report.contains("\"recursive_snark_bytes_len\":"));
+        assert!(manifest.contains("\"trace_source\":\"elf\""));
+        assert!(manifest.contains("\"trace_block_size\":1"));
+        assert!(manifest.contains(&format!(
+            "\"trace_file_schema_version\":\"{TRACE_BUNDLE_SCHEMA_VERSION}\""
+        )));
+
+        for path in [manifest_path, report_path, trace_path, elf_path] {
+            std::fs::remove_file(path).unwrap();
+        }
+        std::fs::remove_dir(directory).unwrap();
     }
 
     #[test]
@@ -928,6 +1423,12 @@ mod tests {
             trace_source: TraceSource::Synthetic,
             trace_profile: TraceProfile::SyntheticNoop,
             trace_input: None,
+            elf_input: None,
+            trace_output: None,
+            guest_input: None,
+            untrusted_advice: None,
+            trusted_advice: None,
+            trace_block_size: 1024,
             blocks: 2,
             cycles_per_block: 3,
             block_counts: vec![1, 2],
@@ -937,12 +1438,12 @@ mod tests {
             )),
             program_digest_byte: 11,
         };
-        let block_counts = normalized_block_counts(&args, 2).unwrap();
+        let block_counts = normalized_block_counts(&args, 2, false).unwrap();
         let artifact = sample_benchmark_artifact();
         let manifest_path = normalized_manifest_output(&args.output, args.manifest_output.as_ref());
         let json = build_manifest_json(&args, &block_counts, 2, None, &artifact, &manifest_path);
 
-        assert!(json.contains("\"schema_version\":\"jolt-nova-benchmark-runner-v1\""));
+        assert!(json.contains("\"schema_version\":\"jolt-nova-benchmark-runner-v2\""));
         assert!(json.contains("\"runner\":\"jolt_nova_final_proof_size_benchmark\""));
         assert!(json.contains("\"trace_source\":\"synthetic\""));
         assert!(json.contains("\"trace_profile\":\"synthetic-noop\""));
@@ -975,6 +1476,12 @@ mod tests {
             trace_input: Some(PathBuf::from(
                 "jolt-core/examples/fixtures/jolt_nova_trace_blocks_v1.json",
             )),
+            elf_input: None,
+            trace_output: None,
+            guest_input: None,
+            untrusted_advice: None,
+            trusted_advice: None,
+            trace_block_size: 1024,
             blocks: 2,
             cycles_per_block: 2,
             block_counts: vec![1, 2],
@@ -987,6 +1494,7 @@ mod tests {
         let metadata = TraceFileMetadata {
             schema_version: TRACE_FILE_SCHEMA_VERSION.to_string(),
             sha3_256: [0xabu8; 32],
+            elf_sha3_256: None,
         };
         let json = build_manifest_json(
             &args,
@@ -1015,6 +1523,12 @@ mod tests {
             trace_source: TraceSource::Synthetic,
             trace_profile: TraceProfile::SyntheticNoop,
             trace_input: None,
+            elf_input: None,
+            trace_output: None,
+            guest_input: None,
+            untrusted_advice: None,
+            trusted_advice: None,
+            trace_block_size: 1024,
             blocks: 1,
             cycles_per_block: 2,
             block_counts: vec![1],
@@ -1030,7 +1544,7 @@ mod tests {
         std::fs::remove_file(&manifest_path).unwrap();
         std::fs::remove_dir(manifest_path.parent().unwrap()).unwrap();
 
-        assert!(manifest.contains("\"schema_version\":\"jolt-nova-benchmark-runner-v1\""));
+        assert!(manifest.contains("\"schema_version\":\"jolt-nova-benchmark-runner-v2\""));
         assert!(manifest.contains("\"block_counts\":[1]"));
     }
 
@@ -1101,6 +1615,62 @@ mod tests {
 
     fn repeated_digest(byte: u8) -> [u8; 32] {
         [byte; 32]
+    }
+
+    fn tiny_rv64_elf() -> Vec<u8> {
+        const TEXT_OFFSET: usize = 64;
+        const STRING_TABLE_OFFSET: usize = 72;
+        const SECTION_HEADERS_OFFSET: usize = 96;
+        const SECTION_HEADER_SIZE: usize = 64;
+        const SECTION_COUNT: usize = 3;
+        const TEXT_ADDRESS: u64 = RAM_START_ADDRESS;
+        const STRING_TABLE: &[u8] = b"\0.text\0.shstrtab\0";
+
+        let mut elf = vec![0u8; SECTION_HEADERS_OFFSET + SECTION_COUNT * SECTION_HEADER_SIZE];
+        elf[0..16].copy_from_slice(&[0x7f, b'E', b'L', b'F', 2, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+        write_u16(&mut elf, 16, 2);
+        write_u16(&mut elf, 18, 243);
+        write_u32(&mut elf, 20, 1);
+        write_u64(&mut elf, 24, TEXT_ADDRESS);
+        write_u64(&mut elf, 40, SECTION_HEADERS_OFFSET as u64);
+        write_u16(&mut elf, 52, 64);
+        write_u16(&mut elf, 58, SECTION_HEADER_SIZE as u16);
+        write_u16(&mut elf, 60, SECTION_COUNT as u16);
+        write_u16(&mut elf, 62, 2);
+
+        write_u32(&mut elf, TEXT_OFFSET, 0x0010_0093); // addi x1, x0, 1
+        write_u32(&mut elf, TEXT_OFFSET + 4, 0x0000_006f); // jal x0, 0
+        elf[STRING_TABLE_OFFSET..STRING_TABLE_OFFSET + STRING_TABLE.len()]
+            .copy_from_slice(STRING_TABLE);
+
+        let text_header = SECTION_HEADERS_OFFSET + SECTION_HEADER_SIZE;
+        write_u32(&mut elf, text_header, 1);
+        write_u32(&mut elf, text_header + 4, 1);
+        write_u64(&mut elf, text_header + 8, 0x6);
+        write_u64(&mut elf, text_header + 16, TEXT_ADDRESS);
+        write_u64(&mut elf, text_header + 24, TEXT_OFFSET as u64);
+        write_u64(&mut elf, text_header + 32, 8);
+        write_u64(&mut elf, text_header + 48, 4);
+
+        let string_header = SECTION_HEADERS_OFFSET + 2 * SECTION_HEADER_SIZE;
+        write_u32(&mut elf, string_header, 7);
+        write_u32(&mut elf, string_header + 4, 3);
+        write_u64(&mut elf, string_header + 24, STRING_TABLE_OFFSET as u64);
+        write_u64(&mut elf, string_header + 32, STRING_TABLE.len() as u64);
+        write_u64(&mut elf, string_header + 48, 1);
+        elf
+    }
+
+    fn write_u16(bytes: &mut [u8], offset: usize, value: u16) {
+        bytes[offset..offset + 2].copy_from_slice(&value.to_le_bytes());
+    }
+
+    fn write_u32(bytes: &mut [u8], offset: usize, value: u32) {
+        bytes[offset..offset + 4].copy_from_slice(&value.to_le_bytes());
+    }
+
+    fn write_u64(bytes: &mut [u8], offset: usize, value: u64) {
+        bytes[offset..offset + 8].copy_from_slice(&value.to_le_bytes());
     }
 
     fn trace_fixture_path() -> PathBuf {

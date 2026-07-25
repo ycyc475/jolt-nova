@@ -42,3 +42,6 @@ jobs:
 
       - name: Test jolt-core Nova block path
         run: cargo test --locked -p jolt-core --lib --no-default-features --features nova block
+
+      - name: Test real ELF trace bundle to Nova and Spartan
+        run: cargo test --locked -p jolt-core --example jolt_nova_final_proof_size_benchmark --no-default-features --features nova
