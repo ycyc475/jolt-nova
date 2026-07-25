@@ -20,10 +20,6 @@ on:
         description: Anthropic per-routine bearer token (`sk-ant-oat01-...`)
         required: true
 
-permissions:
-  contents: read
-  pull-requests: write
-
 jobs:
   fire:
     runs-on: ubuntu-latest

@@ -3,6 +3,8 @@ name: Claude Routines
 # Fires Claude Code routines when specific labels are added to a PR.
 # Uses `pull_request_target` so secrets are available on PRs from forks
 # (label application itself is already gated on write/triage permission).
+# Dependabot PRs are excluded because GitHub gives them a read-only token and
+# does not expose Actions secrets, even for `pull_request_target`.
 
 on:
   pull_request_target:
@@ -11,7 +13,12 @@ on:
 jobs:
   code-review:
     name: Claude code review
-    if: github.event.label.name == 'claude-review-request'
+    if: >-
+      github.event.pull_request.user.login != 'dependabot[bot]' &&
+      github.event.label.name == 'claude-review-request'
+    permissions:
+      contents: read
+      pull-requests: write
     uses: ./.github/workflows/_fire-claude-routine.yml
     with:
       routine_id: trig_01KoydrLGJM8r8kj9LFZr5Ln
@@ -21,7 +28,12 @@ jobs:
 
   spec-review:
     name: Claude spec review
-    if: github.event.label.name == 'claude-spec-review-request'
+    if: >-
+      github.event.pull_request.user.login != 'dependabot[bot]' &&
+      github.event.label.name == 'claude-spec-review-request'
+    permissions:
+      contents: read
+      pull-requests: write
     uses: ./.github/workflows/_fire-claude-routine.yml
     with:
       routine_id: trig_01WNzoD27n9CQvy7o9bKobxa
