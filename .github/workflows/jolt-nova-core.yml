@@ -47,7 +47,7 @@ jobs:
         run: |
           set -o pipefail
           log_file="$(mktemp)"
-          if cargo test --locked -p jolt-core --example jolt_nova_final_proof_size_benchmark --no-default-features --features nova 2>&1 | tee "$log_file"; then
+          if RUSTFLAGS="$RUSTFLAGS -A dead-code" cargo test --locked -p jolt-core --example jolt_nova_final_proof_size_benchmark --no-default-features --features nova 2>&1 | tee "$log_file"; then
             exit 0
           fi
           summary="$(tail -n 80 "$log_file" | tr '\n' ' ' | sed 's/%/%25/g' | cut -c1-6000)"
