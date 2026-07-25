@@ -30,9 +30,21 @@ const MANIFEST_SCHEMA_VERSION: &str = "jolt-nova-benchmark-runner-v1";
 /// stage-8 JSON artifact under `benchmark-runs/` by default.
 #[derive(Debug, Clone, Parser)]
 struct Args {
+    /// Source used to obtain trace blocks.
+    #[arg(long, value_enum, default_value_t = TraceSource::Synthetic)]
+    trace_source: TraceSource,
+
     /// Synthetic trace profile to generate.
     #[arg(long, value_enum, default_value_t = TraceProfile::SyntheticNoop)]
     trace_profile: TraceProfile,
+
+    /// Input path for non-synthetic trace sources.
+    ///
+    /// `trace-file` is intentionally reserved in stage 8.7: the CLI surface and
+    /// manifest binding exist now, while the serialized trace loader will be
+    /// attached in a later stage.
+    #[arg(long)]
+    trace_input: Option<PathBuf>,
 
     /// Number of synthetic trace blocks to generate.
     #[arg(long, default_value_t = 2)]
@@ -65,6 +77,29 @@ struct Args {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+enum TraceSource {
+    /// Generate trace blocks locally from synthetic runner options.
+    Synthetic,
+    /// Reserved CLI surface for a future serialized trace-block loader.
+    TraceFile,
+}
+
+impl TraceSource {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Synthetic => "synthetic",
+            Self::TraceFile => "trace-file",
+        }
+    }
+}
+
+impl fmt::Display for TraceSource {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 enum TraceProfile {
     /// Contiguous no-op blocks with stable machine boundary state.
     SyntheticNoop,
@@ -92,9 +127,8 @@ fn main() {
 }
 
 fn run(args: Args) -> Result<(), Box<dyn Error>> {
-    let block_counts = normalized_block_counts(&args).map_err(invalid_input)?;
-    let blocks = build_trace_blocks(args.trace_profile, args.blocks, args.cycles_per_block)
-        .map_err(invalid_input)?;
+    let blocks = load_trace_blocks(&args).map_err(invalid_input)?;
+    let block_counts = normalized_block_counts(&args, blocks.len()).map_err(invalid_input)?;
     let manifest_output = normalized_manifest_output(&args.output, args.manifest_output.as_ref());
     let bytecode = BytecodePreprocessing::default();
     let pipeline = BlockProofPipeline::<_, ark_bn254::Fr, NovaFoldingBackend>::with_backend(
@@ -109,10 +143,17 @@ fn run(args: Args) -> Result<(), Box<dyn Error>> {
         JoltNovaReportOutputFormat::Json,
         &args.output,
     )?;
-    write_manifest(&args, &block_counts, &artifact, &manifest_output)?;
+    write_manifest(
+        &args,
+        &block_counts,
+        blocks.len(),
+        &artifact,
+        &manifest_output,
+    )?;
 
     println!("wrote {}", manifest_path_string(&args.output));
     println!("manifest {}", manifest_path_string(&manifest_output));
+    println!("trace_source {}", args.trace_source);
     println!("trace_profile {}", args.trace_profile);
     println!("format {}", artifact.output_format);
     println!("rows {}", artifact.report.rows.len());
@@ -153,21 +194,18 @@ fn default_manifest_output_path(report_output: &Path) -> PathBuf {
     manifest_output
 }
 
-fn normalized_block_counts(args: &Args) -> Result<Vec<usize>, String> {
-    if args.blocks == 0 {
-        return Err("blocks must be greater than zero".to_string());
-    }
-    if args.cycles_per_block == 0 {
-        return Err("cycles-per-block must be greater than zero".to_string());
+fn normalized_block_counts(args: &Args, loaded_blocks: usize) -> Result<Vec<usize>, String> {
+    if loaded_blocks == 0 {
+        return Err("loaded trace must contain at least one block".to_string());
     }
 
     let block_counts = if args.block_counts.is_empty() {
-        (1..=args.blocks).collect::<Vec<_>>()
+        (1..=loaded_blocks).collect::<Vec<_>>()
     } else {
         args.block_counts.clone()
     };
 
-    validate_block_counts(args.blocks, &block_counts)?;
+    validate_block_counts(loaded_blocks, &block_counts)?;
     Ok(block_counts)
 }
 
@@ -190,6 +228,29 @@ fn validate_block_counts(blocks: usize, block_counts: &[usize]) -> Result<(), St
     }
 
     Ok(())
+}
+
+fn load_trace_blocks(args: &Args) -> Result<Vec<TraceBlock>, String> {
+    match args.trace_source {
+        TraceSource::Synthetic => {
+            if let Some(trace_input) = &args.trace_input {
+                return Err(format!(
+                    "trace-input {} is only valid with --trace-source trace-file",
+                    manifest_path_string(trace_input)
+                ));
+            }
+            build_trace_blocks(args.trace_profile, args.blocks, args.cycles_per_block)
+        }
+        TraceSource::TraceFile => {
+            let trace_input = args.trace_input.as_ref().ok_or_else(|| {
+                "trace-source trace-file requires --trace-input <path>".to_string()
+            })?;
+            Err(format!(
+                "trace-source trace-file is reserved for a future serialized trace loader: {}",
+                manifest_path_string(trace_input)
+            ))
+        }
+    }
 }
 
 fn build_trace_blocks(
@@ -237,6 +298,7 @@ fn build_noop_trace_blocks(
 fn write_manifest(
     args: &Args,
     block_counts: &[usize],
+    source_block_count: usize,
     artifact: &NovaBlockProofPipelineFinalProofSizeBenchmarkArtifact,
     manifest_output: &Path,
 ) -> io::Result<()> {
@@ -248,13 +310,20 @@ fn write_manifest(
 
     std::fs::write(
         manifest_output,
-        build_manifest_json(args, block_counts, artifact, manifest_output),
+        build_manifest_json(
+            args,
+            block_counts,
+            source_block_count,
+            artifact,
+            manifest_output,
+        ),
     )
 }
 
 fn build_manifest_json(
     args: &Args,
     block_counts: &[usize],
+    source_block_count: usize,
     artifact: &NovaBlockProofPipelineFinalProofSizeBenchmarkArtifact,
     manifest_output: &Path,
 ) -> String {
@@ -274,7 +343,11 @@ fn build_manifest_json(
     json.push(',');
     append_json_string_field(&mut json, "runner", RUNNER_NAME);
     json.push(',');
+    append_json_string_field(&mut json, "trace_source", args.trace_source.as_str());
+    json.push(',');
     append_json_string_field(&mut json, "trace_profile", args.trace_profile.as_str());
+    json.push(',');
+    append_json_optional_path_field(&mut json, "trace_input_path", args.trace_input.as_ref());
     json.push(',');
     append_json_string_field(
         &mut json,
@@ -305,6 +378,8 @@ fn build_manifest_json(
         "manifest_path",
         &manifest_path_string(manifest_output),
     );
+    json.push(',');
+    append_json_usize_field(&mut json, "source_block_count", source_block_count);
     json.push(',');
     append_json_usize_field(&mut json, "blocks", args.blocks);
     json.push(',');
@@ -366,6 +441,15 @@ fn append_json_usize_array_field(json: &mut String, name: &str, values: &[usize]
     json.push(']');
 }
 
+fn append_json_optional_path_field(json: &mut String, name: &str, value: Option<&PathBuf>) {
+    append_json_string(json, name);
+    json.push(':');
+    match value {
+        Some(path) => append_json_string(json, &manifest_path_string(path)),
+        None => json.push_str("null"),
+    }
+}
+
 fn append_json_string(json: &mut String, value: &str) {
     json.push('"');
     for ch in value.chars() {
@@ -411,7 +495,9 @@ mod tests {
     #[test]
     fn default_block_counts_cover_every_prefix() {
         let args = Args {
+            trace_source: TraceSource::Synthetic,
             trace_profile: TraceProfile::SyntheticNoop,
+            trace_input: None,
             blocks: 3,
             cycles_per_block: 2,
             block_counts: Vec::new(),
@@ -420,7 +506,7 @@ mod tests {
             program_digest_byte: 9,
         };
 
-        assert_eq!(normalized_block_counts(&args).unwrap(), vec![1, 2, 3]);
+        assert_eq!(normalized_block_counts(&args, 3).unwrap(), vec![1, 2, 3]);
     }
 
     #[test]
@@ -457,7 +543,18 @@ mod tests {
 
     #[test]
     fn noop_trace_blocks_are_contiguous() {
-        let blocks = build_trace_blocks(TraceProfile::SyntheticNoop, 3, 2).unwrap();
+        let args = Args {
+            trace_source: TraceSource::Synthetic,
+            trace_profile: TraceProfile::SyntheticNoop,
+            trace_input: None,
+            blocks: 3,
+            cycles_per_block: 2,
+            block_counts: Vec::new(),
+            output: PathBuf::from(DEFAULT_OUTPUT_PATH),
+            manifest_output: None,
+            program_digest_byte: 9,
+        };
+        let blocks = load_trace_blocks(&args).unwrap();
 
         assert_eq!(blocks.len(), 3);
         assert_eq!(blocks[0].block_index, 0);
@@ -478,9 +575,59 @@ mod tests {
     }
 
     #[test]
+    fn trace_source_validates_reserved_trace_file_inputs() {
+        let synthetic_with_input = Args {
+            trace_source: TraceSource::Synthetic,
+            trace_profile: TraceProfile::SyntheticNoop,
+            trace_input: Some(PathBuf::from("traces/demo.json")),
+            blocks: 1,
+            cycles_per_block: 2,
+            block_counts: Vec::new(),
+            output: PathBuf::from(DEFAULT_OUTPUT_PATH),
+            manifest_output: None,
+            program_digest_byte: 9,
+        };
+        assert!(load_trace_blocks(&synthetic_with_input)
+            .unwrap_err()
+            .contains("only valid with --trace-source trace-file"));
+
+        let trace_file_without_input = Args {
+            trace_source: TraceSource::TraceFile,
+            trace_profile: TraceProfile::SyntheticNoop,
+            trace_input: None,
+            blocks: 1,
+            cycles_per_block: 2,
+            block_counts: Vec::new(),
+            output: PathBuf::from(DEFAULT_OUTPUT_PATH),
+            manifest_output: None,
+            program_digest_byte: 9,
+        };
+        assert!(load_trace_blocks(&trace_file_without_input)
+            .unwrap_err()
+            .contains("requires --trace-input"));
+
+        let trace_file_with_input = Args {
+            trace_source: TraceSource::TraceFile,
+            trace_profile: TraceProfile::SyntheticNoop,
+            trace_input: Some(PathBuf::from("traces/demo.json")),
+            blocks: 1,
+            cycles_per_block: 2,
+            block_counts: Vec::new(),
+            output: PathBuf::from(DEFAULT_OUTPUT_PATH),
+            manifest_output: None,
+            program_digest_byte: 9,
+        };
+        assert!(load_trace_blocks(&trace_file_with_input)
+            .unwrap_err()
+            .contains("reserved for a future serialized trace loader"));
+    }
+
+    #[test]
     fn manifest_json_records_runner_inputs_and_outputs() {
         let args = Args {
+            trace_source: TraceSource::Synthetic,
             trace_profile: TraceProfile::SyntheticNoop,
+            trace_input: None,
             blocks: 2,
             cycles_per_block: 3,
             block_counts: vec![1, 2],
@@ -490,14 +637,16 @@ mod tests {
             )),
             program_digest_byte: 11,
         };
-        let block_counts = normalized_block_counts(&args).unwrap();
+        let block_counts = normalized_block_counts(&args, 2).unwrap();
         let artifact = sample_benchmark_artifact();
         let manifest_path = normalized_manifest_output(&args.output, args.manifest_output.as_ref());
-        let json = build_manifest_json(&args, &block_counts, &artifact, &manifest_path);
+        let json = build_manifest_json(&args, &block_counts, 2, &artifact, &manifest_path);
 
         assert!(json.contains("\"schema_version\":\"jolt-nova-benchmark-runner-v1\""));
         assert!(json.contains("\"runner\":\"jolt_nova_final_proof_size_benchmark\""));
+        assert!(json.contains("\"trace_source\":\"synthetic\""));
         assert!(json.contains("\"trace_profile\":\"synthetic-noop\""));
+        assert!(json.contains("\"trace_input_path\":null"));
         assert!(json.contains("\"report_schema_version\":\"jolt-nova-report-v1\""));
         assert!(json.contains("\"report_kind\":\"final-proof-size-scaling\""));
         assert!(json.contains("\"report_output_format\":\"json\""));
@@ -505,6 +654,7 @@ mod tests {
         assert!(
             json.contains("\"manifest_path\":\"benchmark-runs/jolt-nova/report.manifest.json\"")
         );
+        assert!(json.contains("\"source_block_count\":2"));
         assert!(json.contains("\"blocks\":2"));
         assert!(json.contains("\"cycles_per_block\":3"));
         assert!(json.contains("\"block_counts\":[1,2]"));
@@ -518,7 +668,9 @@ mod tests {
     #[test]
     fn write_manifest_creates_parent_directory() {
         let args = Args {
+            trace_source: TraceSource::Synthetic,
             trace_profile: TraceProfile::SyntheticNoop,
+            trace_input: None,
             blocks: 1,
             cycles_per_block: 2,
             block_counts: vec![1],
@@ -529,7 +681,7 @@ mod tests {
         let artifact = sample_benchmark_artifact();
         let manifest_path = temp_manifest_path("manifest-write", "report.manifest.json");
 
-        write_manifest(&args, &[1], &artifact, &manifest_path).unwrap();
+        write_manifest(&args, &[1], 1, &artifact, &manifest_path).unwrap();
         let manifest = std::fs::read_to_string(&manifest_path).unwrap();
         std::fs::remove_file(&manifest_path).unwrap();
         std::fs::remove_dir(manifest_path.parent().unwrap()).unwrap();
