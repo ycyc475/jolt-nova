@@ -112,6 +112,7 @@ ignored = ["prost"]
 criterion.workspace = true
 iai-callgrind.workspace = true
 serial_test.workspace = true
+serde_json.workspace = true
 tracer = { workspace = true, default-features = false, features = [
   "std",
   "test-utils",
