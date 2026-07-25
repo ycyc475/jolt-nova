@@ -37,9 +37,12 @@ const DEFAULT_OUTPUT_PATH: &str = "benchmark-runs/jolt-nova/final-proof-size-sca
 const RUNNER_NAME: &str = "jolt_nova_final_proof_size_benchmark";
 const MANIFEST_SCHEMA_VERSION: &str = "jolt-nova-benchmark-runner-v3";
 const PERFORMANCE_SCHEMA_VERSION: &str = "jolt-nova-performance-baseline-v1";
+const MULTI_RUN_SCHEMA_VERSION: &str = "jolt-nova-multi-run-baseline-v1";
+const PRODUCTION_FIXTURE_SCHEMA_VERSION: &str = "jolt-nova-production-fixtures-v1";
 const TRACE_FILE_SCHEMA_VERSION: &str = "jolt-nova-trace-blocks-v1";
 const TRACE_BUNDLE_SCHEMA_VERSION: &str = "jolt-nova-trace-bundle-v1";
 const MAX_MEMORY_SAMPLE_INTERVAL_MS: u64 = 1_000;
+const MAX_BENCHMARK_RUNS: usize = 100;
 
 /// Jolt-Nova runner for synthetic, serialized, and real RV64 ELF trace blocks.
 ///
@@ -124,6 +127,32 @@ struct Args {
     /// Repeated byte used to form the synthetic program digest.
     #[arg(long, default_value_t = 9)]
     program_digest_byte: u8,
+
+    /// Number of measured end-to-end runs included in the aggregate baseline.
+    #[arg(long, default_value_t = 1)]
+    measurement_runs: usize,
+
+    /// Number of unmeasured warm-up runs performed before measurement.
+    #[arg(long, default_value_t = 0)]
+    warmup_runs: usize,
+
+    /// Optional aggregate multi-run baseline artifact path.
+    ///
+    /// With multiple measured runs, the default is `<report-stem>.aggregate.json`.
+    #[arg(long)]
+    aggregate_output: Option<PathBuf>,
+
+    /// Optional prior aggregate artifact used for an automated regression check.
+    #[arg(long)]
+    baseline_input: Option<PathBuf>,
+
+    /// Maximum allowed regression for time, throughput, and peak-memory metrics.
+    #[arg(long, default_value_t = 10.0)]
+    max_regression_percent: f64,
+
+    /// Built-in production-size RV64 guest used with `--trace-source fixture`.
+    #[arg(long, value_enum, default_value_t = ProductionFixture::CpuLookup64k)]
+    fixture: ProductionFixture,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
@@ -134,6 +163,8 @@ enum TraceSource {
     TraceFile,
     /// Execute an RV64 ELF, export a trace bundle, then read it back for proving.
     Elf,
+    /// Execute a built-in, versioned production-size RV64 guest fixture.
+    Fixture,
 }
 
 impl TraceSource {
@@ -142,11 +173,71 @@ impl TraceSource {
             Self::Synthetic => "synthetic",
             Self::TraceFile => "trace-file",
             Self::Elf => "elf",
+            Self::Fixture => "fixture",
         }
     }
 }
 
 impl fmt::Display for TraceSource {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+enum ProductionFixture {
+    /// Register, arithmetic, branch, and instruction-lookup workload (~64K cycles).
+    CpuLookup64k,
+    /// Stack load/store, register, branch, and instruction-lookup workload (~80K cycles).
+    RamLookup80k,
+}
+
+impl ProductionFixture {
+    const ITERATIONS: usize = 16_384;
+
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::CpuLookup64k => "cpu-lookup-64k",
+            Self::RamLookup80k => "ram-lookup-80k",
+        }
+    }
+
+    fn elf_bytes(self) -> Vec<u8> {
+        let instructions = match self {
+            Self::CpuLookup64k => vec![
+                encode_lui(1, 4),
+                encode_addi(1, 1, 0),
+                encode_addi(2, 0, 0),
+                0x0011_0133, // add x2, x2, x1
+                encode_addi(1, 1, -1),
+                encode_bne(1, 0, -8),
+                0x0000_006f, // canonical Jolt termination
+            ],
+            Self::RamLookup80k => vec![
+                encode_lui(1, 4),
+                encode_addi(1, 1, 0),
+                0x0000_1117, // auipc x2, 1; deterministic writable address
+                encode_addi(3, 0, 0),
+                0xfe31_3c23, // sd x3, -8(x2)
+                0xff81_3203, // ld x4, -8(x2)
+                encode_addi(3, 3, 1),
+                encode_addi(1, 1, -1),
+                encode_bne(1, 0, -16),
+                0x0000_006f, // canonical Jolt termination
+            ],
+        };
+        rv64_text_elf(&instructions)
+    }
+
+    fn expected_active_cycles(self) -> usize {
+        match self {
+            Self::CpuLookup64k => 3 + 3 * Self::ITERATIONS + 1,
+            Self::RamLookup80k => 4 + 5 * Self::ITERATIONS + 1,
+        }
+    }
+}
+
+impl fmt::Display for ProductionFixture {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(self.as_str())
     }
@@ -196,6 +287,7 @@ struct PerformanceBaselineArtifact {
     build_profile: String,
     target_os: String,
     target_arch: String,
+    workload_sha3_256: String,
     source_block_count: usize,
     reported_block_counts: Vec<usize>,
     largest_reported_block_count: usize,
@@ -233,6 +325,76 @@ struct PerformanceMemory {
     initial_physical_bytes: Option<u64>,
     peak_physical_bytes: Option<u64>,
     peak_delta_bytes: Option<u64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+struct MultiRunBaselineArtifact {
+    schema_version: String,
+    runner: String,
+    trace_source: String,
+    fixture: Option<String>,
+    fixture_schema_version: Option<String>,
+    build_profile: String,
+    target_os: String,
+    target_arch: String,
+    workload_sha3_256: String,
+    measurement_runs: usize,
+    warmup_runs: usize,
+    source_block_count: usize,
+    reported_block_counts: Vec<usize>,
+    stats: MultiRunStatistics,
+    samples: Vec<PerformanceBaselineArtifact>,
+    comparison: Option<BaselineComparison>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+struct MultiRunStatistics {
+    trace_load_ms: SummaryStatistics,
+    nova_fold_and_spartan_report_ms: SummaryStatistics,
+    measured_total_ms: SummaryStatistics,
+    proving_processed_active_cycles_per_second: Option<SummaryStatistics>,
+    end_to_end_processed_active_cycles_per_second: Option<SummaryStatistics>,
+    peak_delta_bytes: Option<SummaryStatistics>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+struct SummaryStatistics {
+    count: usize,
+    min: f64,
+    median: f64,
+    mean: f64,
+    max: f64,
+    standard_deviation: f64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+struct BaselineComparison {
+    baseline_path: String,
+    max_regression_percent: f64,
+    passed: bool,
+    metrics: Vec<MetricComparison>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+struct MetricComparison {
+    metric: String,
+    direction: MetricDirection,
+    baseline_mean: f64,
+    current_mean: f64,
+    regression_percent: f64,
+    passed: bool,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+enum MetricDirection {
+    LowerIsBetter,
+    HigherIsBetter,
 }
 
 #[derive(Debug)]
@@ -444,6 +606,68 @@ fn main() {
 
 fn run(args: Args) -> Result<(), Box<dyn Error>> {
     validate_runner_args(&args).map_err(invalid_input)?;
+    for warmup_index in 0..args.warmup_runs {
+        println!("warmup_run {}/{}", warmup_index + 1, args.warmup_runs);
+        run_once(&args)?;
+    }
+
+    let mut samples = Vec::with_capacity(args.measurement_runs);
+    for run_index in 0..args.measurement_runs {
+        println!(
+            "measurement_run {}/{}",
+            run_index + 1,
+            args.measurement_runs
+        );
+        samples.push(run_once(&args)?);
+    }
+
+    let should_write_aggregate = args.measurement_runs > 1
+        || args.aggregate_output.is_some()
+        || args.baseline_input.is_some();
+    if should_write_aggregate {
+        let aggregate_output =
+            normalized_aggregate_output(&args.output, args.aggregate_output.as_ref());
+        let baseline = args
+            .baseline_input
+            .as_deref()
+            .map(read_multi_run_baseline)
+            .transpose()?;
+        let mut aggregate = build_multi_run_baseline(&args, samples)?;
+        if let Some((baseline_path, baseline)) =
+            args.baseline_input.as_deref().zip(baseline.as_ref())
+        {
+            aggregate.comparison = Some(compare_multi_run_baselines(
+                &aggregate,
+                baseline,
+                baseline_path,
+                args.max_regression_percent,
+            )?);
+        }
+        write_multi_run_baseline(&aggregate_output, &aggregate)?;
+        println!("aggregate {}", manifest_path_string(&aggregate_output));
+        if let Some(comparison) = &aggregate.comparison {
+            println!("baseline_comparison_passed {}", comparison.passed);
+            if !comparison.passed {
+                let failures = comparison
+                    .metrics
+                    .iter()
+                    .filter(|metric| !metric.passed)
+                    .map(|metric| format!("{}={:.2}%", metric.metric, metric.regression_percent))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                return Err(invalid_input(format!(
+                    "multi-run baseline regression exceeded {:.2}%: {failures}",
+                    args.max_regression_percent
+                ))
+                .into());
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn run_once(args: &Args) -> Result<PerformanceBaselineArtifact, Box<dyn Error>> {
     let measured_total_started = Instant::now();
     let memory_sampler = PeakMemorySampler::start(args.memory_sample_interval_ms);
 
@@ -460,6 +684,11 @@ fn run(args: Args) -> Result<(), Box<dyn Error>> {
     let program_digest = loaded_trace
         .program_digest
         .unwrap_or([args.program_digest_byte; 32]);
+    let workload_digest = loaded_trace
+        .file_metadata
+        .as_ref()
+        .map(|metadata| metadata.sha3_256)
+        .unwrap_or_else(|| synthetic_workload_digest(args, program_digest));
     let pipeline = BlockProofPipeline::<_, ark_bn254::Fr, NovaFoldingBackend>::with_backend(
         program_digest,
         NovaFoldingBackend::default(),
@@ -499,6 +728,7 @@ fn run(args: Args) -> Result<(), Box<dyn Error>> {
         blocks,
         &manifest_output,
         &measurements,
+        workload_digest,
     );
     write_performance_artifact(&performance_output, &performance)?;
 
@@ -510,6 +740,7 @@ fn run(args: Args) -> Result<(), Box<dyn Error>> {
         "trace_profile {}",
         selected_trace_profile(&args).unwrap_or("none")
     );
+    println!("fixture {}", selected_fixture(args).unwrap_or("none"));
     if let Some(metadata) = &loaded_trace.file_metadata {
         println!("trace_file_schema {}", metadata.schema_version);
         println!("trace_input_sha3_256 {}", hex_digest(&metadata.sha3_256));
@@ -541,7 +772,7 @@ fn run(args: Args) -> Result<(), Box<dyn Error>> {
         );
     }
 
-    Ok(())
+    Ok(performance)
 }
 
 fn invalid_input(error: String) -> io::Error {
@@ -554,10 +785,25 @@ fn validate_runner_args(args: &Args) -> Result<(), String> {
             "memory-sample-interval-ms must be in 1..={MAX_MEMORY_SAMPLE_INTERVAL_MS}"
         ));
     }
+    if !(1..=MAX_BENCHMARK_RUNS).contains(&args.measurement_runs) {
+        return Err(format!(
+            "measurement-runs must be in 1..={MAX_BENCHMARK_RUNS}"
+        ));
+    }
+    if args.warmup_runs > MAX_BENCHMARK_RUNS {
+        return Err(format!("warmup-runs must be in 0..={MAX_BENCHMARK_RUNS}"));
+    }
+    if !args.max_regression_percent.is_finite() || args.max_regression_percent < 0.0 {
+        return Err("max-regression-percent must be a finite non-negative number".to_string());
+    }
 
     let manifest_output = normalized_manifest_output(&args.output, args.manifest_output.as_ref());
     let performance_output =
         normalized_performance_output(&args.output, args.performance_output.as_ref());
+    let aggregate_output = (args.measurement_runs > 1
+        || args.aggregate_output.is_some()
+        || args.baseline_input.is_some())
+    .then(|| normalized_aggregate_output(&args.output, args.aggregate_output.as_ref()));
     let mut outputs = vec![
         ("report output", args.output.as_path()),
         ("manifest output", manifest_output.as_path()),
@@ -565,6 +811,9 @@ fn validate_runner_args(args: &Args) -> Result<(), String> {
     ];
     if let Some(trace_output) = args.trace_output.as_deref() {
         outputs.push(("trace output", trace_output));
+    }
+    if let Some(aggregate_output) = aggregate_output.as_deref() {
+        outputs.push(("aggregate output", aggregate_output));
     }
 
     for index in 0..outputs.len() {
@@ -585,6 +834,7 @@ fn validate_runner_args(args: &Args) -> Result<(), String> {
         ("guest input", args.guest_input.as_deref()),
         ("untrusted advice", args.untrusted_advice.as_deref()),
         ("trusted advice", args.trusted_advice.as_deref()),
+        ("baseline input", args.baseline_input.as_deref()),
     ];
     for (output_label, output_path) in outputs {
         for &(input_label, input_path) in &inputs {
@@ -615,6 +865,15 @@ fn normalized_performance_output(
         .unwrap_or_else(|| default_performance_output_path(report_output))
 }
 
+fn normalized_aggregate_output(
+    report_output: &Path,
+    aggregate_output: Option<&PathBuf>,
+) -> PathBuf {
+    aggregate_output
+        .cloned()
+        .unwrap_or_else(|| default_aggregate_output_path(report_output))
+}
+
 fn default_manifest_output_path(report_output: &Path) -> PathBuf {
     let mut manifest_output = report_output.to_path_buf();
     let stem = report_output
@@ -635,6 +894,17 @@ fn default_performance_output_path(report_output: &Path) -> PathBuf {
         .unwrap_or("jolt-nova-final-proof-size-scaling");
     performance_output.set_file_name(format!("{stem}.performance.json"));
     performance_output
+}
+
+fn default_aggregate_output_path(report_output: &Path) -> PathBuf {
+    let mut aggregate_output = report_output.to_path_buf();
+    let stem = report_output
+        .file_stem()
+        .and_then(|stem| stem.to_str())
+        .filter(|stem| !stem.is_empty())
+        .unwrap_or("jolt-nova-final-proof-size-scaling");
+    aggregate_output.set_file_name(format!("{stem}.aggregate.json"));
+    aggregate_output
 }
 
 fn normalized_block_counts(
@@ -698,6 +968,7 @@ fn load_trace_blocks(args: &Args) -> Result<LoadedTraceBlocks, String> {
             load_trace_file(trace_input)
         }
         TraceSource::Elf => export_elf_trace_bundle(args),
+        TraceSource::Fixture => export_fixture_trace_bundle(args),
     }
 }
 
@@ -749,10 +1020,75 @@ fn export_elf_trace_bundle(args: &Args) -> Result<LoadedTraceBlocks, String> {
     let untrusted_advice =
         read_optional_input_bytes("untrusted advice", args.untrusted_advice.as_ref())?;
     let trusted_advice = read_optional_input_bytes("trusted advice", args.trusted_advice.as_ref())?;
+    export_trace_bundle(
+        args,
+        &elf_bytes,
+        Some(elf_input),
+        trace_output,
+        &guest_input,
+        &untrusted_advice,
+        &trusted_advice,
+    )
+}
 
+fn export_fixture_trace_bundle(args: &Args) -> Result<LoadedTraceBlocks, String> {
+    for (name, value) in [
+        ("trace-input", args.trace_input.as_ref()),
+        ("elf-input", args.elf_input.as_ref()),
+        ("guest-input", args.guest_input.as_ref()),
+        ("untrusted-advice", args.untrusted_advice.as_ref()),
+        ("trusted-advice", args.trusted_advice.as_ref()),
+    ] {
+        if let Some(path) = value {
+            return Err(format!(
+                "{name} {} is not valid with --trace-source fixture",
+                manifest_path_string(path)
+            ));
+        }
+    }
+    if args.trace_block_size == 0 {
+        return Err("trace-block-size must be greater than zero".to_string());
+    }
+    let trace_output = args
+        .trace_output
+        .as_ref()
+        .ok_or_else(|| "trace-source fixture requires --trace-output <path>".to_string())?;
+    let loaded = export_trace_bundle(
+        args,
+        &args.fixture.elf_bytes(),
+        None,
+        trace_output,
+        &[],
+        &[],
+        &[],
+    )?;
+    let active_cycles = loaded
+        .blocks
+        .iter()
+        .map(|block| block.active_cycles)
+        .sum::<usize>();
+    if active_cycles != args.fixture.expected_active_cycles() {
+        return Err(format!(
+            "fixture {} cycle count mismatch: expected {}, traced {active_cycles}",
+            args.fixture,
+            args.fixture.expected_active_cycles()
+        ));
+    }
+    Ok(loaded)
+}
+
+fn export_trace_bundle(
+    args: &Args,
+    elf_bytes: &[u8],
+    elf_path: Option<&PathBuf>,
+    trace_output: &Path,
+    guest_input: &[u8],
+    untrusted_advice: &[u8],
+    trusted_advice: &[u8],
+) -> Result<LoadedTraceBlocks, String> {
     let mut inline_provider = TracerInlineExpansionProvider::new();
     let program = jolt_program::build_jolt_program_with_inline_provider(
-        &elf_bytes,
+        elf_bytes,
         &mut inline_provider,
         RV64IMAC_JOLT,
     )
@@ -773,11 +1109,11 @@ fn export_elf_trace_bundle(args: &Args) -> Result<LoadedTraceBlocks, String> {
     };
 
     let mut block_iterator = tracer::trace_blocks(
-        &elf_bytes,
-        Some(elf_input),
-        &guest_input,
-        &untrusted_advice,
-        &trusted_advice,
+        elf_bytes,
+        elf_path,
+        guest_input,
+        untrusted_advice,
+        trusted_advice,
         &memory_config,
         None,
         args.trace_block_size,
@@ -799,7 +1135,7 @@ fn export_elf_trace_bundle(args: &Args) -> Result<LoadedTraceBlocks, String> {
     }
     validate_loaded_trace_blocks(&blocks)?;
 
-    let elf_sha3_256 = Sha3_256::digest(&elf_bytes).into();
+    let elf_sha3_256 = Sha3_256::digest(elf_bytes).into();
     let program_digest = bytecode_digest(&bytecode)?;
     write_trace_bundle(
         trace_output,
@@ -1048,6 +1384,7 @@ fn build_performance_artifact(
     blocks: &[TraceBlock],
     manifest_output: &Path,
     measurements: &RunMeasurements,
+    workload_digest: [u8; 32],
 ) -> PerformanceBaselineArtifact {
     let cumulative_active_cycles = blocks
         .iter()
@@ -1084,6 +1421,7 @@ fn build_performance_artifact(
         },
         target_os: std::env::consts::OS.to_string(),
         target_arch: std::env::consts::ARCH.to_string(),
+        workload_sha3_256: hex_digest(&workload_digest),
         source_block_count: blocks.len(),
         reported_block_counts: block_counts.to_vec(),
         largest_reported_block_count,
@@ -1128,6 +1466,319 @@ fn write_performance_artifact(
     let mut json = serde_json::to_vec_pretty(artifact).map_err(io::Error::other)?;
     json.push(b'\n');
     std::fs::write(performance_output, json)
+}
+
+fn build_multi_run_baseline(
+    args: &Args,
+    samples: Vec<PerformanceBaselineArtifact>,
+) -> Result<MultiRunBaselineArtifact, io::Error> {
+    let first = samples.first().ok_or_else(|| {
+        invalid_input("multi-run baseline requires at least one sample".to_string())
+    })?;
+    for (index, sample) in samples.iter().enumerate().skip(1) {
+        if sample.trace_source != first.trace_source
+            || sample.build_profile != first.build_profile
+            || sample.target_os != first.target_os
+            || sample.target_arch != first.target_arch
+            || sample.workload_sha3_256 != first.workload_sha3_256
+            || sample.source_block_count != first.source_block_count
+            || sample.reported_block_counts != first.reported_block_counts
+            || sample.processed_block_count != first.processed_block_count
+            || sample.processed_active_cycles != first.processed_active_cycles
+        {
+            return Err(invalid_input(format!(
+                "measurement sample {} is incompatible with the first run",
+                index + 1
+            )));
+        }
+    }
+
+    let stats = MultiRunStatistics {
+        trace_load_ms: summarize_values(
+            samples
+                .iter()
+                .map(|sample| sample.timings_ms.trace_load as f64)
+                .collect(),
+        )?,
+        nova_fold_and_spartan_report_ms: summarize_values(
+            samples
+                .iter()
+                .map(|sample| sample.timings_ms.nova_fold_and_spartan_report as f64)
+                .collect(),
+        )?,
+        measured_total_ms: summarize_values(
+            samples
+                .iter()
+                .map(|sample| sample.timings_ms.measured_total as f64)
+                .collect(),
+        )?,
+        proving_processed_active_cycles_per_second: summarize_optional_values(
+            samples
+                .iter()
+                .map(|sample| sample.throughput.proving_processed_active_cycles_per_second)
+                .collect(),
+        )?,
+        end_to_end_processed_active_cycles_per_second: summarize_optional_values(
+            samples
+                .iter()
+                .map(|sample| {
+                    sample
+                        .throughput
+                        .end_to_end_processed_active_cycles_per_second
+                })
+                .collect(),
+        )?,
+        peak_delta_bytes: summarize_optional_values(
+            samples
+                .iter()
+                .map(|sample| sample.memory.peak_delta_bytes.map(|value| value as f64))
+                .collect(),
+        )?,
+    };
+
+    Ok(MultiRunBaselineArtifact {
+        schema_version: MULTI_RUN_SCHEMA_VERSION.to_string(),
+        runner: RUNNER_NAME.to_string(),
+        trace_source: first.trace_source.clone(),
+        fixture: (args.trace_source == TraceSource::Fixture)
+            .then(|| args.fixture.as_str().to_string()),
+        fixture_schema_version: (args.trace_source == TraceSource::Fixture)
+            .then(|| PRODUCTION_FIXTURE_SCHEMA_VERSION.to_string()),
+        build_profile: first.build_profile.clone(),
+        target_os: first.target_os.clone(),
+        target_arch: first.target_arch.clone(),
+        workload_sha3_256: first.workload_sha3_256.clone(),
+        measurement_runs: samples.len(),
+        warmup_runs: args.warmup_runs,
+        source_block_count: first.source_block_count,
+        reported_block_counts: first.reported_block_counts.clone(),
+        stats,
+        samples,
+        comparison: None,
+    })
+}
+
+fn summarize_optional_values(
+    values: Vec<Option<f64>>,
+) -> Result<Option<SummaryStatistics>, io::Error> {
+    values
+        .into_iter()
+        .collect::<Option<Vec<_>>>()
+        .map(summarize_values)
+        .transpose()
+}
+
+fn summarize_values(mut values: Vec<f64>) -> Result<SummaryStatistics, io::Error> {
+    if values.is_empty() {
+        return Err(invalid_input(
+            "summary statistics require at least one value".to_string(),
+        ));
+    }
+    if values.iter().any(|value| !value.is_finite()) {
+        return Err(invalid_input(
+            "summary statistics require finite values".to_string(),
+        ));
+    }
+    values.sort_by(f64::total_cmp);
+    let count = values.len();
+    let min = values[0];
+    let max = values[count - 1];
+    let median = if count % 2 == 0 {
+        (values[count / 2 - 1] + values[count / 2]) / 2.0
+    } else {
+        values[count / 2]
+    };
+    let mean = values.iter().sum::<f64>() / count as f64;
+    let variance = values
+        .iter()
+        .map(|value| {
+            let delta = value - mean;
+            delta * delta
+        })
+        .sum::<f64>()
+        / count as f64;
+
+    Ok(SummaryStatistics {
+        count,
+        min,
+        median,
+        mean,
+        max,
+        standard_deviation: variance.sqrt(),
+    })
+}
+
+fn compare_multi_run_baselines(
+    current: &MultiRunBaselineArtifact,
+    baseline: &MultiRunBaselineArtifact,
+    baseline_path: &Path,
+    max_regression_percent: f64,
+) -> Result<BaselineComparison, io::Error> {
+    validate_comparable_baselines(current, baseline)?;
+    let mut metrics = vec![
+        compare_metric(
+            "nova_fold_and_spartan_report_ms",
+            MetricDirection::LowerIsBetter,
+            baseline.stats.nova_fold_and_spartan_report_ms.mean,
+            current.stats.nova_fold_and_spartan_report_ms.mean,
+            max_regression_percent,
+        ),
+        compare_metric(
+            "measured_total_ms",
+            MetricDirection::LowerIsBetter,
+            baseline.stats.measured_total_ms.mean,
+            current.stats.measured_total_ms.mean,
+            max_regression_percent,
+        ),
+    ];
+    if let (Some(baseline_throughput), Some(current_throughput)) = (
+        &baseline.stats.proving_processed_active_cycles_per_second,
+        &current.stats.proving_processed_active_cycles_per_second,
+    ) {
+        metrics.push(compare_metric(
+            "proving_processed_active_cycles_per_second",
+            MetricDirection::HigherIsBetter,
+            baseline_throughput.mean,
+            current_throughput.mean,
+            max_regression_percent,
+        ));
+    }
+    if let (Some(baseline_memory), Some(current_memory)) = (
+        &baseline.stats.peak_delta_bytes,
+        &current.stats.peak_delta_bytes,
+    ) {
+        metrics.push(compare_metric(
+            "peak_delta_bytes",
+            MetricDirection::LowerIsBetter,
+            baseline_memory.mean,
+            current_memory.mean,
+            max_regression_percent,
+        ));
+    }
+    let passed = metrics.iter().all(|metric| metric.passed);
+    Ok(BaselineComparison {
+        baseline_path: manifest_path_string(baseline_path),
+        max_regression_percent,
+        passed,
+        metrics,
+    })
+}
+
+fn validate_comparable_baselines(
+    current: &MultiRunBaselineArtifact,
+    baseline: &MultiRunBaselineArtifact,
+) -> Result<(), io::Error> {
+    if baseline.schema_version != MULTI_RUN_SCHEMA_VERSION {
+        return Err(invalid_input(format!(
+            "unsupported baseline schema {}; expected {MULTI_RUN_SCHEMA_VERSION}",
+            baseline.schema_version
+        )));
+    }
+    for (field, current_value, baseline_value) in [
+        ("runner", current.runner.as_str(), baseline.runner.as_str()),
+        (
+            "trace_source",
+            current.trace_source.as_str(),
+            baseline.trace_source.as_str(),
+        ),
+        (
+            "build_profile",
+            current.build_profile.as_str(),
+            baseline.build_profile.as_str(),
+        ),
+        (
+            "target_os",
+            current.target_os.as_str(),
+            baseline.target_os.as_str(),
+        ),
+        (
+            "target_arch",
+            current.target_arch.as_str(),
+            baseline.target_arch.as_str(),
+        ),
+    ] {
+        if current_value != baseline_value {
+            return Err(invalid_input(format!(
+                "baseline {field} mismatch: current {current_value}, baseline {baseline_value}"
+            )));
+        }
+    }
+    if current.fixture != baseline.fixture
+        || current.fixture_schema_version != baseline.fixture_schema_version
+        || current.workload_sha3_256 != baseline.workload_sha3_256
+        || current.source_block_count != baseline.source_block_count
+        || current.reported_block_counts != baseline.reported_block_counts
+    {
+        return Err(invalid_input(
+            "baseline workload identity does not match the current run".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+fn compare_metric(
+    metric: &str,
+    direction: MetricDirection,
+    baseline_mean: f64,
+    current_mean: f64,
+    max_regression_percent: f64,
+) -> MetricComparison {
+    let regression_percent = match direction {
+        MetricDirection::LowerIsBetter => relative_increase_percent(baseline_mean, current_mean),
+        MetricDirection::HigherIsBetter => relative_decrease_percent(baseline_mean, current_mean),
+    };
+    MetricComparison {
+        metric: metric.to_string(),
+        direction,
+        baseline_mean,
+        current_mean,
+        regression_percent,
+        passed: regression_percent <= max_regression_percent,
+    }
+}
+
+fn relative_increase_percent(baseline: f64, current: f64) -> f64 {
+    if baseline == 0.0 {
+        if current == 0.0 {
+            0.0
+        } else {
+            f64::MAX
+        }
+    } else {
+        ((current - baseline) / baseline * 100.0).max(0.0)
+    }
+}
+
+fn relative_decrease_percent(baseline: f64, current: f64) -> f64 {
+    if baseline == 0.0 {
+        0.0
+    } else {
+        ((baseline - current) / baseline * 100.0).max(0.0)
+    }
+}
+
+fn read_multi_run_baseline(path: &Path) -> Result<MultiRunBaselineArtifact, io::Error> {
+    let bytes = std::fs::read(path)?;
+    serde_json::from_slice(&bytes).map_err(|error| {
+        invalid_input(format!(
+            "failed to decode multi-run baseline {}: {error}",
+            manifest_path_string(path)
+        ))
+    })
+}
+
+fn write_multi_run_baseline(
+    path: &Path,
+    artifact: &MultiRunBaselineArtifact,
+) -> Result<(), io::Error> {
+    if let Some(parent) = path.parent() {
+        if !parent.as_os_str().is_empty() {
+            std::fs::create_dir_all(parent)?;
+        }
+    }
+    let mut json = serde_json::to_vec_pretty(artifact).map_err(io::Error::other)?;
+    json.push(b'\n');
+    std::fs::write(path, json)
 }
 
 fn duration_millis(duration: Duration) -> u64 {
@@ -1194,6 +1845,14 @@ fn build_manifest_json(
     append_json_string_field(&mut json, "trace_source", args.trace_source.as_str());
     json.push(',');
     append_json_optional_string_field(&mut json, "trace_profile", selected_trace_profile(args));
+    json.push(',');
+    append_json_optional_string_field(&mut json, "fixture", selected_fixture(args));
+    json.push(',');
+    append_json_optional_string_field(
+        &mut json,
+        "fixture_schema_version",
+        selected_fixture(args).map(|_| PRODUCTION_FIXTURE_SCHEMA_VERSION),
+    );
     json.push(',');
     append_json_optional_path_field(&mut json, "trace_input_path", selected_trace_path(args));
     json.push(',');
@@ -1281,7 +1940,8 @@ fn build_manifest_json(
     append_json_optional_usize_field(
         &mut json,
         "trace_block_size",
-        (args.trace_source == TraceSource::Elf).then_some(args.trace_block_size),
+        matches!(args.trace_source, TraceSource::Elf | TraceSource::Fixture)
+            .then_some(args.trace_block_size),
     );
     json.push(',');
     append_json_usize_array_field(&mut json, "block_counts", block_counts);
@@ -1322,16 +1982,31 @@ fn selected_trace_profile(args: &Args) -> Option<&'static str> {
     (args.trace_source == TraceSource::Synthetic).then(|| args.trace_profile.as_str())
 }
 
+fn selected_fixture(args: &Args) -> Option<&'static str> {
+    (args.trace_source == TraceSource::Fixture).then(|| args.fixture.as_str())
+}
+
 fn selected_trace_path(args: &Args) -> Option<&PathBuf> {
     match args.trace_source {
         TraceSource::Synthetic => None,
         TraceSource::TraceFile => args.trace_input.as_ref(),
         TraceSource::Elf => args.trace_output.as_ref(),
+        TraceSource::Fixture => args.trace_output.as_ref(),
     }
 }
 
 fn hex_digest(digest: &[u8; 32]) -> String {
     digest.iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
+fn synthetic_workload_digest(args: &Args, program_digest: [u8; 32]) -> [u8; 32] {
+    let mut hasher = Sha3_256::new();
+    hasher.update(b"jolt-nova-synthetic-workload-v1");
+    hasher.update(program_digest);
+    hasher.update(args.trace_profile.as_str().as_bytes());
+    hasher.update((args.blocks as u64).to_le_bytes());
+    hasher.update((args.cycles_per_block as u64).to_le_bytes());
+    hasher.finalize().into()
 }
 
 fn append_json_string_field(json: &mut String, name: &str, value: &str) {
@@ -1411,6 +2086,91 @@ fn append_json_string(json: &mut String, value: &str) {
     json.push('"');
 }
 
+fn encode_lui(rd: u32, immediate_upper_20: u32) -> u32 {
+    ((immediate_upper_20 & 0x000f_ffff) << 12) | ((rd & 0x1f) << 7) | 0x37
+}
+
+fn encode_addi(rd: u32, rs1: u32, immediate: i32) -> u32 {
+    debug_assert!((-2048..=2047).contains(&immediate));
+    (((immediate as u32) & 0x0fff) << 20) | ((rs1 & 0x1f) << 15) | ((rd & 0x1f) << 7) | 0x13
+}
+
+fn encode_bne(rs1: u32, rs2: u32, offset: i32) -> u32 {
+    debug_assert!(offset % 2 == 0 && (-4096..=4094).contains(&offset));
+    let immediate = (offset as u32) & 0x1fff;
+    ((immediate >> 12) & 0x1) << 31
+        | ((immediate >> 5) & 0x3f) << 25
+        | ((rs2 & 0x1f) << 20)
+        | ((rs1 & 0x1f) << 15)
+        | (0x1 << 12)
+        | ((immediate >> 1) & 0xf) << 8
+        | ((immediate >> 11) & 0x1) << 7
+        | 0x63
+}
+
+fn rv64_text_elf(instructions: &[u32]) -> Vec<u8> {
+    const ELF_HEADER_SIZE: usize = 64;
+    const SECTION_HEADER_SIZE: usize = 64;
+    const SECTION_COUNT: usize = 3;
+    const STRING_TABLE: &[u8] = b"\0.text\0.shstrtab\0";
+
+    let text_offset = ELF_HEADER_SIZE;
+    let text_size = instructions.len() * std::mem::size_of::<u32>();
+    let string_table_offset = (text_offset + text_size + 7) & !7;
+    let section_headers_offset = (string_table_offset + STRING_TABLE.len() + 7) & !7;
+    let mut elf = vec![0u8; section_headers_offset + SECTION_COUNT * SECTION_HEADER_SIZE];
+
+    elf[0..16].copy_from_slice(&[0x7f, b'E', b'L', b'F', 2, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+    write_le_u16(&mut elf, 16, 2);
+    write_le_u16(&mut elf, 18, 243);
+    write_le_u32(&mut elf, 20, 1);
+    write_le_u64(&mut elf, 24, RAM_START_ADDRESS);
+    write_le_u64(&mut elf, 40, section_headers_offset as u64);
+    write_le_u16(&mut elf, 52, ELF_HEADER_SIZE as u16);
+    write_le_u16(&mut elf, 58, SECTION_HEADER_SIZE as u16);
+    write_le_u16(&mut elf, 60, SECTION_COUNT as u16);
+    write_le_u16(&mut elf, 62, 2);
+
+    for (index, instruction) in instructions.iter().enumerate() {
+        write_le_u32(
+            &mut elf,
+            text_offset + index * std::mem::size_of::<u32>(),
+            *instruction,
+        );
+    }
+    elf[string_table_offset..string_table_offset + STRING_TABLE.len()]
+        .copy_from_slice(STRING_TABLE);
+
+    let text_header = section_headers_offset + SECTION_HEADER_SIZE;
+    write_le_u32(&mut elf, text_header, 1);
+    write_le_u32(&mut elf, text_header + 4, 1);
+    write_le_u64(&mut elf, text_header + 8, 0x6);
+    write_le_u64(&mut elf, text_header + 16, RAM_START_ADDRESS);
+    write_le_u64(&mut elf, text_header + 24, text_offset as u64);
+    write_le_u64(&mut elf, text_header + 32, text_size as u64);
+    write_le_u64(&mut elf, text_header + 48, 4);
+
+    let string_header = section_headers_offset + 2 * SECTION_HEADER_SIZE;
+    write_le_u32(&mut elf, string_header, 7);
+    write_le_u32(&mut elf, string_header + 4, 3);
+    write_le_u64(&mut elf, string_header + 24, string_table_offset as u64);
+    write_le_u64(&mut elf, string_header + 32, STRING_TABLE.len() as u64);
+    write_le_u64(&mut elf, string_header + 48, 1);
+    elf
+}
+
+fn write_le_u16(bytes: &mut [u8], offset: usize, value: u16) {
+    bytes[offset..offset + 2].copy_from_slice(&value.to_le_bytes());
+}
+
+fn write_le_u32(bytes: &mut [u8], offset: usize, value: u32) {
+    bytes[offset..offset + 4].copy_from_slice(&value.to_le_bytes());
+}
+
+fn write_le_u64(bytes: &mut [u8], offset: usize, value: u64) {
+    bytes[offset..offset + 8].copy_from_slice(&value.to_le_bytes());
+}
+
 fn boundary(global_cycle: usize, pc: u64) -> MachineBoundaryState {
     let mut registers = [0i64; REGISTER_COUNT as usize];
     registers[1] = pc as i64;
@@ -1455,6 +2215,12 @@ mod tests {
             performance_output: None,
             memory_sample_interval_ms: 10,
             program_digest_byte: 9,
+            measurement_runs: 1,
+            warmup_runs: 0,
+            aggregate_output: None,
+            baseline_input: None,
+            max_regression_percent: 10.0,
+            fixture: ProductionFixture::CpuLookup64k,
         };
 
         assert_eq!(
@@ -1516,6 +2282,151 @@ mod tests {
     }
 
     #[test]
+    fn default_aggregate_output_sits_next_to_report() {
+        assert_eq!(
+            default_aggregate_output_path(Path::new("benchmark-runs/jolt-nova/report.json")),
+            PathBuf::from("benchmark-runs/jolt-nova/report.aggregate.json")
+        );
+        assert_eq!(
+            default_aggregate_output_path(Path::new("report")),
+            PathBuf::from("report.aggregate.json")
+        );
+    }
+
+    #[test]
+    fn production_guest_fixtures_are_versioned_decodable_rv64_programs() {
+        let cpu_elf = ProductionFixture::CpuLookup64k.elf_bytes();
+        let ram_elf = ProductionFixture::RamLookup80k.elf_bytes();
+        assert_ne!(Sha3_256::digest(&cpu_elf), Sha3_256::digest(&ram_elf));
+        assert_eq!(
+            ProductionFixture::CpuLookup64k.expected_active_cycles(),
+            49_156
+        );
+        assert_eq!(
+            ProductionFixture::RamLookup80k.expected_active_cycles(),
+            81_925
+        );
+        assert_eq!(encode_bne(1, 0, -8), 0xfe00_9ce3);
+        assert_eq!(encode_bne(1, 0, -16), 0xfe00_98e3);
+
+        for (fixture, minimum_rows) in [
+            (ProductionFixture::CpuLookup64k, 7),
+            (ProductionFixture::RamLookup80k, 10),
+        ] {
+            let mut inline_provider = TracerInlineExpansionProvider::new();
+            let program = jolt_program::build_jolt_program_with_inline_provider(
+                &fixture.elf_bytes(),
+                &mut inline_provider,
+                RV64IMAC_JOLT,
+            )
+            .unwrap();
+            assert_eq!(program.entry_address, RAM_START_ADDRESS);
+            assert!(program.expanded_bytecode.len() >= minimum_rows);
+        }
+        assert_eq!(
+            PRODUCTION_FIXTURE_SCHEMA_VERSION,
+            "jolt-nova-production-fixtures-v1"
+        );
+    }
+
+    #[test]
+    fn production_guest_fixtures_execute_to_the_declared_cycle_count() {
+        for fixture in [
+            ProductionFixture::CpuLookup64k,
+            ProductionFixture::RamLookup80k,
+        ] {
+            let elf = fixture.elf_bytes();
+            let mut inline_provider = TracerInlineExpansionProvider::new();
+            let program = jolt_program::build_jolt_program_with_inline_provider(
+                &elf,
+                &mut inline_provider,
+                RV64IMAC_JOLT,
+            )
+            .unwrap();
+            let memory_config = MemoryConfig {
+                program_size: Some(program.program_end - RAM_START_ADDRESS),
+                ..Default::default()
+            };
+            let mut iterator =
+                tracer::trace_blocks(&elf, None, &[], &[], &[], &memory_config, None, 1024);
+            let mut active_cycles = 0;
+            for block in iterator.by_ref() {
+                active_cycles += block.active_cycles;
+            }
+            let tracer = iterator.into_inner().lazy_tracer;
+            assert!(!tracer.has_panicked(), "{fixture} panicked");
+            assert!(tracer.has_terminated(), "{fixture} did not terminate");
+            assert_eq!(active_cycles, fixture.expected_active_cycles());
+        }
+    }
+
+    #[test]
+    fn summary_statistics_cover_even_samples_and_population_deviation() {
+        let summary = summarize_values(vec![4.0, 1.0, 3.0, 2.0]).unwrap();
+        assert_eq!(summary.count, 4);
+        assert_eq!(summary.min, 1.0);
+        assert_eq!(summary.median, 2.5);
+        assert_eq!(summary.mean, 2.5);
+        assert_eq!(summary.max, 4.0);
+        assert!((summary.standard_deviation - 1.25_f64.sqrt()).abs() < f64::EPSILON);
+        assert!(summarize_values(Vec::new()).is_err());
+        assert!(summarize_values(vec![f64::NAN]).is_err());
+    }
+
+    #[test]
+    fn multi_run_baseline_aggregates_samples_and_detects_regression() {
+        let mut args = sample_args();
+        args.measurement_runs = 3;
+        args.warmup_runs = 1;
+        let samples = vec![
+            sample_performance_artifact(90, 100, 900.0, 100.0, 10),
+            sample_performance_artifact(100, 110, 1_000.0, 90.0, 20),
+            sample_performance_artifact(110, 120, 1_100.0, 80.0, 30),
+        ];
+        let baseline = build_multi_run_baseline(&args, samples).unwrap();
+        assert_eq!(baseline.schema_version, MULTI_RUN_SCHEMA_VERSION);
+        assert_eq!(baseline.measurement_runs, 3);
+        assert_eq!(baseline.warmup_runs, 1);
+        assert_eq!(baseline.stats.nova_fold_and_spartan_report_ms.mean, 100.0);
+        assert_eq!(baseline.stats.measured_total_ms.median, 110.0);
+        assert_eq!(baseline.stats.peak_delta_bytes.as_ref().unwrap().mean, 20.0);
+
+        let encoded = serde_json::to_vec(&baseline).unwrap();
+        let decoded: MultiRunBaselineArtifact = serde_json::from_slice(&encoded).unwrap();
+        assert_eq!(decoded, baseline);
+
+        let mut current = baseline.clone();
+        current.stats.nova_fold_and_spartan_report_ms.mean = 112.0;
+        let comparison = compare_multi_run_baselines(
+            &current,
+            &baseline,
+            Path::new("baseline.aggregate.json"),
+            10.0,
+        )
+        .unwrap();
+        assert!(!comparison.passed);
+        let proving = comparison
+            .metrics
+            .iter()
+            .find(|metric| metric.metric == "nova_fold_and_spartan_report_ms")
+            .unwrap();
+        assert_eq!(proving.regression_percent, 12.0);
+        assert!(!proving.passed);
+
+        let mut different_workload = current;
+        different_workload.workload_sha3_256 = "cd".repeat(32);
+        assert!(compare_multi_run_baselines(
+            &different_workload,
+            &baseline,
+            Path::new("baseline.aggregate.json"),
+            10.0,
+        )
+        .unwrap_err()
+        .to_string()
+        .contains("workload identity"));
+    }
+
+    #[test]
     fn runner_args_reject_bad_memory_interval_and_path_collisions() {
         let args = Args {
             trace_source: TraceSource::Synthetic,
@@ -1535,6 +2446,12 @@ mod tests {
             performance_output: None,
             memory_sample_interval_ms: 10,
             program_digest_byte: 9,
+            measurement_runs: 1,
+            warmup_runs: 0,
+            aggregate_output: None,
+            baseline_input: None,
+            max_regression_percent: 10.0,
+            fixture: ProductionFixture::CpuLookup64k,
         };
         assert_eq!(validate_runner_args(&args), Ok(()));
 
@@ -1562,6 +2479,18 @@ mod tests {
         assert!(validate_runner_args(&overwriting_input)
             .unwrap_err()
             .contains("must not overwrite trace input"));
+
+        let mut no_measurements = sample_args();
+        no_measurements.measurement_runs = 0;
+        assert!(validate_runner_args(&no_measurements)
+            .unwrap_err()
+            .contains("measurement-runs"));
+
+        let mut invalid_threshold = sample_args();
+        invalid_threshold.max_regression_percent = f64::NAN;
+        assert!(validate_runner_args(&invalid_threshold)
+            .unwrap_err()
+            .contains("finite non-negative"));
     }
 
     #[test]
@@ -1584,6 +2513,12 @@ mod tests {
             performance_output: None,
             memory_sample_interval_ms: 10,
             program_digest_byte: 9,
+            measurement_runs: 1,
+            warmup_runs: 0,
+            aggregate_output: None,
+            baseline_input: None,
+            max_regression_percent: 10.0,
+            fixture: ProductionFixture::CpuLookup64k,
         };
         let loaded_trace = load_trace_blocks(&args).unwrap();
         let blocks = loaded_trace.blocks;
@@ -1627,6 +2562,12 @@ mod tests {
             performance_output: None,
             memory_sample_interval_ms: 10,
             program_digest_byte: 9,
+            measurement_runs: 1,
+            warmup_runs: 0,
+            aggregate_output: None,
+            baseline_input: None,
+            max_regression_percent: 10.0,
+            fixture: ProductionFixture::CpuLookup64k,
         };
         assert!(load_trace_blocks(&synthetic_with_input)
             .unwrap_err()
@@ -1650,6 +2591,12 @@ mod tests {
             performance_output: None,
             memory_sample_interval_ms: 10,
             program_digest_byte: 9,
+            measurement_runs: 1,
+            warmup_runs: 0,
+            aggregate_output: None,
+            baseline_input: None,
+            max_regression_percent: 10.0,
+            fixture: ProductionFixture::CpuLookup64k,
         };
         assert!(load_trace_blocks(&trace_file_without_input)
             .unwrap_err()
@@ -1677,6 +2624,12 @@ mod tests {
             performance_output: None,
             memory_sample_interval_ms: 10,
             program_digest_byte: 9,
+            measurement_runs: 1,
+            warmup_runs: 0,
+            aggregate_output: None,
+            baseline_input: None,
+            max_regression_percent: 10.0,
+            fixture: ProductionFixture::CpuLookup64k,
         };
         let loaded_trace = load_trace_blocks(&args).unwrap();
         let metadata = loaded_trace.file_metadata.unwrap();
@@ -1729,6 +2682,12 @@ mod tests {
             performance_output: None,
             memory_sample_interval_ms: 10,
             program_digest_byte: 9,
+            measurement_runs: 1,
+            warmup_runs: 0,
+            aggregate_output: None,
+            baseline_input: None,
+            max_regression_percent: 10.0,
+            fixture: ProductionFixture::CpuLookup64k,
         };
 
         let loaded = load_trace_blocks(&args).unwrap();
@@ -1784,6 +2743,7 @@ mod tests {
         let report_path = directory.join("report.json");
         let manifest_path = directory.join("report.manifest.json");
         let performance_path = directory.join("report.performance.json");
+        let aggregate_path = directory.join("report.aggregate.json");
         std::fs::create_dir_all(&directory).unwrap();
         std::fs::write(&elf_path, tiny_rv64_elf()).unwrap();
         let args = Args {
@@ -1804,6 +2764,12 @@ mod tests {
             performance_output: None,
             memory_sample_interval_ms: 1,
             program_digest_byte: 9,
+            measurement_runs: 2,
+            warmup_runs: 0,
+            aggregate_output: Some(aggregate_path.clone()),
+            baseline_input: None,
+            max_regression_percent: 10.0,
+            fixture: ProductionFixture::CpuLookup64k,
         };
 
         run(args).unwrap();
@@ -1813,6 +2779,8 @@ mod tests {
         let performance_json = std::fs::read_to_string(&performance_path).unwrap();
         let performance: PerformanceBaselineArtifact =
             serde_json::from_str(&performance_json).unwrap();
+        let aggregate_json = std::fs::read_to_string(&aggregate_path).unwrap();
+        let aggregate: MultiRunBaselineArtifact = serde_json::from_str(&aggregate_json).unwrap();
         assert!(report.contains("\"block_count\":1"));
         assert!(report.contains("\"block_count\":2"));
         assert!(report.contains("\"recursive_snark_bytes_len\":"));
@@ -1834,8 +2802,14 @@ mod tests {
             .proving_processed_active_cycles_per_second
             .is_some());
         assert_eq!(performance.memory.sample_interval_ms, 1);
+        assert_eq!(aggregate.schema_version, MULTI_RUN_SCHEMA_VERSION);
+        assert_eq!(aggregate.measurement_runs, 2);
+        assert_eq!(aggregate.samples.len(), 2);
+        assert_eq!(aggregate.source_block_count, 2);
+        assert_eq!(aggregate.reported_block_counts, vec![1, 2]);
 
         for path in [
+            aggregate_path,
             performance_path,
             manifest_path,
             report_path,
@@ -1920,6 +2894,12 @@ mod tests {
             performance_output: None,
             memory_sample_interval_ms: 10,
             program_digest_byte: 11,
+            measurement_runs: 1,
+            warmup_runs: 0,
+            aggregate_output: None,
+            baseline_input: None,
+            max_regression_percent: 10.0,
+            fixture: ProductionFixture::CpuLookup64k,
         };
         let block_counts = normalized_block_counts(&args, 2, false).unwrap();
         let artifact = sample_benchmark_artifact();
@@ -1979,6 +2959,12 @@ mod tests {
             performance_output: None,
             memory_sample_interval_ms: 10,
             program_digest_byte: 9,
+            measurement_runs: 1,
+            warmup_runs: 0,
+            aggregate_output: None,
+            baseline_input: None,
+            max_regression_percent: 10.0,
+            fixture: ProductionFixture::CpuLookup64k,
         };
         let artifact = sample_benchmark_artifact();
         let manifest_path = normalized_manifest_output(&args.output, args.manifest_output.as_ref());
@@ -2028,6 +3014,12 @@ mod tests {
             performance_output: None,
             memory_sample_interval_ms: 10,
             program_digest_byte: 9,
+            measurement_runs: 1,
+            warmup_runs: 0,
+            aggregate_output: None,
+            baseline_input: None,
+            max_regression_percent: 10.0,
+            fixture: ProductionFixture::CpuLookup64k,
         };
         let artifact = sample_benchmark_artifact();
         let manifest_path = temp_manifest_path("manifest-write", "report.manifest.json");
@@ -2061,6 +3053,12 @@ mod tests {
             performance_output: None,
             memory_sample_interval_ms: 5,
             program_digest_byte: 9,
+            measurement_runs: 1,
+            warmup_runs: 0,
+            aggregate_output: None,
+            baseline_input: None,
+            max_regression_percent: 10.0,
+            fixture: ProductionFixture::CpuLookup64k,
         };
         let blocks = build_noop_trace_blocks(2, 3).unwrap();
         let measurements = RunMeasurements {
@@ -2082,6 +3080,7 @@ mod tests {
             &blocks,
             Path::new("benchmark-runs/jolt-nova/report.manifest.json"),
             &measurements,
+            [0xabu8; 32],
         );
 
         assert_eq!(artifact.schema_version, PERFORMANCE_SCHEMA_VERSION);
@@ -2090,6 +3089,7 @@ mod tests {
         assert_eq!(artifact.largest_reported_active_cycles, 6);
         assert_eq!(artifact.processed_block_count, 3);
         assert_eq!(artifact.processed_active_cycles, 9);
+        assert_eq!(artifact.workload_sha3_256, "ab".repeat(32));
         assert_eq!(artifact.timings_ms.trace_load, 100);
         assert_eq!(artifact.timings_ms.nova_fold_and_spartan_report, 2_000);
         assert_eq!(
@@ -2103,6 +3103,77 @@ mod tests {
             artifact.manifest_path,
             "benchmark-runs/jolt-nova/report.manifest.json"
         );
+    }
+
+    fn sample_args() -> Args {
+        Args {
+            trace_source: TraceSource::Synthetic,
+            trace_profile: TraceProfile::SyntheticNoop,
+            trace_input: None,
+            elf_input: None,
+            trace_output: None,
+            guest_input: None,
+            untrusted_advice: None,
+            trusted_advice: None,
+            trace_block_size: 1024,
+            blocks: 2,
+            cycles_per_block: 3,
+            block_counts: vec![1, 2],
+            output: PathBuf::from("benchmark-runs/jolt-nova/report.json"),
+            manifest_output: None,
+            performance_output: None,
+            memory_sample_interval_ms: 10,
+            program_digest_byte: 9,
+            measurement_runs: 1,
+            warmup_runs: 0,
+            aggregate_output: None,
+            baseline_input: None,
+            max_regression_percent: 10.0,
+            fixture: ProductionFixture::CpuLookup64k,
+        }
+    }
+
+    fn sample_performance_artifact(
+        prove_ms: u64,
+        total_ms: u64,
+        end_to_end_throughput: f64,
+        proving_throughput: f64,
+        peak_delta_bytes: u64,
+    ) -> PerformanceBaselineArtifact {
+        PerformanceBaselineArtifact {
+            schema_version: PERFORMANCE_SCHEMA_VERSION.to_string(),
+            runner: RUNNER_NAME.to_string(),
+            trace_source: "synthetic".to_string(),
+            build_profile: "debug".to_string(),
+            target_os: std::env::consts::OS.to_string(),
+            target_arch: std::env::consts::ARCH.to_string(),
+            workload_sha3_256: "ab".repeat(32),
+            source_block_count: 2,
+            reported_block_counts: vec![1, 2],
+            largest_reported_block_count: 2,
+            largest_reported_active_cycles: 6,
+            processed_block_count: 3,
+            processed_active_cycles: 9,
+            timings_ms: PerformanceTimings {
+                trace_load: 5,
+                nova_fold_and_spartan_report: prove_ms,
+                manifest_write: 1,
+                measured_total: total_ms,
+            },
+            throughput: PerformanceThroughput {
+                proving_processed_active_cycles_per_second: Some(proving_throughput),
+                end_to_end_processed_active_cycles_per_second: Some(end_to_end_throughput),
+                end_to_end_processed_blocks_per_second: Some(end_to_end_throughput / 3.0),
+            },
+            memory: PerformanceMemory {
+                sample_interval_ms: 10,
+                initial_physical_bytes: Some(1_000),
+                peak_physical_bytes: Some(1_000 + peak_delta_bytes),
+                peak_delta_bytes: Some(peak_delta_bytes),
+            },
+            report_path: "benchmark-runs/jolt-nova/report.json".to_string(),
+            manifest_path: "benchmark-runs/jolt-nova/report.manifest.json".to_string(),
+        }
     }
 
     fn sample_benchmark_artifact() -> NovaBlockProofPipelineFinalProofSizeBenchmarkArtifact {

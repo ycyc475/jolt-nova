@@ -123,8 +123,8 @@ comparative research:
 
 1. ~~bind external lookahead data so real traces can be folded and reported by
    prefixes~~ (completed in Stage 9.1);
-2. add production-size guest fixtures and automated multi-run baseline
-   comparisons;
+2. ~~add production-size guest fixtures and automated multi-run baseline
+   comparisons~~ (completed in Stage 9.2);
 3. stream or binary-encode trace blocks to reduce JSON memory and I/O overhead;
 4. introduce a real LogUp lookup backend behind the existing replaceable lookup
    interface and compare it with Lasso;

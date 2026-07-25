@@ -101,7 +101,8 @@ manifest, and performance-baseline artifacts. See the
 [Stage 8 runner and baseline guide](./jolt-core/examples/jolt_nova_stage8.md)
 for commands and measurement semantics, and the
 [Stage 9 guide](./jolt-core/examples/jolt_nova_stage9.md) for partial-prefix
-lookahead binding and the current research roadmap.
+lookahead binding, production-size fixtures, repeatable multi-run comparisons,
+and the current research roadmap.
 
 ## Performance profiling
 
