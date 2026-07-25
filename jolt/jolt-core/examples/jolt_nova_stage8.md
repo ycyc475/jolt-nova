@@ -107,9 +107,9 @@ Stage 8 now provides:
 
 ## Current boundaries
 
-- A program-bound trace bundle currently proves only its complete block sequence.
-  Sound partial-prefix proving still needs an externally bound next-cycle
-  lookahead.
+- Stage 9.1 now supports sound program-bound partial prefixes by committing the
+  external next-cycle lookahead in both the CPU proof and folded state. See the
+  [Stage 9 guide](./jolt_nova_stage9.md).
 - Trace bundles are materialized as JSON, so large guests can consume substantial
   serialization time and disk space.
 - Peak-memory sampling is best effort and does not replace heap profiling.
@@ -121,8 +121,8 @@ Stage 8 now provides:
 Stage 9 should move from a validated experimental pipeline toward scalable,
 comparative research:
 
-1. bind external lookahead data so real traces can be folded and reported by
-   prefixes;
+1. ~~bind external lookahead data so real traces can be folded and reported by
+   prefixes~~ (completed in Stage 9.1);
 2. add production-size guest fixtures and automated multi-run baseline
    comparisons;
 3. stream or binary-encode trace blocks to reduce JSON memory and I/O overhead;

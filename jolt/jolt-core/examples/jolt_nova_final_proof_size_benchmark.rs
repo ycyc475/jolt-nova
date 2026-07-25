@@ -655,13 +655,6 @@ fn normalized_block_counts(
     };
 
     validate_block_counts(loaded_blocks, &block_counts)?;
-    if has_program_binding && block_counts.iter().any(|&count| count != loaded_blocks) {
-        return Err(
-            "program-bound trace bundles currently support only the complete block sequence; \
-             partial prefixes require an external lookahead binding"
-                .to_string(),
-        );
-    }
     Ok(block_counts)
 }
 
@@ -1472,9 +1465,10 @@ mod tests {
 
         let mut partial_real_trace = args;
         partial_real_trace.block_counts = vec![1, 3];
-        assert!(normalized_block_counts(&partial_real_trace, 3, true)
-            .unwrap_err()
-            .contains("external lookahead binding"));
+        assert_eq!(
+            normalized_block_counts(&partial_real_trace, 3, true).unwrap(),
+            vec![1, 3]
+        );
     }
 
     #[test]
@@ -1804,7 +1798,7 @@ mod tests {
             trace_block_size: 1,
             blocks: 1,
             cycles_per_block: 1,
-            block_counts: vec![2],
+            block_counts: vec![1, 2],
             output: report_path.clone(),
             manifest_output: Some(manifest_path.clone()),
             performance_output: None,
@@ -1819,6 +1813,7 @@ mod tests {
         let performance_json = std::fs::read_to_string(&performance_path).unwrap();
         let performance: PerformanceBaselineArtifact =
             serde_json::from_str(&performance_json).unwrap();
+        assert!(report.contains("\"block_count\":1"));
         assert!(report.contains("\"block_count\":2"));
         assert!(report.contains("\"recursive_snark_bytes_len\":"));
         assert!(manifest.contains("\"trace_source\":\"elf\""));
@@ -1829,11 +1824,11 @@ mod tests {
         assert_eq!(performance.schema_version, PERFORMANCE_SCHEMA_VERSION);
         assert_eq!(performance.trace_source, "elf");
         assert_eq!(performance.source_block_count, 2);
-        assert_eq!(performance.reported_block_counts, vec![2]);
+        assert_eq!(performance.reported_block_counts, vec![1, 2]);
         assert_eq!(performance.largest_reported_block_count, 2);
         assert_eq!(performance.largest_reported_active_cycles, 2);
-        assert_eq!(performance.processed_block_count, 2);
-        assert_eq!(performance.processed_active_cycles, 2);
+        assert_eq!(performance.processed_block_count, 3);
+        assert_eq!(performance.processed_active_cycles, 3);
         assert!(performance
             .throughput
             .proving_processed_active_cycles_per_second

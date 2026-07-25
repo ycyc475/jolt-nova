@@ -178,6 +178,11 @@ pub struct BlockCpuProof<F> {
     pub r1cs_num_steps: usize,
     pub r1cs_vk_digest: F,
     pub used_lookahead_cycle: bool,
+    /// Public commitment to the exact CPU cycle used after the final row.
+    ///
+    /// This is `None` only when the block has no lookahead. In particular,
+    /// non-terminal prefix proofs bind the first cycle of the next block here.
+    pub lookahead_cycle_digest: Option<[u8; 32]>,
 }
 
 pub type CpuBlockProof<Digest, F> = BlockProof<Digest, BlockCpuProof<F>>;
@@ -522,6 +527,7 @@ pub struct FoldableBlockState<F = ark_bn254::Fr> {
     pub r1cs_num_steps: usize,
     pub r1cs_vk_digest: F,
     pub used_lookahead_cycle: bool,
+    pub lookahead_cycle_digest: Option<[u8; 32]>,
     pub state_digest: [u8; 32],
 }
 
@@ -3680,6 +3686,8 @@ where
     ) -> Result<CpuBlockProof<Digest, F>, BlockTraceError> {
         validate_trace_block_shape(block)?;
         validate_cpu_r1cs_block::<F>(bytecode_preprocessing, block, lookahead_cycle)?;
+        let lookahead_cycle_digest =
+            digest_cpu_lookahead_cycle(block.block_index, lookahead_cycle)?;
 
         let public_input = BlockPublicInput::from_trace_block(block, self.program_digest.clone());
         public_input.validate_shape()?;
@@ -3695,6 +3703,7 @@ where
                 r1cs_num_steps,
                 r1cs_vk_digest: spartan_key.vk_digest,
                 used_lookahead_cycle: lookahead_cycle.is_some(),
+                lookahead_cycle_digest,
             },
         ))
     }
@@ -3704,11 +3713,25 @@ where
         bytecode_preprocessing: &BytecodePreprocessing,
         blocks: &[TraceBlock],
     ) -> Result<Vec<CpuBlockProof<Digest, F>>, BlockTraceError> {
+        self.prove_blocks_with_external_lookahead(bytecode_preprocessing, blocks, None)
+    }
+
+    /// Proves a block sequence whose final non-terminal block is followed by
+    /// `external_lookahead_cycle`.
+    ///
+    /// The exact cycle is committed in the CPU proof, so a verifier cannot
+    /// replace or omit it while reusing the same proof.
+    pub fn prove_blocks_with_external_lookahead(
+        &self,
+        bytecode_preprocessing: &BytecodePreprocessing,
+        blocks: &[TraceBlock],
+        external_lookahead_cycle: Option<&Cycle>,
+    ) -> Result<Vec<CpuBlockProof<Digest, F>>, BlockTraceError> {
         let proofs = blocks
             .iter()
             .enumerate()
             .map(|(index, block)| {
-                let lookahead = block_lookahead_cycle(blocks, index);
+                let lookahead = block_lookahead_cycle(blocks, index, external_lookahead_cycle);
                 self.prove_block(bytecode_preprocessing, block, lookahead)
             })
             .collect::<Result<Vec<_>, _>>()?;
@@ -3725,7 +3748,11 @@ where
 
 static TERMINAL_LOOKAHEAD_CYCLE: Cycle = Cycle::NoOp;
 
-fn block_lookahead_cycle(blocks: &[TraceBlock], index: usize) -> Option<&Cycle> {
+fn block_lookahead_cycle<'a>(
+    blocks: &'a [TraceBlock],
+    index: usize,
+    external_lookahead_cycle: Option<&'a Cycle>,
+) -> Option<&'a Cycle> {
     blocks
         .get(index + 1)
         .and_then(|next_block| next_block.cycles.first())
@@ -3734,6 +3761,11 @@ fn block_lookahead_cycle(blocks: &[TraceBlock], index: usize) -> Option<&Cycle> 
                 .get(index)
                 .is_some_and(|block| block.end_state.terminated)
                 .then_some(&TERMINAL_LOOKAHEAD_CYCLE)
+        })
+        .or_else(|| {
+            (index + 1 == blocks.len())
+                .then_some(external_lookahead_cycle)
+                .flatten()
         })
 }
 
@@ -3787,16 +3819,30 @@ where
         bytecode_preprocessing: &BytecodePreprocessing,
         blocks: &[TraceBlock],
     ) -> Result<Vec<BlockProofBundle<Digest, F>>, BlockTraceError> {
+        self.prove_blocks_with_external_lookahead(bytecode_preprocessing, blocks, None)
+    }
+
+    pub fn prove_blocks_with_external_lookahead(
+        &self,
+        bytecode_preprocessing: &BytecodePreprocessing,
+        blocks: &[TraceBlock],
+        external_lookahead_cycle: Option<&Cycle>,
+    ) -> Result<Vec<BlockProofBundle<Digest, F>>, BlockTraceError> {
         let bundles = blocks
             .iter()
             .enumerate()
             .map(|(index, block)| {
-                let lookahead = block_lookahead_cycle(blocks, index);
+                let lookahead = block_lookahead_cycle(blocks, index, external_lookahead_cycle);
                 self.prove_block(bytecode_preprocessing, block, lookahead)
             })
             .collect::<Result<Vec<_>, _>>()?;
 
-        verify_block_proof_bundle_chain(bytecode_preprocessing, blocks, &bundles)?;
+        verify_block_proof_bundle_chain_with_external_lookahead(
+            bytecode_preprocessing,
+            blocks,
+            external_lookahead_cycle,
+            &bundles,
+        )?;
         Ok(bundles)
     }
 }
@@ -3956,11 +4002,28 @@ where
         bytecode_preprocessing: &BytecodePreprocessing,
         blocks: &[TraceBlock],
     ) -> Result<BlockProofPipelineOutput<Digest, F, Backend::Accumulator>, BlockTraceError> {
-        let bundles = self
-            .bundle_prover
-            .prove_blocks(bytecode_preprocessing, blocks)?;
+        self.prove_blocks_with_external_lookahead(bytecode_preprocessing, blocks, None)
+    }
+
+    pub fn prove_blocks_with_external_lookahead(
+        &self,
+        bytecode_preprocessing: &BytecodePreprocessing,
+        blocks: &[TraceBlock],
+        external_lookahead_cycle: Option<&Cycle>,
+    ) -> Result<BlockProofPipelineOutput<Digest, F, Backend::Accumulator>, BlockTraceError> {
+        let bundles = self.bundle_prover.prove_blocks_with_external_lookahead(
+            bytecode_preprocessing,
+            blocks,
+            external_lookahead_cycle,
+        )?;
         let fold_inputs = build_block_fold_inputs(&bundles);
-        verify_block_fold_input_chain(bytecode_preprocessing, blocks, &bundles, &fold_inputs)?;
+        verify_block_fold_input_chain_with_external_lookahead(
+            bytecode_preprocessing,
+            blocks,
+            external_lookahead_cycle,
+            &bundles,
+            &fold_inputs,
+        )?;
         let accumulator = self.folding_backend.fold(&fold_inputs)?;
 
         Ok(BlockProofPipelineOutput {
@@ -3989,7 +4052,25 @@ where
         blocks: &[TraceBlock],
     ) -> Result<BlockProofPipelineOutput<Digest, F, NovaFoldAccumulator<Digest>>, BlockTraceError>
     {
-        let mut output = self.prove_blocks(bytecode_preprocessing, blocks)?;
+        self.prove_blocks_with_final_proof_and_external_lookahead(
+            bytecode_preprocessing,
+            blocks,
+            None,
+        )
+    }
+
+    pub fn prove_blocks_with_final_proof_and_external_lookahead(
+        &self,
+        bytecode_preprocessing: &BytecodePreprocessing,
+        blocks: &[TraceBlock],
+        external_lookahead_cycle: Option<&Cycle>,
+    ) -> Result<BlockProofPipelineOutput<Digest, F, NovaFoldAccumulator<Digest>>, BlockTraceError>
+    {
+        let mut output = self.prove_blocks_with_external_lookahead(
+            bytecode_preprocessing,
+            blocks,
+            external_lookahead_cycle,
+        )?;
         let final_proof = prove_configured_final_folded_accumulator(&output.accumulator)?;
         output.final_proof = Some(final_proof);
         Ok(output)
@@ -4007,7 +4088,24 @@ where
         bytecode_preprocessing: &BytecodePreprocessing,
         blocks: &[TraceBlock],
     ) -> Result<NovaBlockProofPipelineFinalProofSizeReport<Digest, F>, BlockTraceError> {
-        let output = self.prove_blocks(bytecode_preprocessing, blocks)?;
+        self.prove_blocks_with_final_proof_size_report_and_external_lookahead(
+            bytecode_preprocessing,
+            blocks,
+            None,
+        )
+    }
+
+    pub fn prove_blocks_with_final_proof_size_report_and_external_lookahead(
+        &self,
+        bytecode_preprocessing: &BytecodePreprocessing,
+        blocks: &[TraceBlock],
+        external_lookahead_cycle: Option<&Cycle>,
+    ) -> Result<NovaBlockProofPipelineFinalProofSizeReport<Digest, F>, BlockTraceError> {
+        let output = self.prove_blocks_with_external_lookahead(
+            bytecode_preprocessing,
+            blocks,
+            external_lookahead_cycle,
+        )?;
         let final_proof_size_comparison =
             summarize_nova_block_proof_pipeline_final_proof_size_comparison(&output)?;
 
@@ -4035,10 +4133,15 @@ where
         let rows = block_counts
             .iter()
             .map(|&block_count| {
-                let report = self.prove_blocks_with_final_proof_size_report(
-                    bytecode_preprocessing,
-                    &blocks[..block_count],
-                )?;
+                let external_lookahead_cycle = blocks
+                    .get(block_count)
+                    .and_then(|next_block| next_block.cycles.first());
+                let report = self
+                    .prove_blocks_with_final_proof_size_report_and_external_lookahead(
+                        bytecode_preprocessing,
+                        &blocks[..block_count],
+                        external_lookahead_cycle,
+                    )?;
                 let accumulator = &report.output.accumulator;
 
                 Ok(NovaBlockProofPipelineFinalProofSizeScalingRow {
@@ -4441,9 +4544,28 @@ where
     Digest: Clone + PartialEq + AsRef<[u8]>,
     F: JoltField,
 {
-    verify_block_proof_pipeline_with_backend(
+    verify_block_proof_pipeline_with_external_lookahead(
         bytecode_preprocessing,
         blocks,
+        None,
+        output,
+    )
+}
+
+pub fn verify_block_proof_pipeline_with_external_lookahead<Digest, F>(
+    bytecode_preprocessing: &BytecodePreprocessing,
+    blocks: &[TraceBlock],
+    external_lookahead_cycle: Option<&Cycle>,
+    output: &BlockProofPipelineOutput<Digest, F>,
+) -> Result<(), BlockTraceError>
+where
+    Digest: Clone + PartialEq + AsRef<[u8]>,
+    F: JoltField,
+{
+    verify_block_proof_pipeline_with_backend_and_external_lookahead(
+        bytecode_preprocessing,
+        blocks,
+        external_lookahead_cycle,
         output,
         &MockFoldingBackend,
     )
@@ -4452,6 +4574,27 @@ where
 pub fn verify_block_proof_pipeline_with_backend<Digest, F, Backend>(
     bytecode_preprocessing: &BytecodePreprocessing,
     blocks: &[TraceBlock],
+    output: &BlockProofPipelineOutput<Digest, F, Backend::Accumulator>,
+    folding_backend: &Backend,
+) -> Result<(), BlockTraceError>
+where
+    Digest: Clone + PartialEq + AsRef<[u8]>,
+    F: JoltField,
+    Backend: BlockFoldingBackend<Digest, F>,
+{
+    verify_block_proof_pipeline_with_backend_and_external_lookahead(
+        bytecode_preprocessing,
+        blocks,
+        None,
+        output,
+        folding_backend,
+    )
+}
+
+pub fn verify_block_proof_pipeline_with_backend_and_external_lookahead<Digest, F, Backend>(
+    bytecode_preprocessing: &BytecodePreprocessing,
+    blocks: &[TraceBlock],
+    external_lookahead_cycle: Option<&Cycle>,
     output: &BlockProofPipelineOutput<Digest, F, Backend::Accumulator>,
     folding_backend: &Backend,
 ) -> Result<(), BlockTraceError>
@@ -4471,6 +4614,7 @@ where
     verify_block_proof_pipeline_core_with_backend(
         bytecode_preprocessing,
         blocks,
+        external_lookahead_cycle,
         output,
         folding_backend,
     )
@@ -4479,6 +4623,7 @@ where
 fn verify_block_proof_pipeline_core_with_backend<Digest, F, Backend>(
     bytecode_preprocessing: &BytecodePreprocessing,
     blocks: &[TraceBlock],
+    external_lookahead_cycle: Option<&Cycle>,
     output: &BlockProofPipelineOutput<Digest, F, Backend::Accumulator>,
     folding_backend: &Backend,
 ) -> Result<(), BlockTraceError>
@@ -4487,9 +4632,10 @@ where
     F: JoltField,
     Backend: BlockFoldingBackend<Digest, F>,
 {
-    verify_block_fold_input_chain(
+    verify_block_fold_input_chain_with_external_lookahead(
         bytecode_preprocessing,
         blocks,
+        external_lookahead_cycle,
         &output.bundles,
         &output.fold_inputs,
     )?;
@@ -4512,9 +4658,30 @@ where
     Digest: Clone + PartialEq + AsRef<[u8]>,
     F: JoltField,
 {
+    verify_nova_block_proof_pipeline_with_final_proof_and_external_lookahead(
+        bytecode_preprocessing,
+        blocks,
+        None,
+        output,
+        folding_backend,
+    )
+}
+
+pub fn verify_nova_block_proof_pipeline_with_final_proof_and_external_lookahead<Digest, F>(
+    bytecode_preprocessing: &BytecodePreprocessing,
+    blocks: &[TraceBlock],
+    external_lookahead_cycle: Option<&Cycle>,
+    output: &BlockProofPipelineOutput<Digest, F, NovaFoldAccumulator<Digest>>,
+    folding_backend: &NovaFoldingBackend,
+) -> Result<(), BlockTraceError>
+where
+    Digest: Clone + PartialEq + AsRef<[u8]>,
+    F: JoltField,
+{
     verify_block_proof_pipeline_core_with_backend(
         bytecode_preprocessing,
         blocks,
+        external_lookahead_cycle,
         output,
         folding_backend,
     )?;
@@ -4610,6 +4777,14 @@ where
             block_index: proof.public_input.block_index,
         });
     }
+    if proof.inner_proof.used_lookahead_cycle != proof.inner_proof.lookahead_cycle_digest.is_some()
+    {
+        return Err(BlockTraceError::CpuLookaheadMismatch {
+            block_index: proof.public_input.block_index,
+            proof_used_lookahead: proof.inner_proof.used_lookahead_cycle,
+            actual_used_lookahead: proof.inner_proof.lookahead_cycle_digest.is_some(),
+        });
+    }
 
     Ok(())
 }
@@ -4640,6 +4815,13 @@ where
             block_index: block.block_index,
             proof_used_lookahead: proof.inner_proof.used_lookahead_cycle,
             actual_used_lookahead: lookahead_cycle.is_some(),
+        });
+    }
+    let expected_lookahead_cycle_digest =
+        digest_cpu_lookahead_cycle(block.block_index, lookahead_cycle)?;
+    if proof.inner_proof.lookahead_cycle_digest != expected_lookahead_cycle_digest {
+        return Err(BlockTraceError::CpuLookaheadDigestMismatch {
+            block_index: block.block_index,
         });
     }
 
@@ -4677,6 +4859,24 @@ where
     Digest: Clone + PartialEq,
     F: JoltField,
 {
+    verify_block_proof_bundle_chain_with_external_lookahead(
+        bytecode_preprocessing,
+        blocks,
+        None,
+        bundles,
+    )
+}
+
+pub fn verify_block_proof_bundle_chain_with_external_lookahead<Digest, F>(
+    bytecode_preprocessing: &BytecodePreprocessing,
+    blocks: &[TraceBlock],
+    external_lookahead_cycle: Option<&Cycle>,
+    bundles: &[BlockProofBundle<Digest, F>],
+) -> Result<(), BlockTraceError>
+where
+    Digest: Clone + PartialEq,
+    F: JoltField,
+{
     if blocks.len() != bundles.len() {
         return Err(BlockTraceError::BlockProofBundleChainLengthMismatch {
             blocks: blocks.len(),
@@ -4691,7 +4891,7 @@ where
     validate_block_chain(&public_inputs)?;
 
     for (index, (block, bundle)) in blocks.iter().zip(bundles).enumerate() {
-        let lookahead = block_lookahead_cycle(blocks, index);
+        let lookahead = block_lookahead_cycle(blocks, index, external_lookahead_cycle);
         verify_block_proof_bundle(bytecode_preprocessing, block, lookahead, bundle)?;
     }
 
@@ -4773,6 +4973,26 @@ where
     Digest: Clone + PartialEq,
     F: JoltField,
 {
+    verify_block_fold_input_chain_with_external_lookahead(
+        bytecode_preprocessing,
+        blocks,
+        None,
+        bundles,
+        fold_inputs,
+    )
+}
+
+pub fn verify_block_fold_input_chain_with_external_lookahead<Digest, F>(
+    bytecode_preprocessing: &BytecodePreprocessing,
+    blocks: &[TraceBlock],
+    external_lookahead_cycle: Option<&Cycle>,
+    bundles: &[BlockProofBundle<Digest, F>],
+    fold_inputs: &[BlockFoldInput<Digest, F>],
+) -> Result<(), BlockTraceError>
+where
+    Digest: Clone + PartialEq,
+    F: JoltField,
+{
     if blocks.len() != bundles.len() || blocks.len() != fold_inputs.len() {
         return Err(BlockTraceError::BlockFoldInputChainLengthMismatch {
             blocks: blocks.len(),
@@ -4781,12 +5001,17 @@ where
         });
     }
 
-    verify_block_proof_bundle_chain(bytecode_preprocessing, blocks, bundles)?;
+    verify_block_proof_bundle_chain_with_external_lookahead(
+        bytecode_preprocessing,
+        blocks,
+        external_lookahead_cycle,
+        bundles,
+    )?;
 
     for (index, ((block, bundle), fold_input)) in
         blocks.iter().zip(bundles).zip(fold_inputs).enumerate()
     {
-        let lookahead = block_lookahead_cycle(blocks, index);
+        let lookahead = block_lookahead_cycle(blocks, index, external_lookahead_cycle);
         verify_block_fold_input(bytecode_preprocessing, block, lookahead, bundle, fold_input)?;
     }
 
@@ -5177,6 +5402,7 @@ where
         r1cs_num_steps: cpu_proof.r1cs_num_steps,
         r1cs_vk_digest: cpu_proof.r1cs_vk_digest,
         used_lookahead_cycle: cpu_proof.used_lookahead_cycle,
+        lookahead_cycle_digest: cpu_proof.lookahead_cycle_digest,
         state_digest: [0u8; 32],
     };
     state.state_digest = digest_foldable_block_state(&state);
@@ -5294,12 +5520,28 @@ fn digest_machine_boundary_state(state: &MachineBoundaryState) -> [u8; 32] {
     finalize_digest(hasher)
 }
 
+fn digest_cpu_lookahead_cycle(
+    block_index: usize,
+    lookahead_cycle: Option<&Cycle>,
+) -> Result<Option<[u8; 32]>, BlockTraceError> {
+    let Some(lookahead_cycle) = lookahead_cycle else {
+        return Ok(None);
+    };
+    let bytes = postcard::to_stdvec(lookahead_cycle)
+        .map_err(|_| BlockTraceError::CpuLookaheadSerializationFailed { block_index })?;
+    let mut hasher = Sha3_256::new();
+    hasher.update(b"JOLT_NOVA_CPU_LOOKAHEAD_CYCLE_V1");
+    update_usize(&mut hasher, bytes.len());
+    hasher.update(bytes);
+    Ok(Some(finalize_digest(hasher)))
+}
+
 fn digest_foldable_block_state<F>(state: &FoldableBlockState<F>) -> [u8; 32]
 where
     F: JoltField,
 {
     let mut hasher = Sha3_256::new();
-    hasher.update(b"JOLT_NOVA_FOLDABLE_BLOCK_STATE_V1");
+    hasher.update(b"JOLT_NOVA_FOLDABLE_BLOCK_STATE_V2");
     update_usize(&mut hasher, state.block_index);
     update_usize(&mut hasher, state.global_cycle_start);
     update_usize(&mut hasher, state.global_cycle_end);
@@ -5324,6 +5566,13 @@ where
     update_usize(&mut hasher, state.r1cs_num_steps);
     update_field(&mut hasher, state.r1cs_vk_digest);
     hasher.update([u8::from(state.used_lookahead_cycle)]);
+    match state.lookahead_cycle_digest {
+        Some(digest) => {
+            hasher.update([1]);
+            hasher.update(digest);
+        }
+        None => hasher.update([0]),
+    }
 
     finalize_digest(hasher)
 }
@@ -6434,6 +6683,12 @@ pub enum BlockTraceError {
         proof_used_lookahead: bool,
         actual_used_lookahead: bool,
     },
+    CpuLookaheadDigestMismatch {
+        block_index: usize,
+    },
+    CpuLookaheadSerializationFailed {
+        block_index: usize,
+    },
     CpuR1CSConstraintViolation {
         block_index: usize,
         row_index: usize,
@@ -6634,6 +6889,14 @@ impl fmt::Display for BlockTraceError {
             } => write!(
                 f,
                 "CPU/R1CS proof lookahead mismatch for block {block_index}: proof={proof_used_lookahead}, actual={actual_used_lookahead}"
+            ),
+            Self::CpuLookaheadDigestMismatch { block_index } => write!(
+                f,
+                "CPU/R1CS proof lookahead digest does not match the cycle supplied for block {block_index}"
+            ),
+            Self::CpuLookaheadSerializationFailed { block_index } => write!(
+                f,
+                "failed to serialize the CPU/R1CS lookahead cycle for block {block_index}"
             ),
             Self::CpuR1CSConstraintViolation {
                 block_index,
@@ -7223,9 +7486,51 @@ mod tests {
 
         assert_eq!(proofs.len(), 2);
         assert!(proofs[0].inner_proof.used_lookahead_cycle);
+        assert!(proofs[0].inner_proof.lookahead_cycle_digest.is_some());
         assert!(!proofs[1].inner_proof.used_lookahead_cycle);
+        assert!(proofs[1].inner_proof.lookahead_cycle_digest.is_none());
         verify_cpu_block_witness(&bytecode, &block0, block1.cycles.first(), &proofs[0]).unwrap();
         verify_cpu_block_witness(&bytecode, &block1, None, &proofs[1]).unwrap();
+    }
+
+    #[test]
+    fn block_cpu_prefix_proof_publicly_binds_external_lookahead() {
+        let bytecode = BytecodePreprocessing::default();
+        let block0 = trace_block(0, boundary(0, 0), boundary(2, 0));
+        let block1 = trace_block(1, block0.end_state.clone(), boundary(4, 0));
+        let external_lookahead = block1.cycles.first().unwrap();
+        let prover = BlockCpuProver::<_, ark_bn254::Fr>::new([9u8; 32]);
+
+        let proofs = prover
+            .prove_blocks_with_external_lookahead(
+                &bytecode,
+                std::slice::from_ref(&block0),
+                Some(external_lookahead),
+            )
+            .unwrap();
+
+        assert!(proofs[0].inner_proof.used_lookahead_cycle);
+        assert_eq!(
+            proofs[0].inner_proof.lookahead_cycle_digest,
+            digest_cpu_lookahead_cycle(block0.block_index, Some(external_lookahead)).unwrap()
+        );
+        verify_cpu_block_witness(&bytecode, &block0, Some(external_lookahead), &proofs[0]).unwrap();
+        assert!(matches!(
+            verify_cpu_block_witness(&bytecode, &block0, None, &proofs[0]),
+            Err(BlockTraceError::CpuLookaheadMismatch { .. })
+        ));
+
+        let mut tampered = proofs[0].clone();
+        tampered
+            .inner_proof
+            .lookahead_cycle_digest
+            .as_mut()
+            .unwrap()[0] ^= 1;
+        assert_eq!(
+            verify_cpu_block_witness(&bytecode, &block0, Some(external_lookahead), &tampered,)
+                .unwrap_err(),
+            BlockTraceError::CpuLookaheadDigestMismatch { block_index: 0 }
+        );
     }
 
     #[test]
@@ -7832,7 +8137,9 @@ mod tests {
             fold_inputs[1].state.start_state_digest
         );
         assert!(fold_inputs[0].state.used_lookahead_cycle);
+        assert!(fold_inputs[0].state.lookahead_cycle_digest.is_some());
         assert!(!fold_inputs[1].state.used_lookahead_cycle);
+        assert!(fold_inputs[1].state.lookahead_cycle_digest.is_none());
         verify_block_fold_input_chain(&bytecode, &[block0, block1], &bundles, &fold_inputs)
             .unwrap();
     }
@@ -9875,6 +10182,45 @@ mod tests {
         verify_block_proof_pipeline(&bytecode, &[block0, block1], &output).unwrap();
     }
 
+    #[test]
+    fn block_proof_pipeline_proves_and_verifies_partial_prefix_with_external_lookahead() {
+        let bytecode = BytecodePreprocessing::default();
+        let block0 = trace_block(0, boundary(0, 0), boundary(2, 0));
+        let block1 = trace_block(1, block0.end_state.clone(), boundary(4, 0));
+        let external_lookahead = block1.cycles.first().unwrap();
+        let pipeline = BlockProofPipeline::<_, ark_bn254::Fr>::new([9u8; 32]);
+
+        let output = pipeline
+            .prove_blocks_with_external_lookahead(
+                &bytecode,
+                std::slice::from_ref(&block0),
+                Some(external_lookahead),
+            )
+            .unwrap();
+
+        assert_eq!(output.bundles.len(), 1);
+        assert!(output.bundles[0]
+            .cpu_proof
+            .inner_proof
+            .lookahead_cycle_digest
+            .is_some());
+        assert_eq!(
+            output.fold_inputs[0].state.lookahead_cycle_digest,
+            output.bundles[0]
+                .cpu_proof
+                .inner_proof
+                .lookahead_cycle_digest
+        );
+        verify_block_proof_pipeline_with_external_lookahead(
+            &bytecode,
+            std::slice::from_ref(&block0),
+            Some(external_lookahead),
+            &output,
+        )
+        .unwrap();
+        assert!(verify_block_proof_pipeline(&bytecode, &[block0], &output).is_err());
+    }
+
     #[cfg(feature = "nova")]
     #[test]
     fn nova_block_proof_pipeline_with_placeholder_final_proof_proves_and_verifies() {
@@ -9905,6 +10251,46 @@ mod tests {
             &backend,
         )
         .unwrap();
+    }
+
+    #[cfg(feature = "nova")]
+    #[test]
+    fn nova_final_proof_for_partial_prefix_binds_external_lookahead() {
+        let bytecode = BytecodePreprocessing::default();
+        let block0 = trace_block(0, boundary(0, 0), boundary(2, 0));
+        let block1 = trace_block(1, block0.end_state.clone(), boundary(4, 0));
+        let external_lookahead = block1.cycles.first().unwrap();
+        let backend = NovaFoldingBackend::default();
+        let pipeline = BlockProofPipeline::<_, ark_bn254::Fr, NovaFoldingBackend>::with_backend(
+            [9u8; 32],
+            backend.clone(),
+        );
+
+        let output = pipeline
+            .prove_blocks_with_final_proof_and_external_lookahead(
+                &bytecode,
+                std::slice::from_ref(&block0),
+                Some(external_lookahead),
+            )
+            .unwrap();
+
+        assert!(output.final_proof.is_some());
+        assert!(output.fold_inputs[0].state.lookahead_cycle_digest.is_some());
+        verify_nova_block_proof_pipeline_with_final_proof_and_external_lookahead(
+            &bytecode,
+            std::slice::from_ref(&block0),
+            Some(external_lookahead),
+            &output,
+            &backend,
+        )
+        .unwrap();
+        assert!(verify_nova_block_proof_pipeline_with_final_proof(
+            &bytecode,
+            &[block0],
+            &output,
+            &backend,
+        )
+        .is_err());
     }
 
     #[cfg(feature = "nova")]
