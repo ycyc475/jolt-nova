@@ -2,6 +2,12 @@ use std::{
     error::Error,
     fmt, io,
     path::{Path, PathBuf},
+    sync::{
+        atomic::{AtomicBool, AtomicU64, Ordering},
+        Arc,
+    },
+    thread,
+    time::{Duration, Instant},
 };
 
 use clap::{Parser, ValueEnum};
@@ -29,9 +35,11 @@ use tracer::{
 
 const DEFAULT_OUTPUT_PATH: &str = "benchmark-runs/jolt-nova/final-proof-size-scaling.json";
 const RUNNER_NAME: &str = "jolt_nova_final_proof_size_benchmark";
-const MANIFEST_SCHEMA_VERSION: &str = "jolt-nova-benchmark-runner-v2";
+const MANIFEST_SCHEMA_VERSION: &str = "jolt-nova-benchmark-runner-v3";
+const PERFORMANCE_SCHEMA_VERSION: &str = "jolt-nova-performance-baseline-v1";
 const TRACE_FILE_SCHEMA_VERSION: &str = "jolt-nova-trace-blocks-v1";
 const TRACE_BUNDLE_SCHEMA_VERSION: &str = "jolt-nova-trace-bundle-v1";
+const MAX_MEMORY_SAMPLE_INTERVAL_MS: u64 = 1_000;
 
 /// Jolt-Nova runner for synthetic, serialized, and real RV64 ELF trace blocks.
 ///
@@ -101,6 +109,18 @@ struct Args {
     #[arg(long)]
     manifest_output: Option<PathBuf>,
 
+    /// Optional performance artifact path containing timings, throughput, and
+    /// best-effort peak physical memory.
+    ///
+    /// If omitted, the runner writes next to the report using
+    /// `<report-stem>.performance.json`.
+    #[arg(long)]
+    performance_output: Option<PathBuf>,
+
+    /// Interval used by the best-effort peak-memory sampler.
+    #[arg(long, default_value_t = 10)]
+    memory_sample_interval_ms: u64,
+
     /// Repeated byte used to form the synthetic program digest.
     #[arg(long, default_value_t = 9)]
     program_digest_byte: u8,
@@ -165,6 +185,72 @@ struct TraceFileMetadata {
     schema_version: String,
     sha3_256: [u8; 32],
     elf_sha3_256: Option<[u8; 32]>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+struct PerformanceBaselineArtifact {
+    schema_version: String,
+    runner: String,
+    trace_source: String,
+    build_profile: String,
+    target_os: String,
+    target_arch: String,
+    source_block_count: usize,
+    reported_block_counts: Vec<usize>,
+    largest_reported_block_count: usize,
+    largest_reported_active_cycles: usize,
+    processed_block_count: usize,
+    processed_active_cycles: usize,
+    timings_ms: PerformanceTimings,
+    throughput: PerformanceThroughput,
+    memory: PerformanceMemory,
+    report_path: String,
+    manifest_path: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+struct PerformanceTimings {
+    trace_load: u64,
+    nova_fold_and_spartan_report: u64,
+    manifest_write: u64,
+    measured_total: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+struct PerformanceThroughput {
+    proving_processed_active_cycles_per_second: Option<f64>,
+    end_to_end_processed_active_cycles_per_second: Option<f64>,
+    end_to_end_processed_blocks_per_second: Option<f64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+struct PerformanceMemory {
+    sample_interval_ms: u64,
+    initial_physical_bytes: Option<u64>,
+    peak_physical_bytes: Option<u64>,
+    peak_delta_bytes: Option<u64>,
+}
+
+#[derive(Debug)]
+struct RunMeasurements {
+    trace_load: Duration,
+    prove_and_report: Duration,
+    manifest_write: Duration,
+    measured_total: Duration,
+    memory: PerformanceMemory,
+}
+
+#[derive(Debug)]
+struct PeakMemorySampler {
+    stop: Arc<AtomicBool>,
+    peak_physical_bytes: Arc<AtomicU64>,
+    initial_physical_bytes: Option<u64>,
+    handle: Option<thread::JoinHandle<()>>,
+    sample_interval_ms: u64,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -281,6 +367,74 @@ impl TryFrom<SerializedTraceBlock> for TraceBlock {
     }
 }
 
+impl PeakMemorySampler {
+    fn start(sample_interval_ms: u64) -> Self {
+        let initial_physical_bytes = current_physical_memory_bytes();
+        let peak_physical_bytes =
+            Arc::new(AtomicU64::new(initial_physical_bytes.unwrap_or_default()));
+        let stop = Arc::new(AtomicBool::new(false));
+        let sampler_peak = Arc::clone(&peak_physical_bytes);
+        let sampler_stop = Arc::clone(&stop);
+        let sample_interval = Duration::from_millis(sample_interval_ms);
+        let handle = thread::spawn(move || {
+            while !sampler_stop.load(Ordering::Relaxed) {
+                if let Some(physical_bytes) = current_physical_memory_bytes() {
+                    sampler_peak.fetch_max(physical_bytes, Ordering::Relaxed);
+                }
+                thread::sleep(sample_interval);
+            }
+        });
+
+        Self {
+            stop,
+            peak_physical_bytes,
+            initial_physical_bytes,
+            handle: Some(handle),
+            sample_interval_ms,
+        }
+    }
+
+    fn sample_now(&self) {
+        if let Some(physical_bytes) = current_physical_memory_bytes() {
+            self.peak_physical_bytes
+                .fetch_max(physical_bytes, Ordering::Relaxed);
+        }
+    }
+
+    fn finish(mut self) -> PerformanceMemory {
+        self.sample_now();
+        self.stop_and_join();
+        let observed_peak = self.peak_physical_bytes.load(Ordering::Relaxed);
+        let peak_physical_bytes =
+            (self.initial_physical_bytes.is_some() || observed_peak > 0).then_some(observed_peak);
+        PerformanceMemory {
+            sample_interval_ms: self.sample_interval_ms,
+            initial_physical_bytes: self.initial_physical_bytes,
+            peak_physical_bytes,
+            peak_delta_bytes: peak_physical_bytes
+                .zip(self.initial_physical_bytes)
+                .map(|(peak, initial)| peak.saturating_sub(initial)),
+        }
+    }
+
+    fn stop_and_join(&mut self) {
+        self.stop.store(true, Ordering::Relaxed);
+        if let Some(handle) = self.handle.take() {
+            let _ = handle.join();
+        }
+    }
+}
+
+impl Drop for PeakMemorySampler {
+    fn drop(&mut self) {
+        self.stop_and_join();
+    }
+}
+
+fn current_physical_memory_bytes() -> Option<u64> {
+    memory_stats::memory_stats().map(|stats| stats.physical_mem as u64)
+}
+
 fn main() {
     if let Err(error) = run(Args::parse()) {
         eprintln!("error: {error}");
@@ -289,12 +443,20 @@ fn main() {
 }
 
 fn run(args: Args) -> Result<(), Box<dyn Error>> {
+    validate_runner_args(&args).map_err(invalid_input)?;
+    let measured_total_started = Instant::now();
+    let memory_sampler = PeakMemorySampler::start(args.memory_sample_interval_ms);
+
+    let trace_load_started = Instant::now();
     let loaded_trace = load_trace_blocks(&args).map_err(invalid_input)?;
+    let trace_load = trace_load_started.elapsed();
     let blocks = &loaded_trace.blocks;
     let block_counts =
         normalized_block_counts(&args, blocks.len(), loaded_trace.program_digest.is_some())
             .map_err(invalid_input)?;
     let manifest_output = normalized_manifest_output(&args.output, args.manifest_output.as_ref());
+    let performance_output =
+        normalized_performance_output(&args.output, args.performance_output.as_ref());
     let program_digest = loaded_trace
         .program_digest
         .unwrap_or([args.program_digest_byte; 32]);
@@ -303,6 +465,7 @@ fn run(args: Args) -> Result<(), Box<dyn Error>> {
         NovaFoldingBackend::default(),
     );
 
+    let prove_and_report_started = Instant::now();
     let artifact = pipeline.prove_block_prefixes_and_write_final_proof_size_benchmark_artifact(
         &loaded_trace.bytecode,
         blocks,
@@ -310,6 +473,9 @@ fn run(args: Args) -> Result<(), Box<dyn Error>> {
         JoltNovaReportOutputFormat::Json,
         &args.output,
     )?;
+    let prove_and_report = prove_and_report_started.elapsed();
+
+    let manifest_write_started = Instant::now();
     write_manifest(
         &args,
         &block_counts,
@@ -318,9 +484,27 @@ fn run(args: Args) -> Result<(), Box<dyn Error>> {
         &artifact,
         &manifest_output,
     )?;
+    let manifest_write = manifest_write_started.elapsed();
+    let memory = memory_sampler.finish();
+    let measurements = RunMeasurements {
+        trace_load,
+        prove_and_report,
+        manifest_write,
+        measured_total: measured_total_started.elapsed(),
+        memory,
+    };
+    let performance = build_performance_artifact(
+        &args,
+        &block_counts,
+        blocks,
+        &manifest_output,
+        &measurements,
+    );
+    write_performance_artifact(&performance_output, &performance)?;
 
     println!("wrote {}", manifest_path_string(&args.output));
     println!("manifest {}", manifest_path_string(&manifest_output));
+    println!("performance {}", manifest_path_string(&performance_output));
     println!("trace_source {}", args.trace_source);
     println!(
         "trace_profile {}",
@@ -337,6 +521,14 @@ fn run(args: Args) -> Result<(), Box<dyn Error>> {
     println!("format {}", artifact.output_format);
     println!("rows {}", artifact.report.rows.len());
     println!("bytes {}", artifact.serialized_bytes().len());
+    println!(
+        "measured_total_ms {}",
+        performance.timings_ms.measured_total
+    );
+    println!(
+        "peak_physical_bytes {:?}",
+        performance.memory.peak_physical_bytes
+    );
     for row in &artifact.report.rows {
         println!(
             "block_count={} active_cycles={} recursive_snark_bytes={:?} spartan_total_bytes={}",
@@ -356,10 +548,71 @@ fn invalid_input(error: String) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidInput, error)
 }
 
+fn validate_runner_args(args: &Args) -> Result<(), String> {
+    if !(1..=MAX_MEMORY_SAMPLE_INTERVAL_MS).contains(&args.memory_sample_interval_ms) {
+        return Err(format!(
+            "memory-sample-interval-ms must be in 1..={MAX_MEMORY_SAMPLE_INTERVAL_MS}"
+        ));
+    }
+
+    let manifest_output = normalized_manifest_output(&args.output, args.manifest_output.as_ref());
+    let performance_output =
+        normalized_performance_output(&args.output, args.performance_output.as_ref());
+    let mut outputs = vec![
+        ("report output", args.output.as_path()),
+        ("manifest output", manifest_output.as_path()),
+        ("performance output", performance_output.as_path()),
+    ];
+    if let Some(trace_output) = args.trace_output.as_deref() {
+        outputs.push(("trace output", trace_output));
+    }
+
+    for index in 0..outputs.len() {
+        let (left_label, left_path) = outputs[index];
+        for &(right_label, right_path) in &outputs[index + 1..] {
+            if left_path == right_path {
+                return Err(format!(
+                    "{left_label} and {right_label} must use distinct paths: {}",
+                    manifest_path_string(left_path)
+                ));
+            }
+        }
+    }
+
+    let inputs = [
+        ("trace input", args.trace_input.as_deref()),
+        ("ELF input", args.elf_input.as_deref()),
+        ("guest input", args.guest_input.as_deref()),
+        ("untrusted advice", args.untrusted_advice.as_deref()),
+        ("trusted advice", args.trusted_advice.as_deref()),
+    ];
+    for (output_label, output_path) in outputs {
+        for &(input_label, input_path) in &inputs {
+            if input_path == Some(output_path) {
+                return Err(format!(
+                    "{output_label} must not overwrite {input_label}: {}",
+                    manifest_path_string(output_path)
+                ));
+            }
+        }
+    }
+
+    Ok(())
+}
+
 fn normalized_manifest_output(report_output: &Path, manifest_output: Option<&PathBuf>) -> PathBuf {
     manifest_output
         .cloned()
         .unwrap_or_else(|| default_manifest_output_path(report_output))
+}
+
+fn normalized_performance_output(
+    report_output: &Path,
+    performance_output: Option<&PathBuf>,
+) -> PathBuf {
+    performance_output
+        .cloned()
+        .unwrap_or_else(|| default_performance_output_path(report_output))
 }
 
 fn default_manifest_output_path(report_output: &Path) -> PathBuf {
@@ -371,6 +624,17 @@ fn default_manifest_output_path(report_output: &Path) -> PathBuf {
         .unwrap_or("jolt-nova-final-proof-size-scaling");
     manifest_output.set_file_name(format!("{stem}.manifest.json"));
     manifest_output
+}
+
+fn default_performance_output_path(report_output: &Path) -> PathBuf {
+    let mut performance_output = report_output.to_path_buf();
+    let stem = report_output
+        .file_stem()
+        .and_then(|stem| stem.to_str())
+        .filter(|stem| !stem.is_empty())
+        .unwrap_or("jolt-nova-final-proof-size-scaling");
+    performance_output.set_file_name(format!("{stem}.performance.json"));
+    performance_output
 }
 
 fn normalized_block_counts(
@@ -785,6 +1049,103 @@ fn build_noop_trace_blocks(
     Ok(trace_blocks)
 }
 
+fn build_performance_artifact(
+    args: &Args,
+    block_counts: &[usize],
+    blocks: &[TraceBlock],
+    manifest_output: &Path,
+    measurements: &RunMeasurements,
+) -> PerformanceBaselineArtifact {
+    let cumulative_active_cycles = blocks
+        .iter()
+        .scan(0usize, |total, block| {
+            *total = total.saturating_add(block.active_cycles);
+            Some(*total)
+        })
+        .collect::<Vec<_>>();
+    let largest_reported_block_count = block_counts.last().copied().unwrap_or_default();
+    let largest_reported_active_cycles = largest_reported_block_count
+        .checked_sub(1)
+        .and_then(|index| cumulative_active_cycles.get(index).copied())
+        .unwrap_or_default();
+    let processed_block_count = block_counts
+        .iter()
+        .copied()
+        .fold(0usize, usize::saturating_add);
+    let processed_active_cycles = block_counts.iter().copied().fold(0usize, |total, count| {
+        total.saturating_add(
+            count
+                .checked_sub(1)
+                .and_then(|index| cumulative_active_cycles.get(index).copied())
+                .unwrap_or_default(),
+        )
+    });
+    PerformanceBaselineArtifact {
+        schema_version: PERFORMANCE_SCHEMA_VERSION.to_string(),
+        runner: RUNNER_NAME.to_string(),
+        trace_source: args.trace_source.as_str().to_string(),
+        build_profile: if cfg!(debug_assertions) {
+            "debug".to_string()
+        } else {
+            "release".to_string()
+        },
+        target_os: std::env::consts::OS.to_string(),
+        target_arch: std::env::consts::ARCH.to_string(),
+        source_block_count: blocks.len(),
+        reported_block_counts: block_counts.to_vec(),
+        largest_reported_block_count,
+        largest_reported_active_cycles,
+        processed_block_count,
+        processed_active_cycles,
+        timings_ms: PerformanceTimings {
+            trace_load: duration_millis(measurements.trace_load),
+            nova_fold_and_spartan_report: duration_millis(measurements.prove_and_report),
+            manifest_write: duration_millis(measurements.manifest_write),
+            measured_total: duration_millis(measurements.measured_total),
+        },
+        throughput: PerformanceThroughput {
+            proving_processed_active_cycles_per_second: rate_per_second(
+                processed_active_cycles,
+                measurements.prove_and_report,
+            ),
+            end_to_end_processed_active_cycles_per_second: rate_per_second(
+                processed_active_cycles,
+                measurements.measured_total,
+            ),
+            end_to_end_processed_blocks_per_second: rate_per_second(
+                processed_block_count,
+                measurements.measured_total,
+            ),
+        },
+        memory: measurements.memory.clone(),
+        report_path: manifest_path_string(&args.output),
+        manifest_path: manifest_path_string(manifest_output),
+    }
+}
+
+fn write_performance_artifact(
+    performance_output: &Path,
+    artifact: &PerformanceBaselineArtifact,
+) -> io::Result<()> {
+    if let Some(parent) = performance_output.parent() {
+        if !parent.as_os_str().is_empty() {
+            std::fs::create_dir_all(parent)?;
+        }
+    }
+    let mut json = serde_json::to_vec_pretty(artifact).map_err(io::Error::other)?;
+    json.push(b'\n');
+    std::fs::write(performance_output, json)
+}
+
+fn duration_millis(duration: Duration) -> u64 {
+    u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)
+}
+
+fn rate_per_second(count: usize, duration: Duration) -> Option<f64> {
+    let seconds = duration.as_secs_f64();
+    (seconds > 0.0).then_some(count as f64 / seconds)
+}
+
 fn write_manifest(
     args: &Args,
     block_counts: &[usize],
@@ -889,6 +1250,27 @@ fn build_manifest_json(
         &manifest_path_string(manifest_output),
     );
     json.push(',');
+    append_json_string_field(
+        &mut json,
+        "performance_schema_version",
+        PERFORMANCE_SCHEMA_VERSION,
+    );
+    json.push(',');
+    append_json_string_field(
+        &mut json,
+        "performance_path",
+        &manifest_path_string(&normalized_performance_output(
+            &args.output,
+            args.performance_output.as_ref(),
+        )),
+    );
+    json.push(',');
+    append_json_u64_field(
+        &mut json,
+        "memory_sample_interval_ms",
+        args.memory_sample_interval_ms,
+    );
+    json.push(',');
     append_json_usize_field(&mut json, "source_block_count", source_block_count);
     json.push(',');
     append_json_optional_usize_field(
@@ -975,6 +1357,12 @@ fn append_json_optional_string_field(json: &mut String, name: &str, value: Optio
 }
 
 fn append_json_usize_field(json: &mut String, name: &str, value: usize) {
+    append_json_string(json, name);
+    json.push(':');
+    json.push_str(&value.to_string());
+}
+
+fn append_json_u64_field(json: &mut String, name: &str, value: u64) {
     append_json_string(json, name);
     json.push(':');
     json.push_str(&value.to_string());
@@ -1071,6 +1459,8 @@ mod tests {
             block_counts: Vec::new(),
             output: PathBuf::from(DEFAULT_OUTPUT_PATH),
             manifest_output: None,
+            performance_output: None,
+            memory_sample_interval_ms: 10,
             program_digest_byte: 9,
         };
 
@@ -1120,6 +1510,67 @@ mod tests {
     }
 
     #[test]
+    fn default_performance_output_sits_next_to_report() {
+        assert_eq!(
+            default_performance_output_path(Path::new("benchmark-runs/jolt-nova/report.json")),
+            PathBuf::from("benchmark-runs/jolt-nova/report.performance.json")
+        );
+        assert_eq!(
+            default_performance_output_path(Path::new("report")),
+            PathBuf::from("report.performance.json")
+        );
+    }
+
+    #[test]
+    fn runner_args_reject_bad_memory_interval_and_path_collisions() {
+        let args = Args {
+            trace_source: TraceSource::Synthetic,
+            trace_profile: TraceProfile::SyntheticNoop,
+            trace_input: None,
+            elf_input: None,
+            trace_output: None,
+            guest_input: None,
+            untrusted_advice: None,
+            trusted_advice: None,
+            trace_block_size: 1024,
+            blocks: 2,
+            cycles_per_block: 2,
+            block_counts: vec![1, 2],
+            output: PathBuf::from("benchmark-runs/jolt-nova/report.json"),
+            manifest_output: None,
+            performance_output: None,
+            memory_sample_interval_ms: 10,
+            program_digest_byte: 9,
+        };
+        assert_eq!(validate_runner_args(&args), Ok(()));
+
+        let mut zero_interval = args.clone();
+        zero_interval.memory_sample_interval_ms = 0;
+        assert!(validate_runner_args(&zero_interval)
+            .unwrap_err()
+            .contains("must be in 1..=1000"));
+
+        let mut excessive_interval = args.clone();
+        excessive_interval.memory_sample_interval_ms = MAX_MEMORY_SAMPLE_INTERVAL_MS + 1;
+        assert!(validate_runner_args(&excessive_interval)
+            .unwrap_err()
+            .contains("must be in 1..=1000"));
+
+        let mut colliding_output = args.clone();
+        colliding_output.manifest_output = Some(colliding_output.output.clone());
+        assert!(validate_runner_args(&colliding_output)
+            .unwrap_err()
+            .contains("must use distinct paths"));
+
+        let mut overwriting_input = args;
+        overwriting_input.trace_source = TraceSource::TraceFile;
+        overwriting_input.trace_input = Some(overwriting_input.output.clone());
+        assert!(validate_runner_args(&overwriting_input)
+            .unwrap_err()
+            .contains("must not overwrite trace input"));
+    }
+
+    #[test]
     fn noop_trace_blocks_are_contiguous() {
         let args = Args {
             trace_source: TraceSource::Synthetic,
@@ -1136,6 +1587,8 @@ mod tests {
             block_counts: Vec::new(),
             output: PathBuf::from(DEFAULT_OUTPUT_PATH),
             manifest_output: None,
+            performance_output: None,
+            memory_sample_interval_ms: 10,
             program_digest_byte: 9,
         };
         let loaded_trace = load_trace_blocks(&args).unwrap();
@@ -1177,6 +1630,8 @@ mod tests {
             block_counts: Vec::new(),
             output: PathBuf::from(DEFAULT_OUTPUT_PATH),
             manifest_output: None,
+            performance_output: None,
+            memory_sample_interval_ms: 10,
             program_digest_byte: 9,
         };
         assert!(load_trace_blocks(&synthetic_with_input)
@@ -1198,6 +1653,8 @@ mod tests {
             block_counts: Vec::new(),
             output: PathBuf::from(DEFAULT_OUTPUT_PATH),
             manifest_output: None,
+            performance_output: None,
+            memory_sample_interval_ms: 10,
             program_digest_byte: 9,
         };
         assert!(load_trace_blocks(&trace_file_without_input)
@@ -1223,6 +1680,8 @@ mod tests {
             block_counts: Vec::new(),
             output: PathBuf::from(DEFAULT_OUTPUT_PATH),
             manifest_output: None,
+            performance_output: None,
+            memory_sample_interval_ms: 10,
             program_digest_byte: 9,
         };
         let loaded_trace = load_trace_blocks(&args).unwrap();
@@ -1273,6 +1732,8 @@ mod tests {
             block_counts: Vec::new(),
             output: PathBuf::from(DEFAULT_OUTPUT_PATH),
             manifest_output: None,
+            performance_output: None,
+            memory_sample_interval_ms: 10,
             program_digest_byte: 9,
         };
 
@@ -1328,6 +1789,7 @@ mod tests {
         let trace_path = directory.join("tiny-rv64.trace.json");
         let report_path = directory.join("report.json");
         let manifest_path = directory.join("report.manifest.json");
+        let performance_path = directory.join("report.performance.json");
         std::fs::create_dir_all(&directory).unwrap();
         std::fs::write(&elf_path, tiny_rv64_elf()).unwrap();
         let args = Args {
@@ -1345,6 +1807,8 @@ mod tests {
             block_counts: vec![2],
             output: report_path.clone(),
             manifest_output: Some(manifest_path.clone()),
+            performance_output: None,
+            memory_sample_interval_ms: 1,
             program_digest_byte: 9,
         };
 
@@ -1352,6 +1816,9 @@ mod tests {
 
         let report = std::fs::read_to_string(&report_path).unwrap();
         let manifest = std::fs::read_to_string(&manifest_path).unwrap();
+        let performance_json = std::fs::read_to_string(&performance_path).unwrap();
+        let performance: PerformanceBaselineArtifact =
+            serde_json::from_str(&performance_json).unwrap();
         assert!(report.contains("\"block_count\":2"));
         assert!(report.contains("\"recursive_snark_bytes_len\":"));
         assert!(manifest.contains("\"trace_source\":\"elf\""));
@@ -1359,8 +1826,27 @@ mod tests {
         assert!(manifest.contains(&format!(
             "\"trace_file_schema_version\":\"{TRACE_BUNDLE_SCHEMA_VERSION}\""
         )));
+        assert_eq!(performance.schema_version, PERFORMANCE_SCHEMA_VERSION);
+        assert_eq!(performance.trace_source, "elf");
+        assert_eq!(performance.source_block_count, 2);
+        assert_eq!(performance.reported_block_counts, vec![2]);
+        assert_eq!(performance.largest_reported_block_count, 2);
+        assert_eq!(performance.largest_reported_active_cycles, 2);
+        assert_eq!(performance.processed_block_count, 2);
+        assert_eq!(performance.processed_active_cycles, 2);
+        assert!(performance
+            .throughput
+            .proving_processed_active_cycles_per_second
+            .is_some());
+        assert_eq!(performance.memory.sample_interval_ms, 1);
 
-        for path in [manifest_path, report_path, trace_path, elf_path] {
+        for path in [
+            performance_path,
+            manifest_path,
+            report_path,
+            trace_path,
+            elf_path,
+        ] {
             std::fs::remove_file(path).unwrap();
         }
         std::fs::remove_dir(directory).unwrap();
@@ -1436,6 +1922,8 @@ mod tests {
             manifest_output: Some(PathBuf::from(
                 "benchmark-runs/jolt-nova/report.manifest.json",
             )),
+            performance_output: None,
+            memory_sample_interval_ms: 10,
             program_digest_byte: 11,
         };
         let block_counts = normalized_block_counts(&args, 2, false).unwrap();
@@ -1443,7 +1931,7 @@ mod tests {
         let manifest_path = normalized_manifest_output(&args.output, args.manifest_output.as_ref());
         let json = build_manifest_json(&args, &block_counts, 2, None, &artifact, &manifest_path);
 
-        assert!(json.contains("\"schema_version\":\"jolt-nova-benchmark-runner-v2\""));
+        assert!(json.contains("\"schema_version\":\"jolt-nova-benchmark-runner-v3\""));
         assert!(json.contains("\"runner\":\"jolt_nova_final_proof_size_benchmark\""));
         assert!(json.contains("\"trace_source\":\"synthetic\""));
         assert!(json.contains("\"trace_profile\":\"synthetic-noop\""));
@@ -1457,6 +1945,12 @@ mod tests {
         assert!(
             json.contains("\"manifest_path\":\"benchmark-runs/jolt-nova/report.manifest.json\"")
         );
+        assert!(
+            json.contains("\"performance_schema_version\":\"jolt-nova-performance-baseline-v1\"")
+        );
+        assert!(json
+            .contains("\"performance_path\":\"benchmark-runs/jolt-nova/report.performance.json\""));
+        assert!(json.contains("\"memory_sample_interval_ms\":10"));
         assert!(json.contains("\"source_block_count\":2"));
         assert!(json.contains("\"blocks\":2"));
         assert!(json.contains("\"cycles_per_block\":3"));
@@ -1487,6 +1981,8 @@ mod tests {
             block_counts: vec![1, 2],
             output: PathBuf::from("benchmark-runs/jolt-nova/report.json"),
             manifest_output: None,
+            performance_output: None,
+            memory_sample_interval_ms: 10,
             program_digest_byte: 9,
         };
         let artifact = sample_benchmark_artifact();
@@ -1534,6 +2030,8 @@ mod tests {
             block_counts: vec![1],
             output: PathBuf::from("report.json"),
             manifest_output: None,
+            performance_output: None,
+            memory_sample_interval_ms: 10,
             program_digest_byte: 9,
         };
         let artifact = sample_benchmark_artifact();
@@ -1544,8 +2042,72 @@ mod tests {
         std::fs::remove_file(&manifest_path).unwrap();
         std::fs::remove_dir(manifest_path.parent().unwrap()).unwrap();
 
-        assert!(manifest.contains("\"schema_version\":\"jolt-nova-benchmark-runner-v2\""));
+        assert!(manifest.contains("\"schema_version\":\"jolt-nova-benchmark-runner-v3\""));
         assert!(manifest.contains("\"block_counts\":[1]"));
+    }
+
+    #[test]
+    fn performance_artifact_records_timings_throughput_and_memory() {
+        let args = Args {
+            trace_source: TraceSource::Synthetic,
+            trace_profile: TraceProfile::SyntheticNoop,
+            trace_input: None,
+            elf_input: None,
+            trace_output: None,
+            guest_input: None,
+            untrusted_advice: None,
+            trusted_advice: None,
+            trace_block_size: 1024,
+            blocks: 2,
+            cycles_per_block: 3,
+            block_counts: vec![1, 2],
+            output: PathBuf::from("benchmark-runs/jolt-nova/report.json"),
+            manifest_output: None,
+            performance_output: None,
+            memory_sample_interval_ms: 5,
+            program_digest_byte: 9,
+        };
+        let blocks = build_noop_trace_blocks(2, 3).unwrap();
+        let measurements = RunMeasurements {
+            trace_load: Duration::from_millis(100),
+            prove_and_report: Duration::from_millis(2_000),
+            manifest_write: Duration::from_millis(20),
+            measured_total: Duration::from_millis(2_120),
+            memory: PerformanceMemory {
+                sample_interval_ms: 5,
+                initial_physical_bytes: Some(100),
+                peak_physical_bytes: Some(160),
+                peak_delta_bytes: Some(60),
+            },
+        };
+
+        let artifact = build_performance_artifact(
+            &args,
+            &[1, 2],
+            &blocks,
+            Path::new("benchmark-runs/jolt-nova/report.manifest.json"),
+            &measurements,
+        );
+
+        assert_eq!(artifact.schema_version, PERFORMANCE_SCHEMA_VERSION);
+        assert_eq!(artifact.source_block_count, 2);
+        assert_eq!(artifact.largest_reported_block_count, 2);
+        assert_eq!(artifact.largest_reported_active_cycles, 6);
+        assert_eq!(artifact.processed_block_count, 3);
+        assert_eq!(artifact.processed_active_cycles, 9);
+        assert_eq!(artifact.timings_ms.trace_load, 100);
+        assert_eq!(artifact.timings_ms.nova_fold_and_spartan_report, 2_000);
+        assert_eq!(
+            artifact
+                .throughput
+                .proving_processed_active_cycles_per_second,
+            Some(4.5)
+        );
+        assert_eq!(artifact.memory.peak_delta_bytes, Some(60));
+        assert_eq!(
+            artifact.manifest_path,
+            "benchmark-runs/jolt-nova/report.manifest.json"
+        );
     }
 
     fn sample_benchmark_artifact() -> NovaBlockProofPipelineFinalProofSizeBenchmarkArtifact {

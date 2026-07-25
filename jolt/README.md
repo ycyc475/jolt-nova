@@ -93,6 +93,15 @@ Examples in the [`examples`](./examples/) directory can be run using e.g.
 
 ```cargo run --release -p sha2-chain```
 
+### Jolt-Nova experimental runner
+
+The Nova folding and final Spartan experiment accepts synthetic blocks,
+versioned trace bundles, or a real RV64 ELF. It emits linked proof-size,
+manifest, and performance-baseline artifacts. See the
+[Stage 8 runner and baseline guide](./jolt-core/examples/jolt_nova_stage8.md)
+for commands, measurement semantics, current limitations, and the Stage 9
+research directions.
+
 ## Performance profiling
 
 ### Execution profiling
