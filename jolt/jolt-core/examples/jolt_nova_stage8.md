@@ -110,8 +110,8 @@ Stage 8 now provides:
 - Stage 9.1 now supports sound program-bound partial prefixes by committing the
   external next-cycle lookahead in both the CPU proof and folded state. See the
   [Stage 9 guide](./jolt_nova_stage9.md).
-- Trace bundles are materialized as JSON, so large guests can consume substantial
-  serialization time and disk space.
+- Stage 9.3 adds per-block binary serialization; the proving pipeline still
+  materializes decoded blocks for repeated prefix experiments.
 - Peak-memory sampling is best effort and does not replace heap profiling.
 - The runner measures the current Nova backend and Spartan final proof; it is not
   yet a comparative LogUp/Lasso benchmark.
@@ -125,7 +125,8 @@ comparative research:
    prefixes~~ (completed in Stage 9.1);
 2. ~~add production-size guest fixtures and automated multi-run baseline
    comparisons~~ (completed in Stage 9.2);
-3. stream or binary-encode trace blocks to reduce JSON memory and I/O overhead;
+3. ~~binary-encode trace blocks one record at a time to reduce JSON memory and
+   I/O overhead~~ (completed in Stage 9.3);
 4. introduce a real LogUp lookup backend behind the existing replaceable lookup
    interface and compare it with Lasso;
 5. profile per-relation witness generation and Nova step-circuit costs;

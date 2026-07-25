@@ -120,8 +120,59 @@ non-zero when mean proving time, end-to-end time, throughput, or available
 peak-memory metrics regress beyond the configured threshold. Faster results are
 not treated as regressions.
 
+## Stage 9.3: versioned binary trace storage
+
+Stage 9.3 adds a binary trace container for large trace bundles while retaining
+full compatibility with the Stage 8/9 JSON files. Output format selection is
+extension-based:
+
+- `.bin` and `.jnvtrace` write the binary container;
+- every other extension, including `.json`, writes the existing JSON document.
+
+Input format detection uses the binary magic bytes rather than the file
+extension, so renamed trace files still load correctly.
+
+The `jolt-nova-binary-trace-v1` container contains:
+
+1. fixed magic bytes and a length-delimited postcard header;
+2. a SHA3-256 digest of the header;
+3. the logical trace schema, program binding, and declared block count;
+4. one length-delimited postcard record per trace block;
+5. a separate SHA3-256 digest for every block record.
+
+The loader checks size limits before allocation, verifies every digest before
+decoding, rejects truncation and trailing bytes, validates the bytecode/program
+digest, and finally runs the unchanged trace-block chain validation. The
+manifest records `trace_storage_format` as either `json` or `binary`, while the
+workload digest remains the SHA3-256 digest of the exact trace file. This new
+field advances the runner manifest schema to `jolt-nova-benchmark-runner-v4`.
+
+Use the binary format by changing the trace output extension:
+
+```text
+cargo run --release -p jolt-core --no-default-features --features nova \
+  --example jolt_nova_final_proof_size_benchmark -- \
+  --trace-source fixture \
+  --fixture cpu-lookup-64k \
+  --trace-output benchmark-runs/jolt-nova/cpu-lookup-64k.trace.bin \
+  --trace-block-size 1024 \
+  --block-counts 1,4,16,49 \
+  --output benchmark-runs/jolt-nova/cpu-lookup-64k.report.json
+```
+
+Serialization and deserialization now allocate at most one encoded block at a
+time instead of constructing a second in-memory representation of the complete
+trace document. The current prover still materializes the decoded
+`Vec<TraceBlock>` because the prefix-report pipeline revisits the source blocks;
+fully streaming trace-to-fold execution is a later optimization.
+
+Stage 9.3 tests cover JSON backward compatibility, binary real-ELF and
+49,156-cycle production-fixture round trips, manifest format reporting,
+per-block digest corruption, truncated payloads, trailing bytes, and the binary
+trace path through Nova folding and the Spartan report.
+
 ## Remaining Stage 9 work
 
-Stage 9.2 completes the repeatable baseline infrastructure. Later Stage 9 work
-will address streaming/binary trace storage, real LogUp integration,
-per-relation profiling, and adversarial soundness review.
+Stage 9.3 completes versioned per-block binary trace storage. Later Stage 9 work
+will address real LogUp integration, per-relation profiling, fully streaming
+trace-to-fold execution, and adversarial soundness review.

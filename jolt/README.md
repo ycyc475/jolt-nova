@@ -102,7 +102,7 @@ manifest, and performance-baseline artifacts. See the
 for commands and measurement semantics, and the
 [Stage 9 guide](./jolt-core/examples/jolt_nova_stage9.md) for partial-prefix
 lookahead binding, production-size fixtures, repeatable multi-run comparisons,
-and the current research roadmap.
+versioned per-block binary trace storage, and the current research roadmap.
 
 ## Performance profiling
 

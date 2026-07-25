@@ -1,6 +1,8 @@
 use std::{
     error::Error,
-    fmt, io,
+    fmt,
+    fs::File,
+    io::{self, BufReader, BufWriter, Read, Write},
     path::{Path, PathBuf},
     sync::{
         atomic::{AtomicBool, AtomicU64, Ordering},
@@ -35,12 +37,17 @@ use tracer::{
 
 const DEFAULT_OUTPUT_PATH: &str = "benchmark-runs/jolt-nova/final-proof-size-scaling.json";
 const RUNNER_NAME: &str = "jolt_nova_final_proof_size_benchmark";
-const MANIFEST_SCHEMA_VERSION: &str = "jolt-nova-benchmark-runner-v3";
+const MANIFEST_SCHEMA_VERSION: &str = "jolt-nova-benchmark-runner-v4";
 const PERFORMANCE_SCHEMA_VERSION: &str = "jolt-nova-performance-baseline-v1";
 const MULTI_RUN_SCHEMA_VERSION: &str = "jolt-nova-multi-run-baseline-v1";
 const PRODUCTION_FIXTURE_SCHEMA_VERSION: &str = "jolt-nova-production-fixtures-v1";
 const TRACE_FILE_SCHEMA_VERSION: &str = "jolt-nova-trace-blocks-v1";
 const TRACE_BUNDLE_SCHEMA_VERSION: &str = "jolt-nova-trace-bundle-v1";
+const BINARY_TRACE_SCHEMA_VERSION: &str = "jolt-nova-binary-trace-v1";
+const BINARY_TRACE_MAGIC: &[u8; 8] = b"JNVTRC1\0";
+const MAX_BINARY_TRACE_HEADER_BYTES: usize = 64 * 1024 * 1024;
+const MAX_BINARY_TRACE_BLOCK_BYTES: usize = 256 * 1024 * 1024;
+const MAX_BINARY_TRACE_BLOCKS: usize = 1 << 24;
 const MAX_MEMORY_SAMPLE_INTERVAL_MS: u64 = 1_000;
 const MAX_BENCHMARK_RUNS: usize = 100;
 
@@ -274,8 +281,30 @@ struct LoadedTraceBlocks {
 #[derive(Debug)]
 struct TraceFileMetadata {
     schema_version: String,
+    storage_format: TraceStorageFormat,
     sha3_256: [u8; 32],
     elf_sha3_256: Option<[u8; 32]>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TraceStorageFormat {
+    Json,
+    Binary,
+}
+
+impl TraceStorageFormat {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Json => "json",
+            Self::Binary => "binary",
+        }
+    }
+}
+
+impl fmt::Display for TraceStorageFormat {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -422,6 +451,15 @@ struct TraceFileDocument {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     program: Option<SerializedProgramBinding>,
     blocks: Vec<SerializedTraceBlock>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct BinaryTraceHeader {
+    container_schema_version: String,
+    trace_schema_version: String,
+    program: Option<SerializedProgramBinding>,
+    block_count: u64,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -743,6 +781,7 @@ fn run_once(args: &Args) -> Result<PerformanceBaselineArtifact, Box<dyn Error>> 
     println!("fixture {}", selected_fixture(args).unwrap_or("none"));
     if let Some(metadata) = &loaded_trace.file_metadata {
         println!("trace_file_schema {}", metadata.schema_version);
+        println!("trace_storage_format {}", metadata.storage_format);
         println!("trace_input_sha3_256 {}", hex_digest(&metadata.sha3_256));
         if let Some(elf_sha3_256) = metadata.elf_sha3_256 {
             println!("elf_sha3_256 {}", hex_digest(&elf_sha3_256));
@@ -1182,20 +1221,123 @@ fn write_trace_bundle(
             })?;
         }
     }
+    let program = SerializedProgramBinding {
+        elf_sha3_256: hex_digest(&elf_sha3_256),
+        program_digest_sha3_256: hex_digest(&program_digest),
+        bytecode,
+    };
+    match trace_output_format(trace_output) {
+        TraceStorageFormat::Json => write_json_trace_bundle(trace_output, blocks, program),
+        TraceStorageFormat::Binary => write_binary_trace_bundle(trace_output, blocks, program),
+    }
+}
+
+fn trace_output_format(path: &Path) -> TraceStorageFormat {
+    match path.extension().and_then(|extension| extension.to_str()) {
+        Some(extension)
+            if extension.eq_ignore_ascii_case("bin")
+                || extension.eq_ignore_ascii_case("jnvtrace") =>
+        {
+            TraceStorageFormat::Binary
+        }
+        _ => TraceStorageFormat::Json,
+    }
+}
+
+fn write_json_trace_bundle(
+    trace_output: &Path,
+    blocks: &[TraceBlock],
+    program: SerializedProgramBinding,
+) -> Result<(), String> {
     let document = TraceFileDocument {
         schema_version: TRACE_BUNDLE_SCHEMA_VERSION.to_string(),
-        program: Some(SerializedProgramBinding {
-            elf_sha3_256: hex_digest(&elf_sha3_256),
-            program_digest_sha3_256: hex_digest(&program_digest),
-            bytecode,
-        }),
+        program: Some(program),
         blocks: blocks.iter().map(SerializedTraceBlock::from).collect(),
     };
     let json = serde_json::to_vec_pretty(&document)
-        .map_err(|error| format!("failed to serialize trace bundle: {error}"))?;
+        .map_err(|error| format!("failed to serialize trace bundle as JSON: {error}"))?;
     std::fs::write(trace_output, json).map_err(|error| {
         format!(
-            "failed to write trace bundle {}: {error}",
+            "failed to write JSON trace bundle {}: {error}",
+            manifest_path_string(trace_output)
+        )
+    })
+}
+
+fn write_binary_trace_bundle(
+    trace_output: &Path,
+    blocks: &[TraceBlock],
+    program: SerializedProgramBinding,
+) -> Result<(), String> {
+    let block_count = u64::try_from(blocks.len())
+        .map_err(|_| "binary trace block count does not fit in u64".to_string())?;
+    let header = BinaryTraceHeader {
+        container_schema_version: BINARY_TRACE_SCHEMA_VERSION.to_string(),
+        trace_schema_version: TRACE_BUNDLE_SCHEMA_VERSION.to_string(),
+        program: Some(program),
+        block_count,
+    };
+    let header_bytes = postcard::to_stdvec(&header)
+        .map_err(|error| format!("failed to serialize binary trace header: {error}"))?;
+    if header_bytes.len() > MAX_BINARY_TRACE_HEADER_BYTES {
+        return Err(format!(
+            "binary trace header is too large: {} bytes exceeds {}",
+            header_bytes.len(),
+            MAX_BINARY_TRACE_HEADER_BYTES
+        ));
+    }
+    let header_len = u32::try_from(header_bytes.len())
+        .map_err(|_| "binary trace header length does not fit in u32".to_string())?;
+    let file = File::create(trace_output).map_err(|error| {
+        format!(
+            "failed to create binary trace bundle {}: {error}",
+            manifest_path_string(trace_output)
+        )
+    })?;
+    let mut writer = BufWriter::new(file);
+    writer
+        .write_all(BINARY_TRACE_MAGIC)
+        .and_then(|_| writer.write_all(&header_len.to_le_bytes()))
+        .and_then(|_| writer.write_all(&Sha3_256::digest(&header_bytes)))
+        .and_then(|_| writer.write_all(&header_bytes))
+        .map_err(|error| format!("failed to write binary trace header: {error}"))?;
+
+    for block in blocks {
+        let block_bytes =
+            postcard::to_stdvec(&SerializedTraceBlock::from(block)).map_err(|error| {
+                format!(
+                    "failed to serialize trace block {}: {error}",
+                    block.block_index
+                )
+            })?;
+        if block_bytes.len() > MAX_BINARY_TRACE_BLOCK_BYTES {
+            return Err(format!(
+                "serialized trace block {} is too large: {} bytes exceeds {}",
+                block.block_index,
+                block_bytes.len(),
+                MAX_BINARY_TRACE_BLOCK_BYTES
+            ));
+        }
+        let block_len = u64::try_from(block_bytes.len()).map_err(|_| {
+            format!(
+                "trace block {} length does not fit in u64",
+                block.block_index
+            )
+        })?;
+        writer
+            .write_all(&block_len.to_le_bytes())
+            .and_then(|_| writer.write_all(&Sha3_256::digest(&block_bytes)))
+            .and_then(|_| writer.write_all(&block_bytes))
+            .map_err(|error| {
+                format!(
+                    "failed to write binary trace block {}: {error}",
+                    block.block_index
+                )
+            })?;
+    }
+    writer.flush().map_err(|error| {
+        format!(
+            "failed to flush binary trace bundle {}: {error}",
             manifest_path_string(trace_output)
         )
     })
@@ -1208,6 +1350,31 @@ fn bytecode_digest(bytecode: &BytecodePreprocessing) -> Result<[u8; 32], String>
 }
 
 fn load_trace_file(trace_input: &Path) -> Result<LoadedTraceBlocks, String> {
+    if trace_file_has_binary_magic(trace_input)? {
+        load_binary_trace_file(trace_input)
+    } else {
+        load_json_trace_file(trace_input)
+    }
+}
+
+fn trace_file_has_binary_magic(trace_input: &Path) -> Result<bool, String> {
+    let mut file = File::open(trace_input).map_err(|error| {
+        format!(
+            "failed to open trace input {}: {error}",
+            manifest_path_string(trace_input)
+        )
+    })?;
+    let mut prefix = [0u8; BINARY_TRACE_MAGIC.len()];
+    let read = file.read(&mut prefix).map_err(|error| {
+        format!(
+            "failed to inspect trace input {}: {error}",
+            manifest_path_string(trace_input)
+        )
+    })?;
+    Ok(read == BINARY_TRACE_MAGIC.len() && &prefix == BINARY_TRACE_MAGIC)
+}
+
+fn load_json_trace_file(trace_input: &Path) -> Result<LoadedTraceBlocks, String> {
     let input_bytes = std::fs::read(trace_input).map_err(|error| {
         format!(
             "failed to read trace input {}: {error}",
@@ -1230,36 +1397,7 @@ fn load_trace_file(trace_input: &Path) -> Result<LoadedTraceBlocks, String> {
     }
 
     let (bytecode, program_digest, elf_sha3_256) =
-        match (document.schema_version.as_str(), document.program) {
-            (TRACE_FILE_SCHEMA_VERSION, None) => (BytecodePreprocessing::default(), None, None),
-            (TRACE_FILE_SCHEMA_VERSION, Some(_)) => {
-                return Err(
-                    "legacy trace-block files must not contain a program binding".to_string(),
-                )
-            }
-            (TRACE_BUNDLE_SCHEMA_VERSION, Some(program)) => {
-                let declared_program_digest =
-                    parse_hex_digest("program_digest_sha3_256", &program.program_digest_sha3_256)?;
-                let actual_program_digest = bytecode_digest(&program.bytecode)?;
-                if declared_program_digest != actual_program_digest {
-                    return Err(format!(
-                        "trace bundle bytecode digest mismatch: declared {}, computed {}",
-                        hex_digest(&declared_program_digest),
-                        hex_digest(&actual_program_digest)
-                    ));
-                }
-                let elf_sha3_256 = parse_hex_digest("elf_sha3_256", &program.elf_sha3_256)?;
-                (
-                    program.bytecode,
-                    Some(declared_program_digest),
-                    Some(elf_sha3_256),
-                )
-            }
-            (TRACE_BUNDLE_SCHEMA_VERSION, None) => {
-                return Err("trace bundle is missing its program binding".to_string())
-            }
-            _ => unreachable!("trace schema was validated above"),
-        };
+        decode_program_binding(&document.schema_version, document.program)?;
     let blocks = document
         .blocks
         .into_iter()
@@ -1273,10 +1411,197 @@ fn load_trace_file(trace_input: &Path) -> Result<LoadedTraceBlocks, String> {
         program_digest,
         file_metadata: Some(TraceFileMetadata {
             schema_version: document.schema_version,
+            storage_format: TraceStorageFormat::Json,
             sha3_256: Sha3_256::digest(&input_bytes).into(),
             elf_sha3_256,
         }),
     })
+}
+
+fn load_binary_trace_file(trace_input: &Path) -> Result<LoadedTraceBlocks, String> {
+    let file = File::open(trace_input).map_err(|error| {
+        format!(
+            "failed to open binary trace input {}: {error}",
+            manifest_path_string(trace_input)
+        )
+    })?;
+    let mut reader = BufReader::new(file);
+    let magic = read_exact_array::<8>(&mut reader, "binary trace magic")?;
+    if &magic != BINARY_TRACE_MAGIC {
+        return Err("binary trace magic mismatch".to_string());
+    }
+    let header_len = u32::from_le_bytes(read_exact_array::<4>(
+        &mut reader,
+        "binary trace header length",
+    )?) as usize;
+    if header_len > MAX_BINARY_TRACE_HEADER_BYTES {
+        return Err(format!(
+            "binary trace header length {header_len} exceeds {MAX_BINARY_TRACE_HEADER_BYTES}"
+        ));
+    }
+    let declared_header_digest = read_exact_array::<32>(&mut reader, "binary trace header digest")?;
+    let header_bytes = read_exact_vec(&mut reader, header_len, "binary trace header")?;
+    let actual_header_digest: [u8; 32] = Sha3_256::digest(&header_bytes).into();
+    if declared_header_digest != actual_header_digest {
+        return Err("binary trace header digest mismatch".to_string());
+    }
+    let header = postcard::from_bytes::<BinaryTraceHeader>(&header_bytes)
+        .map_err(|error| format!("failed to decode binary trace header: {error}"))?;
+    if header.container_schema_version != BINARY_TRACE_SCHEMA_VERSION {
+        return Err(format!(
+            "unsupported binary trace container schema {:?}; expected {:?}",
+            header.container_schema_version, BINARY_TRACE_SCHEMA_VERSION
+        ));
+    }
+    if header.trace_schema_version != TRACE_FILE_SCHEMA_VERSION
+        && header.trace_schema_version != TRACE_BUNDLE_SCHEMA_VERSION
+    {
+        return Err(format!(
+            "unsupported trace schema version {:?}; expected {:?} or {:?}",
+            header.trace_schema_version, TRACE_FILE_SCHEMA_VERSION, TRACE_BUNDLE_SCHEMA_VERSION
+        ));
+    }
+    let block_count = usize::try_from(header.block_count)
+        .map_err(|_| "binary trace block count does not fit in usize".to_string())?;
+    if block_count > MAX_BINARY_TRACE_BLOCKS {
+        return Err(format!(
+            "binary trace block count {block_count} exceeds {MAX_BINARY_TRACE_BLOCKS}"
+        ));
+    }
+
+    let mut blocks = Vec::with_capacity(block_count);
+    for record_index in 0..block_count {
+        let block_len = u64::from_le_bytes(read_exact_array::<8>(
+            &mut reader,
+            &format!("binary trace block {record_index} length"),
+        )?);
+        let block_len = usize::try_from(block_len).map_err(|_| {
+            format!("binary trace block {record_index} length does not fit in usize")
+        })?;
+        if block_len > MAX_BINARY_TRACE_BLOCK_BYTES {
+            return Err(format!(
+                "binary trace block {record_index} length {block_len} exceeds {MAX_BINARY_TRACE_BLOCK_BYTES}"
+            ));
+        }
+        let declared_block_digest = read_exact_array::<32>(
+            &mut reader,
+            &format!("binary trace block {record_index} digest"),
+        )?;
+        let block_bytes = read_exact_vec(
+            &mut reader,
+            block_len,
+            &format!("binary trace block {record_index} payload"),
+        )?;
+        let actual_block_digest: [u8; 32] = Sha3_256::digest(&block_bytes).into();
+        if declared_block_digest != actual_block_digest {
+            return Err(format!("binary trace block {record_index} digest mismatch"));
+        }
+        let serialized =
+            postcard::from_bytes::<SerializedTraceBlock>(&block_bytes).map_err(|error| {
+                format!("failed to decode binary trace block {record_index}: {error}")
+            })?;
+        blocks.push(TraceBlock::try_from(serialized)?);
+    }
+    let mut trailing = [0u8; 1];
+    if reader
+        .read(&mut trailing)
+        .map_err(|error| format!("failed to check binary trace trailing bytes: {error}"))?
+        != 0
+    {
+        return Err("binary trace contains trailing bytes".to_string());
+    }
+
+    let (bytecode, program_digest, elf_sha3_256) =
+        decode_program_binding(&header.trace_schema_version, header.program)?;
+    validate_loaded_trace_blocks(&blocks)?;
+    Ok(LoadedTraceBlocks {
+        blocks,
+        bytecode,
+        program_digest,
+        file_metadata: Some(TraceFileMetadata {
+            schema_version: header.trace_schema_version,
+            storage_format: TraceStorageFormat::Binary,
+            sha3_256: sha3_file(trace_input)?,
+            elf_sha3_256,
+        }),
+    })
+}
+
+fn read_exact_array<const N: usize>(
+    reader: &mut impl Read,
+    label: &str,
+) -> Result<[u8; N], String> {
+    let mut bytes = [0u8; N];
+    reader
+        .read_exact(&mut bytes)
+        .map_err(|error| format!("failed to read {label}: {error}"))?;
+    Ok(bytes)
+}
+
+fn read_exact_vec(reader: &mut impl Read, len: usize, label: &str) -> Result<Vec<u8>, String> {
+    let mut bytes = vec![0u8; len];
+    reader
+        .read_exact(&mut bytes)
+        .map_err(|error| format!("failed to read {label}: {error}"))?;
+    Ok(bytes)
+}
+
+fn sha3_file(path: &Path) -> Result<[u8; 32], String> {
+    let file = File::open(path).map_err(|error| {
+        format!(
+            "failed to open trace input {} for digest: {error}",
+            manifest_path_string(path)
+        )
+    })?;
+    let mut reader = BufReader::new(file);
+    let mut hasher = Sha3_256::new();
+    let mut buffer = [0u8; 64 * 1024];
+    loop {
+        let read = reader
+            .read(&mut buffer)
+            .map_err(|error| format!("failed to hash trace input: {error}"))?;
+        if read == 0 {
+            break;
+        }
+        hasher.update(&buffer[..read]);
+    }
+    Ok(hasher.finalize().into())
+}
+
+fn decode_program_binding(
+    schema_version: &str,
+    program: Option<SerializedProgramBinding>,
+) -> Result<(BytecodePreprocessing, Option<[u8; 32]>, Option<[u8; 32]>), String> {
+    match (schema_version, program) {
+        (TRACE_FILE_SCHEMA_VERSION, None) => Ok((BytecodePreprocessing::default(), None, None)),
+        (TRACE_FILE_SCHEMA_VERSION, Some(_)) => {
+            Err("legacy trace-block files must not contain a program binding".to_string())
+        }
+        (TRACE_BUNDLE_SCHEMA_VERSION, Some(program)) => {
+            let declared_program_digest =
+                parse_hex_digest("program_digest_sha3_256", &program.program_digest_sha3_256)?;
+            let actual_program_digest = bytecode_digest(&program.bytecode)?;
+            if declared_program_digest != actual_program_digest {
+                return Err(format!(
+                    "trace bundle bytecode digest mismatch: declared {}, computed {}",
+                    hex_digest(&declared_program_digest),
+                    hex_digest(&actual_program_digest)
+                ));
+            }
+            let elf_sha3_256 = parse_hex_digest("elf_sha3_256", &program.elf_sha3_256)?;
+            Ok((
+                program.bytecode,
+                Some(declared_program_digest),
+                Some(elf_sha3_256),
+            ))
+        }
+        (TRACE_BUNDLE_SCHEMA_VERSION, None) => {
+            Err("trace bundle is missing its program binding".to_string())
+        }
+        _ => Err(format!(
+            "unsupported trace schema version {schema_version:?}"
+        )),
+    }
 }
 
 fn parse_hex_digest(label: &str, value: &str) -> Result<[u8; 32], String> {
@@ -1864,6 +2189,12 @@ fn build_manifest_json(
         &mut json,
         "trace_file_schema_version",
         trace_file_metadata.map(|metadata| metadata.schema_version.as_str()),
+    );
+    json.push(',');
+    append_json_optional_string_field(
+        &mut json,
+        "trace_storage_format",
+        trace_file_metadata.map(|metadata| metadata.storage_format.as_str()),
     );
     json.push(',');
     append_json_optional_string_field(
@@ -2647,6 +2978,7 @@ mod tests {
             vec![Cycle::NoOp, Cycle::NoOp]
         );
         assert_eq!(metadata.schema_version, TRACE_FILE_SCHEMA_VERSION);
+        assert_eq!(metadata.storage_format, TraceStorageFormat::Json);
         assert_eq!(
             metadata.sha3_256,
             <[u8; 32]>::from(Sha3_256::digest(input_bytes))
@@ -2716,6 +3048,7 @@ mod tests {
             Some(bytecode_digest(&loaded.bytecode).unwrap())
         );
         assert_eq!(metadata.schema_version, TRACE_BUNDLE_SCHEMA_VERSION);
+        assert_eq!(metadata.storage_format, TraceStorageFormat::Json);
         assert_eq!(metadata.elf_sha3_256, Some(expected_elf_digest));
         assert!(trace_path.is_file());
 
@@ -2736,10 +3069,127 @@ mod tests {
     }
 
     #[test]
+    fn binary_trace_bundle_streams_roundtrip_and_rejects_corruption() {
+        assert_eq!(
+            trace_output_format(Path::new("trace.jnvtrace")),
+            TraceStorageFormat::Binary
+        );
+        assert_eq!(
+            trace_output_format(Path::new("trace.JSON")),
+            TraceStorageFormat::Json
+        );
+        let elf_path = temp_manifest_path("binary-trace", "tiny-rv64.elf");
+        let directory = elf_path.parent().unwrap().to_path_buf();
+        let trace_path = directory.join("tiny-rv64.trace.bin");
+        std::fs::create_dir_all(&directory).unwrap();
+        let elf = tiny_rv64_elf();
+        std::fs::write(&elf_path, &elf).unwrap();
+
+        let mut args = sample_args();
+        args.trace_source = TraceSource::Elf;
+        args.elf_input = Some(elf_path.clone());
+        args.trace_output = Some(trace_path.clone());
+        args.trace_block_size = 1;
+        args.block_counts.clear();
+        let loaded = load_trace_blocks(&args).unwrap();
+        let metadata = loaded.file_metadata.as_ref().unwrap();
+
+        assert_eq!(loaded.blocks.len(), 2);
+        assert_eq!(metadata.storage_format, TraceStorageFormat::Binary);
+        assert_eq!(metadata.schema_version, TRACE_BUNDLE_SCHEMA_VERSION);
+        assert_eq!(
+            metadata.sha3_256,
+            <[u8; 32]>::from(Sha3_256::digest(std::fs::read(&trace_path).unwrap()))
+        );
+        assert_eq!(
+            loaded.program_digest,
+            Some(bytecode_digest(&loaded.bytecode).unwrap())
+        );
+
+        let valid_bytes = std::fs::read(&trace_path).unwrap();
+        assert_eq!(&valid_bytes[..BINARY_TRACE_MAGIC.len()], BINARY_TRACE_MAGIC);
+
+        let corrupted_header_path = directory.join("corrupted-header.trace.bin");
+        let mut corrupted_header_bytes = valid_bytes.clone();
+        corrupted_header_bytes[BINARY_TRACE_MAGIC.len() + 4 + 32] ^= 0x01;
+        std::fs::write(&corrupted_header_path, corrupted_header_bytes).unwrap();
+        assert!(load_trace_file(&corrupted_header_path)
+            .unwrap_err()
+            .contains("header digest mismatch"));
+
+        let corrupted_path = directory.join("corrupted.trace.bin");
+        let mut corrupted_bytes = valid_bytes.clone();
+        *corrupted_bytes.last_mut().unwrap() ^= 0x01;
+        std::fs::write(&corrupted_path, corrupted_bytes).unwrap();
+        assert!(load_trace_file(&corrupted_path)
+            .unwrap_err()
+            .contains("block 1 digest mismatch"));
+
+        let truncated_path = directory.join("truncated.trace.bin");
+        std::fs::write(&truncated_path, &valid_bytes[..valid_bytes.len() - 1]).unwrap();
+        assert!(load_trace_file(&truncated_path)
+            .unwrap_err()
+            .contains("block 1 payload"));
+
+        let trailing_path = directory.join("trailing.trace.bin");
+        let mut trailing_bytes = valid_bytes;
+        trailing_bytes.push(0xff);
+        std::fs::write(&trailing_path, trailing_bytes).unwrap();
+        assert!(load_trace_file(&trailing_path)
+            .unwrap_err()
+            .contains("trailing bytes"));
+
+        for path in [
+            trailing_path,
+            truncated_path,
+            corrupted_path,
+            corrupted_header_path,
+            trace_path,
+            elf_path,
+        ] {
+            std::fs::remove_file(path).unwrap();
+        }
+        std::fs::remove_dir(directory).unwrap();
+    }
+
+    #[test]
+    fn production_fixture_binary_trace_roundtrips_all_blocks() {
+        let trace_path = temp_manifest_path("binary-production", "cpu-lookup-64k.trace.bin");
+        let directory = trace_path.parent().unwrap().to_path_buf();
+        std::fs::create_dir_all(&directory).unwrap();
+        let mut args = sample_args();
+        args.trace_source = TraceSource::Fixture;
+        args.trace_output = Some(trace_path.clone());
+        args.trace_block_size = 1024;
+        args.block_counts.clear();
+
+        let loaded = load_trace_blocks(&args).unwrap();
+        let active_cycles = loaded
+            .blocks
+            .iter()
+            .map(|block| block.active_cycles)
+            .sum::<usize>();
+
+        assert_eq!(
+            active_cycles,
+            ProductionFixture::CpuLookup64k.expected_active_cycles()
+        );
+        assert_eq!(loaded.blocks.len(), 49);
+        assert_eq!(
+            loaded.file_metadata.unwrap().storage_format,
+            TraceStorageFormat::Binary
+        );
+        assert!(trace_path.metadata().unwrap().len() > 0);
+
+        std::fs::remove_file(trace_path).unwrap();
+        std::fs::remove_dir(directory).unwrap();
+    }
+
+    #[test]
     fn elf_runner_reaches_nova_folding_and_spartan_report() {
         let elf_path = temp_manifest_path("elf-e2e", "tiny-rv64.elf");
         let directory = elf_path.parent().unwrap().to_path_buf();
-        let trace_path = directory.join("tiny-rv64.trace.json");
+        let trace_path = directory.join("tiny-rv64.trace.bin");
         let report_path = directory.join("report.json");
         let manifest_path = directory.join("report.manifest.json");
         let performance_path = directory.join("report.performance.json");
@@ -2789,6 +3239,7 @@ mod tests {
         assert!(manifest.contains(&format!(
             "\"trace_file_schema_version\":\"{TRACE_BUNDLE_SCHEMA_VERSION}\""
         )));
+        assert!(manifest.contains("\"trace_storage_format\":\"binary\""));
         assert_eq!(performance.schema_version, PERFORMANCE_SCHEMA_VERSION);
         assert_eq!(performance.trace_source, "elf");
         assert_eq!(performance.source_block_count, 2);
@@ -2906,7 +3357,7 @@ mod tests {
         let manifest_path = normalized_manifest_output(&args.output, args.manifest_output.as_ref());
         let json = build_manifest_json(&args, &block_counts, 2, None, &artifact, &manifest_path);
 
-        assert!(json.contains("\"schema_version\":\"jolt-nova-benchmark-runner-v3\""));
+        assert!(json.contains("\"schema_version\":\"jolt-nova-benchmark-runner-v4\""));
         assert!(json.contains("\"runner\":\"jolt_nova_final_proof_size_benchmark\""));
         assert!(json.contains("\"trace_source\":\"synthetic\""));
         assert!(json.contains("\"trace_profile\":\"synthetic-noop\""));
@@ -2970,6 +3421,7 @@ mod tests {
         let manifest_path = normalized_manifest_output(&args.output, args.manifest_output.as_ref());
         let metadata = TraceFileMetadata {
             schema_version: TRACE_FILE_SCHEMA_VERSION.to_string(),
+            storage_format: TraceStorageFormat::Json,
             sha3_256: [0xabu8; 32],
             elf_sha3_256: None,
         };
@@ -2988,6 +3440,7 @@ mod tests {
             "\"trace_input_path\":\"jolt-core/examples/fixtures/jolt_nova_trace_blocks_v1.json\""
         ));
         assert!(json.contains("\"trace_file_schema_version\":\"jolt-nova-trace-blocks-v1\""));
+        assert!(json.contains("\"trace_storage_format\":\"json\""));
         assert!(json.contains(&format!("\"trace_input_sha3_256\":\"{}\"", "ab".repeat(32))));
         assert!(json.contains("\"source_block_count\":2"));
         assert!(json.contains("\"blocks\":null"));
@@ -3029,7 +3482,7 @@ mod tests {
         std::fs::remove_file(&manifest_path).unwrap();
         std::fs::remove_dir(manifest_path.parent().unwrap()).unwrap();
 
-        assert!(manifest.contains("\"schema_version\":\"jolt-nova-benchmark-runner-v3\""));
+        assert!(manifest.contains("\"schema_version\":\"jolt-nova-benchmark-runner-v4\""));
         assert!(manifest.contains("\"block_counts\":[1]"));
     }
 
