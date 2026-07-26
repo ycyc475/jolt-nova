@@ -192,14 +192,16 @@ impl VerifiedJoltLookupProofReceipt {
     }
 }
 
-/// The instruction-lookup one-hot openings authenticated by a complete Jolt
+/// The instruction-lookup openings authenticated by a complete Jolt
 /// verification.
 ///
 /// For every committed `InstructionRa(i)` polynomial, this receipt retains the
 /// opening at `HammingWeightClaimReduction`. Those claims are part of Jolt's
-/// joint PCS opening, so downstream block code can decompose each authenticated
-/// MLE evaluation into per-block contributions without creating a second,
-/// unrelated commitment.
+/// joint PCS opening. It also retains the `LeftLookupOperand`,
+/// `RightLookupOperand`, and `LookupOutput` virtual-polynomial claims at
+/// `InstructionClaimReduction`. The complete verifier constrains those three
+/// claims through the instruction claim-reduction, Read/RAF, Spartan, and R1CS
+/// chains before reducing the proof to the joint PCS opening.
 ///
 /// The opening point and claims remain private: callers can only obtain this
 /// type from `JoltVerifier::verify_with_lookup_opening_receipt`.
@@ -211,12 +213,16 @@ pub struct VerifiedJoltLookupOpeningReceipt<F: JoltField> {
     log_k_chunk: u8,
     opening_points: Vec<Vec<F::Challenge>>,
     opening_claims: Vec<F>,
+    tuple_opening_point: Vec<F::Challenge>,
+    left_lookup_operand_claim: F,
+    right_lookup_operand_claim: F,
+    lookup_output_claim: F,
     receipt_digest: [u8; 32],
 }
 
 #[cfg(not(feature = "zk"))]
 impl<F: JoltField> VerifiedJoltLookupOpeningReceipt<F> {
-    pub const VERSION: u16 = 1;
+    pub const VERSION: u16 = 2;
 
     pub fn lookup_receipt(&self) -> &VerifiedJoltLookupProofReceipt {
         &self.lookup_receipt
@@ -228,6 +234,10 @@ impl<F: JoltField> VerifiedJoltLookupOpeningReceipt<F> {
 
     pub fn instruction_opening_count(&self) -> usize {
         self.opening_claims.len()
+    }
+
+    pub fn authenticated_opening_count(&self) -> usize {
+        self.opening_claims.len() + 3
     }
 
     pub fn digest(&self) -> [u8; 32] {
@@ -246,11 +256,27 @@ impl<F: JoltField> VerifiedJoltLookupOpeningReceipt<F> {
         &self.opening_claims
     }
 
+    pub(crate) fn tuple_opening_point(&self) -> &[F::Challenge] {
+        &self.tuple_opening_point
+    }
+
+    pub(crate) fn tuple_opening_claims(&self) -> [F; 3] {
+        [
+            self.left_lookup_operand_claim,
+            self.right_lookup_operand_claim,
+            self.lookup_output_claim,
+        ]
+    }
+
     pub(crate) fn from_verified_openings(
         lookup_receipt: VerifiedJoltLookupProofReceipt,
         log_k_chunk: usize,
         opening_points: Vec<Vec<F::Challenge>>,
         opening_claims: Vec<F>,
+        tuple_opening_point: Vec<F::Challenge>,
+        left_lookup_operand_claim: F,
+        right_lookup_operand_claim: F,
+        lookup_output_claim: F,
     ) -> Self {
         let mut receipt = Self {
             version: Self::VERSION,
@@ -260,6 +286,10 @@ impl<F: JoltField> VerifiedJoltLookupOpeningReceipt<F> {
                 .expect("test lookup chunk size must fit in u8"),
             opening_points,
             opening_claims,
+            tuple_opening_point,
+            left_lookup_operand_claim,
+            right_lookup_operand_claim,
+            lookup_output_claim,
             receipt_digest: [0; 32],
         };
         receipt.receipt_digest = receipt.compute_digest();
@@ -272,8 +302,19 @@ impl<F: JoltField> VerifiedJoltLookupOpeningReceipt<F> {
         log_k_chunk: usize,
         opening_points: Vec<Vec<F::Challenge>>,
         opening_claims: Vec<F>,
+        tuple_opening_point: Vec<F::Challenge>,
+        tuple_opening_claims: [F; 3],
     ) -> Self {
-        Self::from_verified_openings(lookup_receipt, log_k_chunk, opening_points, opening_claims)
+        Self::from_verified_openings(
+            lookup_receipt,
+            log_k_chunk,
+            opening_points,
+            opening_claims,
+            tuple_opening_point,
+            tuple_opening_claims[0],
+            tuple_opening_claims[1],
+            tuple_opening_claims[2],
+        )
     }
 
     fn compute_digest(&self) -> [u8; 32] {
@@ -290,6 +331,22 @@ impl<F: JoltField> VerifiedJoltLookupOpeningReceipt<F> {
         hasher.update(canonical_digest(
             b"instruction-ra-opening-claims",
             &self.opening_claims,
+        ));
+        hasher.update(canonical_digest(
+            b"instruction-lookup-tuple-opening-point",
+            &self.tuple_opening_point,
+        ));
+        hasher.update(canonical_digest(
+            b"instruction-lookup-left-operand-claim",
+            &self.left_lookup_operand_claim,
+        ));
+        hasher.update(canonical_digest(
+            b"instruction-lookup-right-operand-claim",
+            &self.right_lookup_operand_claim,
+        ));
+        hasher.update(canonical_digest(
+            b"instruction-lookup-output-claim",
+            &self.lookup_output_claim,
         ));
         hasher.finalize().into()
     }

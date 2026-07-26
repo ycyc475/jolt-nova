@@ -38,6 +38,8 @@ use crate::zkvm::r1cs::constraints::{
     PRODUCT_VIRTUAL_FIRST_ROUND_POLY_NUM_COEFFS, PRODUCT_VIRTUAL_UNIVARIATE_SKIP_DOMAIN_SIZE,
 };
 use crate::zkvm::witness::all_committed_polynomials;
+#[cfg(not(feature = "zk"))]
+use crate::zkvm::witness::VirtualPolynomial;
 use crate::zkvm::Serializable;
 use crate::zkvm::{
     bytecode::read_raf_checking::{
@@ -457,12 +459,14 @@ impl<
     }
 
     /// Verifies the complete Jolt proof and returns the authenticated
-    /// `InstructionRa` openings needed to check that a sequence of lookup
-    /// blocks decomposes the same committed lookup-index witness.
+    /// instruction-lookup openings needed to check that a sequence of blocks
+    /// decomposes the same lookup tuple witness.
     ///
     /// The normal Jolt verifier reconstructs every opening point from the
     /// Fiat-Shamir transcript and checks the claims' reduction into the joint
-    /// PCS opening before this opaque receipt is returned.
+    /// PCS opening before this opaque receipt is returned. The receipt contains
+    /// committed `InstructionRa` openings plus the constrained virtual claims
+    /// for the left operand, right operand, and lookup output.
     #[cfg(not(feature = "zk"))]
     pub fn verify_with_lookup_opening_receipt(
         self,
@@ -488,11 +492,33 @@ impl<
             opening_points.push(point.r);
             opening_claims.push(claim);
         }
+        let (tuple_opening_point, lookup_output_claim) =
+            verified.opening_accumulator.get_virtual_polynomial_opening(
+                VirtualPolynomial::LookupOutput,
+                SumcheckId::InstructionClaimReduction,
+            );
+        let (left_opening_point, left_lookup_operand_claim) =
+            verified.opening_accumulator.get_virtual_polynomial_opening(
+                VirtualPolynomial::LeftLookupOperand,
+                SumcheckId::InstructionClaimReduction,
+            );
+        let (right_opening_point, right_lookup_operand_claim) =
+            verified.opening_accumulator.get_virtual_polynomial_opening(
+                VirtualPolynomial::RightLookupOperand,
+                SumcheckId::InstructionClaimReduction,
+            );
+        if left_opening_point != tuple_opening_point || right_opening_point != tuple_opening_point {
+            return Err(ProofVerifyError::InternalError);
+        }
         Ok(VerifiedJoltLookupOpeningReceipt::from_verified_openings(
             lookup_receipt,
             log_k_chunk,
             opening_points,
             opening_claims,
+            tuple_opening_point.r,
+            left_lookup_operand_claim,
+            right_lookup_operand_claim,
+            lookup_output_claim,
         ))
     }
 

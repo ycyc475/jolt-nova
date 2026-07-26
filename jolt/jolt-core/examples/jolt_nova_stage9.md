@@ -359,16 +359,71 @@ where opening claims are retained in `JoltProof`. Supporting the `zk` proof
 format requires deriving equivalent verified claims from the BlindFold path
 without exposing hidden witness information.
 
+## Stage 9.7: authenticated complete lookup tuples
+
+Stage 9.7 extends the Stage 9.6 bridge from lookup indices to every value in
+the block LogUp tuple:
+
+```text
+(left_lookup_operand, right_lookup_operand, lookup_index, lookup_output)
+```
+
+The lookup index remains authenticated by the committed
+`InstructionRa(i)` Dory openings. Jolt represents the two operands and output
+as virtual polynomials rather than separate committed polynomials. The complete
+Jolt verifier nevertheless authenticates their claims at the shared
+`InstructionClaimReduction` point: the instruction claim reduction, Read/RAF,
+Spartan instruction-input virtualization, and R1CS relations constrain the
+claims before the proof is reduced to the joint PCS opening.
+
+After complete verification,
+`verify_with_lookup_opening_receipt` now retains that shared point and the
+three verified claims in receipt version 2. The block bridge reconstructs each
+claim as
+
+```text
+sum over blocks and cycles:
+    eq(r_cycle, global_cycle) * tuple_component(cycle)
++ deterministic Jolt NoOp padding
+```
+
+and compares all three values exactly in the Jolt field. The per-block
+contribution digest now covers the `InstructionRa` contributions and the three
+tuple-component contributions. Consequently the existing receipt digest,
+per-block binding, Nova statement, lookup fingerprint, recursive SNARK, and
+final Spartan envelope bind the complete tuple instead of only its index.
+
+Tests cover valid complete-tuple reconstruction, independent corruption of an
+authenticated index opening, independent corruption of an operand/output
+claim, binding tampering, Nova folding, and extraction from a serialized real
+Jolt/Dory proof.
+
+### Security boundary
+
+This stage closes the previously documented operand/output gap for the
+host-verified non-ZK composition path. The claims are virtual-polynomial claims,
+so their soundness comes from the complete chain of Jolt sumchecks and R1CS
+relations rather than three new standalone polynomial commitments.
+
+The Pallas Nova circuit still does not re-execute the BN254 Jolt/Dory verifier.
+It proves a fixed-width binding to an opaque receipt that can only be emitted by
+the host-side complete verifier. A self-contained recursive composition still
+requires internalizing or recursively verifying that verifier relation.
+
+As in Stage 9.6, the opening receipt is currently unavailable in Jolt's `zk`
+proof format. Stage 9.7 also does not replace Jolt Lasso with block LogUp; it
+only ensures that both statements refer to the same executed lookup tuples.
+
 ## Remaining Stage 9 work
 
-After Stage 9.6, the main cryptographic gaps are:
+After Stage 9.7, the main cryptographic gaps are:
 
-- authenticate block lookup operands and outputs against the original Jolt
-  witness commitments;
 - compose or internalize the relevant Jolt/Dory verifier rather than relying
   on an opaque host-verified receipt;
 - connect the block CPU, register, and RAM relations to their original Jolt
   polynomial openings with the same strength;
+- derive a privacy-preserving equivalent receipt from the BlindFold/ZK proof
+  path;
 - build controlled Lasso/LogUp comparisons and perform adversarial soundness
   review;
 - add per-relation profiling and finish streaming trace-to-fold execution.

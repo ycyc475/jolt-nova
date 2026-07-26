@@ -2743,6 +2743,10 @@ mod tests {
         assert_eq!(receipt.trace_length(), padded_trace_len);
         assert!(receipt.commitment_count() > 0);
         assert!(opening_receipt.instruction_opening_count() > 0);
+        assert_eq!(
+            opening_receipt.authenticated_opening_count(),
+            opening_receipt.instruction_opening_count() + 3
+        );
         assert_ne!(opening_receipt.digest(), [0; 32]);
         assert_ne!(receipt.stage2_sumcheck_digest(), [0; 32]);
         assert_ne!(receipt.stage5_sumcheck_digest(), [0; 32]);

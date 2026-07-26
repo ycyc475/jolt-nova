@@ -545,14 +545,14 @@ struct VerifiedJoltLookupBlockOpening {
     binding_digest: [u8; 32],
 }
 
-/// Opaque evidence that the lookup indices in a complete block chain
-/// decompose the authenticated `InstructionRa` openings from one verified
-/// Jolt proof.
+/// Opaque evidence that the complete lookup tuples in a block chain decompose
+/// the authenticated instruction-lookup openings from one verified Jolt proof.
 ///
-/// This receipt is constructed only after every original Jolt opening claim is
-/// recomputed as the sum of the block contributions plus deterministic NoOp
-/// padding. It can then be bound into each Nova step without carrying BN254
-/// arithmetic inside the Pallas step circuit.
+/// This includes the committed `InstructionRa` openings for the lookup index
+/// and the virtual-polynomial claims for the left operand, right operand, and
+/// lookup output. The receipt is constructed only after every original Jolt
+/// claim is recomputed as the sum of block contributions plus deterministic
+/// NoOp padding.
 #[cfg(not(feature = "zk"))]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct VerifiedJoltLookupBlockOpeningReceipt {
@@ -566,7 +566,7 @@ pub struct VerifiedJoltLookupBlockOpeningReceipt {
 
 #[cfg(not(feature = "zk"))]
 impl VerifiedJoltLookupBlockOpeningReceipt {
-    pub const VERSION: u16 = 1;
+    pub const VERSION: u16 = 2;
 
     pub fn lookup_receipt(&self) -> &VerifiedJoltLookupProofReceipt {
         &self.lookup_receipt
@@ -582,6 +582,10 @@ impl VerifiedJoltLookupBlockOpeningReceipt {
 
     pub fn instruction_opening_count(&self) -> usize {
         self.instruction_opening_count
+    }
+
+    pub fn authenticated_opening_count(&self) -> usize {
+        self.instruction_opening_count + 3
     }
 }
 
@@ -6191,13 +6195,15 @@ where
 }
 
 /// Checks that a complete block chain decomposes the same instruction lookup
-/// one-hot polynomials authenticated by the original Jolt PCS opening.
+/// tuple authenticated by the original Jolt proof.
 ///
 /// For opening `InstructionRa(i)(r_address, r_cycle)`, every cycle contributes
 /// `eq(r_address, lookup_index_chunk_i) * eq(r_cycle, global_cycle)`. The
 /// verifier sums those terms block by block, adds the deterministic NoOp
-/// padding used by Jolt, and compares the result with the already verified
-/// opening claim.
+/// padding used by Jolt, and compares the result with the verified PCS opening.
+/// It performs the analogous decomposition for the left operand, right
+/// operand, and lookup output virtual-polynomial claims at their shared
+/// `InstructionClaimReduction` point.
 #[cfg(not(feature = "zk"))]
 pub fn verify_jolt_lookup_block_openings<F>(
     blocks: &[TraceBlock],
@@ -6301,13 +6307,66 @@ where
         }
     }
 
+    let tuple_opening_point = opening_receipt.tuple_opening_point();
+    if tuple_opening_point.len() != log_t {
+        return Err(BlockTraceError::VerifiedJoltLookupReceiptMismatch {
+            block_index: 0,
+            reason: "lookup tuple opening point has the wrong dimension",
+        });
+    }
+    let expected_tuple_claims = opening_receipt.tuple_opening_claims();
+    let eq_tuple_cycle = EqPolynomial::<F>::evals(tuple_opening_point);
+    let mut block_tuple_contributions = vec![[F::zero(); 3]; blocks.len()];
+    for (block_position, block) in blocks.iter().enumerate() {
+        for (local_cycle, cycle) in block.cycles.iter().enumerate() {
+            let global_cycle = block.global_cycle_start + local_cycle;
+            let weight = eq_tuple_cycle[global_cycle];
+            let (left_operand, right_operand) = LookupQuery::<XLEN>::to_lookup_operands(cycle);
+            let lookup_output = LookupQuery::<XLEN>::to_lookup_output(cycle);
+            block_tuple_contributions[block_position][0] +=
+                JoltField::mul_u64(&weight, left_operand);
+            block_tuple_contributions[block_position][1] +=
+                JoltField::mul_u128(&weight, right_operand);
+            block_tuple_contributions[block_position][2] +=
+                JoltField::mul_u64(&weight, lookup_output);
+        }
+    }
+    let (noop_left_operand, noop_right_operand) =
+        LookupQuery::<XLEN>::to_lookup_operands(&Cycle::NoOp);
+    let noop_lookup_output = LookupQuery::<XLEN>::to_lookup_output(&Cycle::NoOp);
+    let mut tuple_padding = [F::zero(); 3];
+    for cycle in final_cycle..trace_length {
+        let weight = eq_tuple_cycle[cycle];
+        tuple_padding[0] += JoltField::mul_u64(&weight, noop_left_operand);
+        tuple_padding[1] += JoltField::mul_u128(&weight, noop_right_operand);
+        tuple_padding[2] += JoltField::mul_u64(&weight, noop_lookup_output);
+    }
+    for claim_index in 0..3 {
+        let reconstructed_claim = block_tuple_contributions
+            .iter()
+            .map(|contributions| contributions[claim_index])
+            .sum::<F>()
+            + tuple_padding[claim_index];
+        if reconstructed_claim != expected_tuple_claims[claim_index] {
+            return Err(BlockTraceError::VerifiedJoltLookupReceiptMismatch {
+                block_index: blocks.last().map(|block| block.block_index).unwrap_or(0),
+                reason: "block lookup operands/output do not reconstruct authenticated Jolt claims",
+            });
+        }
+    }
+
     let mut receipt_blocks = Vec::with_capacity(blocks.len());
-    for ((block, contributions), public_input) in
-        blocks.iter().zip(&block_contributions).zip(&public_inputs)
+    for (((block, contributions), tuple_contributions), public_input) in blocks
+        .iter()
+        .zip(&block_contributions)
+        .zip(&block_tuple_contributions)
+        .zip(&public_inputs)
     {
         let io_claims = extract_block_io_claims(block)?;
         let lookup_claims_digest = digest_lookup_claims(&io_claims.lookup_claims);
-        let contribution_digest = digest_jolt_lookup_opening_contributions(contributions);
+        let mut all_contributions = contributions.clone();
+        all_contributions.extend_from_slice(tuple_contributions);
+        let contribution_digest = digest_jolt_lookup_opening_contributions(&all_contributions);
         let binding_digest = digest_verified_jolt_lookup_opening_block(
             opening_receipt.digest(),
             public_input,
@@ -6468,7 +6527,7 @@ where
         let state = &mut fold_input.state;
         state.verified_jolt_lookup_opening_present = true;
         state.verified_jolt_lookup_opening_receipt_digest = receipt.digest();
-        state.verified_jolt_lookup_opening_count = receipt.instruction_opening_count;
+        state.verified_jolt_lookup_opening_count = receipt.authenticated_opening_count();
         state.verified_jolt_lookup_opening_block_digest = opening_block_digest;
         state.state_digest = digest_foldable_block_state(state);
     }
@@ -6504,7 +6563,7 @@ where
         let state = &fold_input.state;
         if !state.verified_jolt_lookup_opening_present
             || state.verified_jolt_lookup_opening_receipt_digest != receipt.digest()
-            || state.verified_jolt_lookup_opening_count != receipt.instruction_opening_count
+            || state.verified_jolt_lookup_opening_count != receipt.authenticated_opening_count()
         {
             return Err(BlockTraceError::VerifiedJoltLookupReceiptMismatch {
                 block_index: state.block_index,
@@ -7286,7 +7345,7 @@ where
     F: JoltField,
 {
     let mut hasher = Sha3_256::new();
-    hasher.update(b"JOLT_NOVA_LOOKUP_OPENING_CONTRIBUTIONS_V1");
+    hasher.update(b"JOLT_NOVA_LOOKUP_OPENING_CONTRIBUTIONS_V2");
     update_usize(&mut hasher, contributions.len());
     for contribution in contributions {
         update_field(&mut hasher, *contribution);
@@ -7302,7 +7361,7 @@ fn digest_verified_jolt_lookup_opening_block<Digest>(
     contribution_digest: [u8; 32],
 ) -> [u8; 32] {
     let mut hasher = Sha3_256::new();
-    hasher.update(b"JOLT_NOVA_VERIFIED_LOOKUP_OPENING_BLOCK_V1");
+    hasher.update(b"JOLT_NOVA_VERIFIED_LOOKUP_OPENING_BLOCK_V2");
     hasher.update(opening_receipt_digest);
     update_usize(&mut hasher, public_input.block_index);
     update_usize(&mut hasher, public_input.global_cycle_start);
@@ -7317,11 +7376,12 @@ fn digest_verified_jolt_lookup_block_opening_receipt(
     receipt: &VerifiedJoltLookupBlockOpeningReceipt,
 ) -> [u8; 32] {
     let mut hasher = Sha3_256::new();
-    hasher.update(b"JOLT_NOVA_VERIFIED_LOOKUP_BLOCK_OPENING_RECEIPT_V1");
+    hasher.update(b"JOLT_NOVA_VERIFIED_LOOKUP_BLOCK_OPENING_RECEIPT_V2");
     hasher.update(receipt.version.to_le_bytes());
     hasher.update(receipt.lookup_receipt.digest());
     hasher.update(receipt.global_opening_receipt_digest);
     update_usize(&mut hasher, receipt.instruction_opening_count);
+    update_usize(&mut hasher, receipt.authenticated_opening_count());
     update_usize(&mut hasher, receipt.blocks.len());
     for block in &receipt.blocks {
         update_usize(&mut hasher, block.block_index);
@@ -7344,7 +7404,7 @@ where
     Digest: AsRef<[u8]>,
 {
     let mut hasher = Sha3_256::new();
-    hasher.update(b"JOLT_NOVA_FOLD_INPUT_LOOKUP_OPENING_BINDING_V1");
+    hasher.update(b"JOLT_NOVA_FOLD_INPUT_LOOKUP_OPENING_BINDING_V2");
     update_usize(&mut hasher, fold_input.program_digest.as_ref().len());
     hasher.update(fold_input.program_digest.as_ref());
     hasher.update(receipt.digest());
@@ -9171,6 +9231,7 @@ mod tests {
         blocks: &[TraceBlock],
         trace_length: usize,
         corrupt_first_claim: bool,
+        corrupt_tuple_claim: bool,
     ) -> VerifiedJoltLookupOpeningReceipt<ark_bn254::Fr> {
         type F = ark_bn254::Fr;
 
@@ -9219,11 +9280,46 @@ mod tests {
             claims[0] += F::from_u64(1);
         }
 
+        let tuple_point = (0..log_t)
+            .map(|coordinate| {
+                <F as JoltField>::Challenge::from(
+                    (instruction_d * (log_k_chunk + log_t) + coordinate + 2) as u128,
+                )
+            })
+            .collect::<Vec<_>>();
+        let eq_tuple_cycle = EqPolynomial::<F>::evals(&tuple_point);
+        let mut tuple_claims = [F::zero(); 3];
+        for block in blocks {
+            for (local_cycle, cycle) in block.cycles.iter().enumerate() {
+                let global_cycle = block.global_cycle_start + local_cycle;
+                let weight = eq_tuple_cycle[global_cycle];
+                let (left_operand, right_operand) = LookupQuery::<XLEN>::to_lookup_operands(cycle);
+                tuple_claims[0] += JoltField::mul_u64(&weight, left_operand);
+                tuple_claims[1] += JoltField::mul_u128(&weight, right_operand);
+                tuple_claims[2] +=
+                    JoltField::mul_u64(&weight, LookupQuery::<XLEN>::to_lookup_output(cycle));
+            }
+        }
+        let (noop_left_operand, noop_right_operand) =
+            LookupQuery::<XLEN>::to_lookup_operands(&Cycle::NoOp);
+        let noop_lookup_output = LookupQuery::<XLEN>::to_lookup_output(&Cycle::NoOp);
+        for cycle in final_cycle..trace_length {
+            let weight = eq_tuple_cycle[cycle];
+            tuple_claims[0] += JoltField::mul_u64(&weight, noop_left_operand);
+            tuple_claims[1] += JoltField::mul_u128(&weight, noop_right_operand);
+            tuple_claims[2] += JoltField::mul_u64(&weight, noop_lookup_output);
+        }
+        if corrupt_tuple_claim {
+            tuple_claims[2] += F::from_u64(1);
+        }
+
         VerifiedJoltLookupOpeningReceipt::new_for_test(
             VerifiedJoltLookupProofReceipt::new_for_test(41, trace_length),
             log_k_chunk,
             points,
             claims,
+            tuple_point,
+            tuple_claims,
         )
     }
 
@@ -12436,7 +12532,7 @@ mod tests {
         let block0 = trace_block(0, boundary(0, 0), boundary(2, 0));
         let block1 = trace_block(1, block0.end_state.clone(), boundary(4, 0));
         let blocks = [block0, block1];
-        let opening_receipt = test_lookup_opening_receipt(&blocks, 8, false);
+        let opening_receipt = test_lookup_opening_receipt(&blocks, 8, false, false);
 
         let block_receipt = verify_jolt_lookup_block_openings(&blocks, &opening_receipt).unwrap();
         assert_eq!(block_receipt.block_count(), blocks.len());
@@ -12444,14 +12540,27 @@ mod tests {
             block_receipt.instruction_opening_count(),
             crate::zkvm::instruction_lookups::LOG_K / 8
         );
+        assert_eq!(
+            block_receipt.authenticated_opening_count(),
+            crate::zkvm::instruction_lookups::LOG_K / 8 + 3
+        );
         assert_ne!(block_receipt.digest(), [0; 32]);
 
-        let corrupt_receipt = test_lookup_opening_receipt(&blocks, 8, true);
+        let corrupt_receipt = test_lookup_opening_receipt(&blocks, 8, true, false);
         assert!(matches!(
             verify_jolt_lookup_block_openings(&blocks, &corrupt_receipt),
             Err(BlockTraceError::VerifiedJoltLookupReceiptMismatch {
                 reason:
                     "block lookup indices do not reconstruct an authenticated InstructionRa opening",
+                ..
+            })
+        ));
+
+        let corrupt_tuple_receipt = test_lookup_opening_receipt(&blocks, 8, false, true);
+        assert!(matches!(
+            verify_jolt_lookup_block_openings(&blocks, &corrupt_tuple_receipt),
+            Err(BlockTraceError::VerifiedJoltLookupReceiptMismatch {
+                reason: "block lookup operands/output do not reconstruct authenticated Jolt claims",
                 ..
             })
         ));
@@ -12464,7 +12573,7 @@ mod tests {
         let block0 = trace_block(0, boundary(0, 0), boundary(2, 0));
         let block1 = trace_block(1, block0.end_state.clone(), boundary(4, 0));
         let blocks = [block0, block1];
-        let opening_receipt = test_lookup_opening_receipt(&blocks, 8, false);
+        let opening_receipt = test_lookup_opening_receipt(&blocks, 8, false, false);
         let receipt = verify_jolt_lookup_block_openings(&blocks, &opening_receipt).unwrap();
         let pipeline =
             BlockProofPipeline::<_, ark_bn254::Fr, MockFoldingBackend>::
@@ -12479,7 +12588,7 @@ mod tests {
             fold_input.state.verified_jolt_lookup_opening_present
                 && fold_input.state.verified_jolt_lookup_opening_receipt_digest == receipt.digest()
                 && fold_input.state.verified_jolt_lookup_opening_count
-                    == receipt.instruction_opening_count()
+                    == receipt.authenticated_opening_count()
                 && fold_input.state.verified_jolt_lookup_opening_block_digest != [0; 32]
         }));
         verify_block_proof_pipeline_with_backend_and_verified_jolt_lookup_block_opening_receipt(
@@ -12525,7 +12634,7 @@ mod tests {
         let block0 = trace_block(0, boundary(0, 0), boundary(2, 0));
         let block1 = trace_block(1, block0.end_state.clone(), boundary(4, 0));
         let blocks = [block0, block1];
-        let opening_receipt = test_lookup_opening_receipt(&blocks, 8, false);
+        let opening_receipt = test_lookup_opening_receipt(&blocks, 8, false, false);
         let receipt = verify_jolt_lookup_block_openings(&blocks, &opening_receipt).unwrap();
         let backend = NovaFoldingBackend::default();
         let pipeline =
