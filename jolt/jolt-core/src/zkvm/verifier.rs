@@ -458,15 +458,17 @@ impl<
         Ok(receipt)
     }
 
-    /// Verifies the complete Jolt proof and returns the authenticated
-    /// instruction-lookup openings needed to check that a sequence of blocks
-    /// decomposes the same lookup tuple witness.
+    /// Verifies the complete Jolt proof and returns the authenticated execution
+    /// openings needed to check that a sequence of blocks decomposes the same
+    /// lookup-tuple and register-access witness.
     ///
     /// The normal Jolt verifier reconstructs every opening point from the
     /// Fiat-Shamir transcript and checks the claims' reduction into the joint
     /// PCS opening before this opaque receipt is returned. The receipt contains
-    /// committed `InstructionRa` openings plus the constrained virtual claims
-    /// for the left operand, right operand, and lookup output.
+    /// committed `InstructionRa` and `RdInc` openings plus the constrained
+    /// virtual claims for the lookup tuple, register values, and register
+    /// addresses. The historical lookup-oriented method name is retained for
+    /// API compatibility.
     #[cfg(not(feature = "zk"))]
     pub fn verify_with_lookup_opening_receipt(
         self,
@@ -510,6 +512,55 @@ impl<
         if left_opening_point != tuple_opening_point || right_opening_point != tuple_opening_point {
             return Err(ProofVerifyError::InternalError);
         }
+
+        let (register_value_opening_point, rd_write_value_claim) =
+            verified.opening_accumulator.get_virtual_polynomial_opening(
+                VirtualPolynomial::RdWriteValue,
+                SumcheckId::RegistersClaimReduction,
+            );
+        let (rs1_value_opening_point, rs1_value_claim) =
+            verified.opening_accumulator.get_virtual_polynomial_opening(
+                VirtualPolynomial::Rs1Value,
+                SumcheckId::RegistersClaimReduction,
+            );
+        let (rs2_value_opening_point, rs2_value_claim) =
+            verified.opening_accumulator.get_virtual_polynomial_opening(
+                VirtualPolynomial::Rs2Value,
+                SumcheckId::RegistersClaimReduction,
+            );
+        if rs1_value_opening_point != register_value_opening_point
+            || rs2_value_opening_point != register_value_opening_point
+        {
+            return Err(ProofVerifyError::InternalError);
+        }
+
+        let (register_address_opening_point, rs1_ra_claim) =
+            verified.opening_accumulator.get_virtual_polynomial_opening(
+                VirtualPolynomial::Rs1Ra,
+                SumcheckId::RegistersReadWriteChecking,
+            );
+        let (rs2_ra_opening_point, rs2_ra_claim) =
+            verified.opening_accumulator.get_virtual_polynomial_opening(
+                VirtualPolynomial::Rs2Ra,
+                SumcheckId::RegistersReadWriteChecking,
+            );
+        let (rd_wa_opening_point, rd_wa_claim) =
+            verified.opening_accumulator.get_virtual_polynomial_opening(
+                VirtualPolynomial::RdWa,
+                SumcheckId::RegistersReadWriteChecking,
+            );
+        if rs2_ra_opening_point != register_address_opening_point
+            || rd_wa_opening_point != register_address_opening_point
+        {
+            return Err(ProofVerifyError::InternalError);
+        }
+
+        let (rd_inc_opening_point, rd_inc_claim) = verified
+            .opening_accumulator
+            .get_committed_polynomial_opening(
+                CommittedPolynomial::RdInc,
+                SumcheckId::IncClaimReduction,
+            );
         Ok(VerifiedJoltLookupOpeningReceipt::from_verified_openings(
             lookup_receipt,
             log_k_chunk,
@@ -519,6 +570,16 @@ impl<
             left_lookup_operand_claim,
             right_lookup_operand_claim,
             lookup_output_claim,
+            register_value_opening_point.r,
+            rs1_value_claim,
+            rs2_value_claim,
+            rd_write_value_claim,
+            register_address_opening_point.r,
+            rs1_ra_claim,
+            rs2_ra_claim,
+            rd_wa_claim,
+            rd_inc_opening_point.r,
+            rd_inc_claim,
         ))
     }
 

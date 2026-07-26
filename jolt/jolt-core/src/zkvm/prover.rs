@@ -2745,8 +2745,11 @@ mod tests {
         assert!(opening_receipt.instruction_opening_count() > 0);
         assert_eq!(
             opening_receipt.authenticated_opening_count(),
-            opening_receipt.instruction_opening_count() + 3
+            opening_receipt.instruction_opening_count()
+                + 3
+                + opening_receipt.register_opening_count()
         );
+        assert_eq!(opening_receipt.register_opening_count(), 7);
         assert_ne!(opening_receipt.digest(), [0; 32]);
         assert_ne!(receipt.stage2_sumcheck_digest(), [0; 32]);
         assert_ne!(receipt.stage5_sumcheck_digest(), [0; 32]);

@@ -414,14 +414,73 @@ As in Stage 9.6, the opening receipt is currently unavailable in Jolt's `zk`
 proof format. Stage 9.7 also does not replace Jolt Lasso with block LogUp; it
 only ensures that both statements refer to the same executed lookup tuples.
 
+## Stage 9.8: authenticated register openings
+
+Stage 9.8 extends the same verified-opening bridge to Jolt's register relation.
+After the complete original Jolt verifier accepts, receipt version 3 retains
+seven additional authenticated claims:
+
+- `Rs1Value`, `Rs2Value`, and `RdWriteValue` at the shared
+  `RegistersClaimReduction` point;
+- `Rs1Ra`, `Rs2Ra`, and `RdWa` at the shared
+  `RegistersReadWriteChecking` address-cycle point;
+- the committed `RdInc` opening produced by `IncClaimReduction`.
+
+For each block, the bridge reconstructs the three value claims as
+
+```text
+sum over block cycles:
+    eq(r_cycle, global_cycle) * register_value(cycle)
+```
+
+and the address claims as
+
+```text
+sum over block cycles:
+    eq(r_address, register_index) * eq(r_cycle, global_cycle)
+```
+
+It reconstructs `RdInc` from each cycle's post-write value minus pre-write
+value, using the authenticated `IncClaimReduction` point. Deterministic Jolt
+padding is included in each global reconstruction.
+
+Only exact field equality for all seven claims produces the version 3 block
+opening receipt. Its per-block contribution digest now covers lookup indices,
+complete lookup tuples, register values, register addresses, and register
+increments. The existing receipt fields are bound into both Nova's lookup
+fingerprint and register fingerprint, so tampering changes the recursive
+statement and is rejected by the Nova circuit and final proof verifier.
+
+Tests include a nonzero two-cycle ADD trace, corrupted register claims, all
+minimal and Nova block regressions, the ZK feature compile surface, and a real
+Fibonacci Jolt/Dory proof.
+
+### Security boundary
+
+`RdInc` is a committed polynomial whose claim is closed by Jolt's joint Dory
+opening. Register values and address selectors are virtual-polynomial claims:
+their soundness comes from the complete Jolt register sumchecks, bytecode and
+Spartan/R1CS reductions, and Twist read/write relations that the normal
+verifier checks before emitting the opaque receipt.
+
+Nova does not execute the BN254/Dory verifier. It folds a fixed-width binding
+to the host-verified receipt, so the composition entry point must run the
+complete Jolt verifier and use the returned opaque value. The public type,
+method, and state-field names still contain `Lookup` for source compatibility,
+but receipt version 3 authenticates both lookup and register execution data.
+
+This bridge remains available only for the non-ZK Jolt proof format. A
+privacy-preserving BlindFold/ZK extraction path and authenticated CPU/RAM
+openings remain future work.
+
 ## Remaining Stage 9 work
 
-After Stage 9.7, the main cryptographic gaps are:
+After Stage 9.8, the main cryptographic gaps are:
 
 - compose or internalize the relevant Jolt/Dory verifier rather than relying
   on an opaque host-verified receipt;
-- connect the block CPU, register, and RAM relations to their original Jolt
-  polynomial openings with the same strength;
+- connect the block CPU and RAM relations to their original Jolt polynomial
+  openings with the same strength;
 - derive a privacy-preserving equivalent receipt from the BlindFold/ZK proof
   path;
 - build controlled Lasso/LogUp comparisons and perform adversarial soundness
