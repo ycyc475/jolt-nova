@@ -106,7 +106,8 @@ versioned per-block binary trace storage, the selectable real block-level LogUp
 relation, the verified full-Jolt lookup receipt bridge, authenticated
 per-block `InstructionRa` opening reconstruction, complete operand/output tuple
 claim reconstruction, authenticated register-value/address/increment
-reconstruction, and the current research roadmap.
+reconstruction, authenticated RAM address/value/increment reconstruction, and
+the current research roadmap.
 
 ## Performance profiling
 

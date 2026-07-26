@@ -473,14 +473,84 @@ This bridge remains available only for the non-ZK Jolt proof format. A
 privacy-preserving BlindFold/ZK extraction path and authenticated CPU/RAM
 openings remain future work.
 
+## Stage 9.9: authenticated RAM openings
+
+Stage 9.9 extends the verified execution-opening receipt from lookup and
+register data to the complete per-cycle RAM access tuple. Receipt version 4
+retains:
+
+- every committed `RamRa(i)` opening at
+  `HammingWeightClaimReduction`;
+- `RamAddress`, `RamReadValue`, and `RamWriteValue` at their shared
+  `SpartanOuter` point;
+- the committed `RamInc` opening produced by `IncClaimReduction`;
+- the authenticated RAM domain size and lowest memory-layout address needed to
+  reproduce Jolt's address remapping.
+
+The block verifier remaps each nonzero byte address exactly as Jolt does:
+
+```text
+remapped_address = (address - lowest_address) / 8
+```
+
+It rejects addresses below the authenticated layout, unaligned addresses, and
+addresses outside the authenticated RAM domain. For each `RamRa(i)` it then
+reconstructs:
+
+```text
+sum over RAM-access cycles:
+    eq(r_chunk, chunk_i(remapped_address))
+  * eq(r_cycle, global_cycle)
+```
+
+NoOp cycles contribute zero because Jolt's RAM one-hot polynomial has no active
+address on those cycles. At the shared Spartan point, each cycle contributes:
+
+```text
+Read:  (address, value, value)
+Write: (address, pre_value, post_value)
+NoOp:  (0, 0, 0)
+```
+
+Finally, the bridge reconstructs `RamInc` as `post_value - pre_value` on write
+cycles and zero otherwise. Exact equality is required for all committed and
+virtual claims before a version 4 block receipt can be produced.
+
+The per-block contribution digest now covers instruction lookup, register, and
+RAM openings. The same opaque receipt fields are included in Nova's lookup,
+register, and RAM fingerprints, so the recursive RAM accumulator and final
+Spartan envelope bind the authenticated original Jolt RAM witness.
+
+Tests cover a nonzero `LD`/`SD` trace, corrupted `RamInc`, one-hot address
+reconstruction, complete minimal and Nova block regressions, the ZK compile
+surface, runner integration, and extraction from a real Fibonacci Jolt/Dory
+proof.
+
+### Security boundary
+
+`RamRa(i)` and `RamInc` are committed polynomials closed by Jolt's joint Dory
+opening. The address/read/write tuple consists of virtual-polynomial claims,
+whose soundness comes from the complete Spartan/R1CS, RAM RAF, RAM read/write,
+value-check, claim-reduction, and Twist relations run by the original verifier.
+
+As in Stages 9.6–9.8, the Pallas Nova circuit does not re-execute the BN254/Dory
+verifier. It folds a fixed-width binding to the opaque host-verified receipt.
+The public API and state fields retain their historical lookup-oriented names
+for compatibility, while receipt version 4 authenticates lookup, register, and
+RAM execution data.
+
+The non-ZK proof format remains required for opening extraction. A
+privacy-preserving BlindFold/ZK path and authenticated CPU relation remain
+future work.
+
 ## Remaining Stage 9 work
 
-After Stage 9.8, the main cryptographic gaps are:
+After Stage 9.9, the main cryptographic gaps are:
 
 - compose or internalize the relevant Jolt/Dory verifier rather than relying
   on an opaque host-verified receipt;
-- connect the block CPU and RAM relations to their original Jolt polynomial
-  openings with the same strength;
+- connect the block CPU relation to the original Jolt R1CS/Spartan claims with
+  the same strength;
 - derive a privacy-preserving equivalent receipt from the BlindFold/ZK proof
   path;
 - build controlled Lasso/LogUp comparisons and perform adversarial soundness

@@ -460,15 +460,15 @@ impl<
 
     /// Verifies the complete Jolt proof and returns the authenticated execution
     /// openings needed to check that a sequence of blocks decomposes the same
-    /// lookup-tuple and register-access witness.
+    /// lookup-tuple, register-access, and RAM-access witness.
     ///
     /// The normal Jolt verifier reconstructs every opening point from the
     /// Fiat-Shamir transcript and checks the claims' reduction into the joint
     /// PCS opening before this opaque receipt is returned. The receipt contains
-    /// committed `InstructionRa` and `RdInc` openings plus the constrained
-    /// virtual claims for the lookup tuple, register values, and register
-    /// addresses. The historical lookup-oriented method name is retained for
-    /// API compatibility.
+    /// committed `InstructionRa`, `RdInc`, `RamRa`, and `RamInc` openings plus
+    /// the constrained virtual claims for the lookup tuple, register accesses,
+    /// and RAM access tuple. The historical lookup-oriented method name is
+    /// retained for API compatibility.
     #[cfg(not(feature = "zk"))]
     pub fn verify_with_lookup_opening_receipt(
         self,
@@ -561,6 +561,50 @@ impl<
                 CommittedPolynomial::RdInc,
                 SumcheckId::IncClaimReduction,
             );
+
+        let ram_start_address = verified.program_io.memory_layout.get_lowest_address();
+        let ram_k = verified.one_hot_params.ram_k;
+        let ram_d = verified.one_hot_params.ram_d;
+        let mut ram_opening_points = Vec::with_capacity(ram_d);
+        let mut ram_opening_claims = Vec::with_capacity(ram_d);
+        for index in 0..ram_d {
+            let (point, claim) = verified
+                .opening_accumulator
+                .get_committed_polynomial_opening(
+                    CommittedPolynomial::RamRa(index),
+                    SumcheckId::HammingWeightClaimReduction,
+                );
+            ram_opening_points.push(point.r);
+            ram_opening_claims.push(claim);
+        }
+
+        let (ram_tuple_opening_point, ram_address_claim) =
+            verified.opening_accumulator.get_virtual_polynomial_opening(
+                VirtualPolynomial::RamAddress,
+                SumcheckId::SpartanOuter,
+            );
+        let (ram_read_opening_point, ram_read_value_claim) =
+            verified.opening_accumulator.get_virtual_polynomial_opening(
+                VirtualPolynomial::RamReadValue,
+                SumcheckId::SpartanOuter,
+            );
+        let (ram_write_opening_point, ram_write_value_claim) =
+            verified.opening_accumulator.get_virtual_polynomial_opening(
+                VirtualPolynomial::RamWriteValue,
+                SumcheckId::SpartanOuter,
+            );
+        if ram_read_opening_point != ram_tuple_opening_point
+            || ram_write_opening_point != ram_tuple_opening_point
+        {
+            return Err(ProofVerifyError::InternalError);
+        }
+
+        let (ram_inc_opening_point, ram_inc_claim) = verified
+            .opening_accumulator
+            .get_committed_polynomial_opening(
+                CommittedPolynomial::RamInc,
+                SumcheckId::IncClaimReduction,
+            );
         Ok(VerifiedJoltLookupOpeningReceipt::from_verified_openings(
             lookup_receipt,
             log_k_chunk,
@@ -580,6 +624,16 @@ impl<
             rd_wa_claim,
             rd_inc_opening_point.r,
             rd_inc_claim,
+            ram_start_address,
+            ram_k,
+            ram_opening_points,
+            ram_opening_claims,
+            ram_tuple_opening_point.r,
+            ram_address_claim,
+            ram_read_value_claim,
+            ram_write_value_claim,
+            ram_inc_opening_point.r,
+            ram_inc_claim,
         ))
     }
 

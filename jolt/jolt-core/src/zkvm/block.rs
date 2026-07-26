@@ -545,14 +545,16 @@ struct VerifiedJoltLookupBlockOpening {
     binding_digest: [u8; 32],
 }
 
-/// Opaque evidence that the complete lookup tuples in a block chain decompose
-/// the authenticated instruction-lookup openings from one verified Jolt proof.
+/// Opaque evidence that the complete lookup, register, and RAM accesses in a
+/// block chain decompose the authenticated openings from one verified Jolt
+/// proof.
 ///
 /// This includes the committed `InstructionRa` openings for the lookup index
-/// and the virtual-polynomial claims for the left operand, right operand, and
-/// lookup output. The receipt is constructed only after every original Jolt
-/// claim is recomputed as the sum of block contributions plus deterministic
-/// NoOp padding.
+/// and the virtual-polynomial claims for the lookup tuple, register accesses,
+/// and RAM access tuple. It also includes committed register/RAM increments and
+/// committed `RamRa` openings. The receipt is constructed only after every
+/// original Jolt claim is recomputed as the sum of block contributions plus
+/// deterministic NoOp padding.
 #[cfg(not(feature = "zk"))]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct VerifiedJoltLookupBlockOpeningReceipt {
@@ -561,13 +563,14 @@ pub struct VerifiedJoltLookupBlockOpeningReceipt {
     global_opening_receipt_digest: [u8; 32],
     instruction_opening_count: usize,
     register_opening_count: usize,
+    ram_opening_count: usize,
     blocks: Vec<VerifiedJoltLookupBlockOpening>,
     receipt_digest: [u8; 32],
 }
 
 #[cfg(not(feature = "zk"))]
 impl VerifiedJoltLookupBlockOpeningReceipt {
-    pub const VERSION: u16 = 3;
+    pub const VERSION: u16 = 4;
 
     pub fn lookup_receipt(&self) -> &VerifiedJoltLookupProofReceipt {
         &self.lookup_receipt
@@ -586,11 +589,15 @@ impl VerifiedJoltLookupBlockOpeningReceipt {
     }
 
     pub fn authenticated_opening_count(&self) -> usize {
-        self.instruction_opening_count + 3 + self.register_opening_count
+        self.instruction_opening_count + 3 + self.register_opening_count + self.ram_opening_count
     }
 
     pub fn register_opening_count(&self) -> usize {
         self.register_opening_count
+    }
+
+    pub fn ram_opening_count(&self) -> usize {
+        self.ram_opening_count
     }
 }
 
@@ -635,10 +642,11 @@ pub struct FoldableBlockState<F = ark_bn254::Fr> {
     pub verified_jolt_lookup_receipt_trace_length: usize,
     pub verified_jolt_lookup_receipt_commitment_count: usize,
     /// Per-block binding of the global receipt to this block's program and
-    /// lookup statement.
+    /// execution statement.
     pub verified_jolt_lookup_block_binding_digest: [u8; 32],
-    /// True when the block's lookup indices have also been checked against the
-    /// authenticated `InstructionRa` polynomial openings.
+    /// True when the block's lookup, register, and RAM data have also been
+    /// checked against the authenticated original Jolt openings. Historical
+    /// field names retain `lookup` for source compatibility.
     pub verified_jolt_lookup_opening_present: bool,
     pub verified_jolt_lookup_opening_receipt_digest: [u8; 32],
     pub verified_jolt_lookup_opening_count: usize,
@@ -2460,6 +2468,22 @@ impl BlockFoldStatement {
                 ),
                 ("ram_access_count", self.ram_access_count),
                 ("ram_touched_address_count", self.ram_touched_address_count),
+                (
+                    "verified_jolt_lookup_opening_present",
+                    self.verified_jolt_lookup_opening_present,
+                ),
+                (
+                    "verified_jolt_lookup_opening_receipt_digest",
+                    self.verified_jolt_lookup_opening_receipt_digest,
+                ),
+                (
+                    "verified_jolt_lookup_opening_count",
+                    self.verified_jolt_lookup_opening_count,
+                ),
+                (
+                    "verified_jolt_lookup_opening_block_digest",
+                    self.verified_jolt_lookup_opening_block_digest,
+                ),
             ],
         )
     }
@@ -3710,6 +3734,30 @@ impl nova_snark::traits::circuit::StepCircuit<NovaScalar> for JoltNovaStepCircui
                         "ram_touched_address_count",
                     ),
                     ram_touched_address_count.get_variable(),
+                ) + (
+                    nova_transcript_challenge_scalar(
+                        NOVA_TRANSCRIPT_DOMAIN_RAM,
+                        "verified_jolt_lookup_opening_present",
+                    ),
+                    verified_jolt_lookup_opening_present.get_variable(),
+                ) + (
+                    nova_transcript_challenge_scalar(
+                        NOVA_TRANSCRIPT_DOMAIN_RAM,
+                        "verified_jolt_lookup_opening_receipt_digest",
+                    ),
+                    verified_jolt_lookup_opening_receipt_digest.get_variable(),
+                ) + (
+                    nova_transcript_challenge_scalar(
+                        NOVA_TRANSCRIPT_DOMAIN_RAM,
+                        "verified_jolt_lookup_opening_count",
+                    ),
+                    verified_jolt_lookup_opening_count.get_variable(),
+                ) + (
+                    nova_transcript_challenge_scalar(
+                        NOVA_TRANSCRIPT_DOMAIN_RAM,
+                        "verified_jolt_lookup_opening_block_digest",
+                    ),
+                    verified_jolt_lookup_opening_block_digest.get_variable(),
                 )
             },
             |lc| lc + CS::one(),
@@ -6239,8 +6287,8 @@ where
     bundles.iter().map(build_block_fold_input).collect()
 }
 
-/// Checks that a complete block chain decomposes the same instruction lookup
-/// tuple and register accesses authenticated by the original Jolt proof.
+/// Checks that a complete block chain decomposes the same instruction lookup,
+/// register, and RAM accesses authenticated by the original Jolt proof.
 ///
 /// For opening `InstructionRa(i)(r_address, r_cycle)`, every cycle contributes
 /// `eq(r_address, lookup_index_chunk_i) * eq(r_cycle, global_cycle)`. The
@@ -6250,8 +6298,9 @@ where
 /// operand, and lookup output virtual-polynomial claims at their shared
 /// `InstructionClaimReduction` point. It also reconstructs the three register
 /// value claims, three register address claims, and the committed `RdInc`
-/// opening. The historical lookup-oriented API name is retained for
-/// compatibility.
+/// opening. On the RAM side it reconstructs all committed `RamRa` chunks, the
+/// address/read/write tuple at the Spartan point, and committed `RamInc`. The
+/// historical lookup-oriented API name is retained for compatibility.
 #[cfg(not(feature = "zk"))]
 pub fn verify_jolt_lookup_block_openings<F>(
     blocks: &[TraceBlock],
@@ -6515,32 +6564,167 @@ where
         });
     }
 
-    let mut receipt_blocks = Vec::with_capacity(blocks.len());
-    for (
-        (
-            (
-                (((block, contributions), tuple_contributions), register_value_contributions),
-                register_address_contributions,
-            ),
-            rd_inc_contribution,
-        ),
-        public_input,
-    ) in blocks
-        .iter()
-        .zip(&block_contributions)
-        .zip(&block_tuple_contributions)
-        .zip(&block_register_value_contributions)
-        .zip(&block_register_address_contributions)
-        .zip(&block_rd_inc_contributions)
-        .zip(&public_inputs)
+    let ram_opening_points = opening_receipt.ram_opening_points();
+    let ram_opening_claims = opening_receipt.ram_opening_claims();
+    let ram_k = opening_receipt.ram_k();
+    let ram_d = ram_opening_claims.len();
+    if ram_k == 0
+        || !ram_k.is_power_of_two()
+        || ram_opening_points.len() != ram_d
+        || ram_d != ram_k.log_2().div_ceil(log_k_chunk)
     {
+        return Err(BlockTraceError::VerifiedJoltLookupReceiptMismatch {
+            block_index: 0,
+            reason: "RAM opening receipt has inconsistent one-hot parameters",
+        });
+    }
+    let ram_start_address = opening_receipt.ram_start_address();
+    let ram_chunk_mask = (1u64 << log_k_chunk) - 1;
+    let mut block_ram_ra_contributions = vec![vec![F::zero(); ram_d]; blocks.len()];
+    for (opening_index, (point, expected_claim)) in ram_opening_points
+        .iter()
+        .zip(ram_opening_claims)
+        .enumerate()
+    {
+        if point.len() != log_k_chunk + log_t {
+            return Err(BlockTraceError::VerifiedJoltLookupReceiptMismatch {
+                block_index: 0,
+                reason: "RAM one-hot opening point has the wrong dimension",
+            });
+        }
+        let (r_address, r_cycle) = point.split_at(log_k_chunk);
+        let eq_address = EqPolynomial::<F>::evals(r_address);
+        let eq_cycle = EqPolynomial::<F>::evals(r_cycle);
+        let shift = log_k_chunk * (ram_d - 1 - opening_index);
+
+        for (block_position, block) in blocks.iter().enumerate() {
+            let mut contribution = F::zero();
+            for (local_cycle, cycle) in block.cycles.iter().enumerate() {
+                let address = cycle.ram_access().address() as u64;
+                if address == 0 {
+                    continue;
+                }
+                let Some(address_offset) = address.checked_sub(ram_start_address) else {
+                    return Err(BlockTraceError::VerifiedJoltLookupReceiptMismatch {
+                        block_index: block.block_index,
+                        reason: "block RAM address is below the verified Jolt memory layout",
+                    });
+                };
+                if address_offset % 8 != 0 {
+                    return Err(BlockTraceError::VerifiedJoltLookupReceiptMismatch {
+                        block_index: block.block_index,
+                        reason: "block RAM address is not aligned to a Jolt memory word",
+                    });
+                }
+                let remapped_address = address_offset / 8;
+                if remapped_address >= ram_k as u64 {
+                    return Err(BlockTraceError::VerifiedJoltLookupReceiptMismatch {
+                        block_index: block.block_index,
+                        reason: "block RAM address exceeds the verified Jolt RAM domain",
+                    });
+                }
+                let global_cycle = block.global_cycle_start + local_cycle;
+                let chunk = ((remapped_address >> shift) & ram_chunk_mask) as usize;
+                contribution += eq_address[chunk] * eq_cycle[global_cycle];
+            }
+            block_ram_ra_contributions[block_position][opening_index] = contribution;
+        }
+
+        let reconstructed_claim = block_ram_ra_contributions
+            .iter()
+            .map(|contributions| contributions[opening_index])
+            .sum::<F>();
+        if reconstructed_claim != *expected_claim {
+            return Err(BlockTraceError::VerifiedJoltLookupReceiptMismatch {
+                block_index: blocks.last().map(|block| block.block_index).unwrap_or(0),
+                reason: "block RAM addresses do not reconstruct an authenticated RamRa opening",
+            });
+        }
+    }
+
+    let ram_tuple_opening_point = opening_receipt.ram_tuple_opening_point();
+    if ram_tuple_opening_point.len() != log_t {
+        return Err(BlockTraceError::VerifiedJoltLookupReceiptMismatch {
+            block_index: 0,
+            reason: "RAM tuple opening point has the wrong dimension",
+        });
+    }
+    let expected_ram_tuple_claims = opening_receipt.ram_tuple_opening_claims();
+    let eq_ram_tuple_cycle = EqPolynomial::<F>::evals(ram_tuple_opening_point);
+    let mut block_ram_tuple_contributions = vec![[F::zero(); 3]; blocks.len()];
+    for (block_position, block) in blocks.iter().enumerate() {
+        for (local_cycle, cycle) in block.cycles.iter().enumerate() {
+            let global_cycle = block.global_cycle_start + local_cycle;
+            let weight = eq_ram_tuple_cycle[global_cycle];
+            let (address, read_value, write_value) = match cycle.ram_access() {
+                tracer::instruction::RAMAccess::Read(read) => {
+                    (read.address, read.value, read.value)
+                }
+                tracer::instruction::RAMAccess::Write(write) => {
+                    (write.address, write.pre_value, write.post_value)
+                }
+                tracer::instruction::RAMAccess::NoOp => (0, 0, 0),
+            };
+            block_ram_tuple_contributions[block_position][0] +=
+                JoltField::mul_u64(&weight, address);
+            block_ram_tuple_contributions[block_position][1] +=
+                JoltField::mul_u64(&weight, read_value);
+            block_ram_tuple_contributions[block_position][2] +=
+                JoltField::mul_u64(&weight, write_value);
+        }
+    }
+    for claim_index in 0..3 {
+        let reconstructed_claim = block_ram_tuple_contributions
+            .iter()
+            .map(|contributions| contributions[claim_index])
+            .sum::<F>();
+        if reconstructed_claim != expected_ram_tuple_claims[claim_index] {
+            return Err(BlockTraceError::VerifiedJoltLookupReceiptMismatch {
+                block_index: blocks.last().map(|block| block.block_index).unwrap_or(0),
+                reason: "block RAM tuple does not reconstruct authenticated Spartan claims",
+            });
+        }
+    }
+
+    let (ram_inc_opening_point, expected_ram_inc_claim) = opening_receipt.ram_inc_opening();
+    if ram_inc_opening_point.len() != log_t {
+        return Err(BlockTraceError::VerifiedJoltLookupReceiptMismatch {
+            block_index: 0,
+            reason: "RAM increment opening point has the wrong dimension",
+        });
+    }
+    let eq_ram_inc_cycle = EqPolynomial::<F>::evals(ram_inc_opening_point);
+    let mut block_ram_inc_contributions = vec![F::zero(); blocks.len()];
+    for (block_position, block) in blocks.iter().enumerate() {
+        for (local_cycle, cycle) in block.cycles.iter().enumerate() {
+            if let tracer::instruction::RAMAccess::Write(write) = cycle.ram_access() {
+                let global_cycle = block.global_cycle_start + local_cycle;
+                block_ram_inc_contributions[block_position] += eq_ram_inc_cycle[global_cycle]
+                    * F::from_i128(write.post_value as i128 - write.pre_value as i128);
+            }
+        }
+    }
+    let reconstructed_ram_inc_claim = block_ram_inc_contributions.iter().copied().sum::<F>();
+    if reconstructed_ram_inc_claim != expected_ram_inc_claim {
+        return Err(BlockTraceError::VerifiedJoltLookupReceiptMismatch {
+            block_index: blocks.last().map(|block| block.block_index).unwrap_or(0),
+            reason: "block RAM increments do not reconstruct the committed RamInc opening",
+        });
+    }
+
+    let mut receipt_blocks = Vec::with_capacity(blocks.len());
+    for (block_position, block) in blocks.iter().enumerate() {
+        let public_input = &public_inputs[block_position];
         let io_claims = extract_block_io_claims(block)?;
         let lookup_claims_digest = digest_lookup_claims(&io_claims.lookup_claims);
-        let mut all_contributions = contributions.clone();
-        all_contributions.extend_from_slice(tuple_contributions);
-        all_contributions.extend_from_slice(register_value_contributions);
-        all_contributions.extend_from_slice(register_address_contributions);
-        all_contributions.push(*rd_inc_contribution);
+        let mut all_contributions = block_contributions[block_position].clone();
+        all_contributions.extend_from_slice(&block_tuple_contributions[block_position]);
+        all_contributions.extend_from_slice(&block_register_value_contributions[block_position]);
+        all_contributions.extend_from_slice(&block_register_address_contributions[block_position]);
+        all_contributions.push(block_rd_inc_contributions[block_position]);
+        all_contributions.extend_from_slice(&block_ram_ra_contributions[block_position]);
+        all_contributions.extend_from_slice(&block_ram_tuple_contributions[block_position]);
+        all_contributions.push(block_ram_inc_contributions[block_position]);
         let contribution_digest = digest_jolt_lookup_opening_contributions(&all_contributions);
         let binding_digest = digest_verified_jolt_lookup_opening_block(
             opening_receipt.digest(),
@@ -6564,6 +6748,7 @@ where
         global_opening_receipt_digest: opening_receipt.digest(),
         instruction_opening_count: instruction_d,
         register_opening_count: opening_receipt.register_opening_count(),
+        ram_opening_count: opening_receipt.ram_opening_count(),
         blocks: receipt_blocks,
         receipt_digest: [0; 32],
     };
@@ -7521,7 +7706,7 @@ where
     F: JoltField,
 {
     let mut hasher = Sha3_256::new();
-    hasher.update(b"JOLT_NOVA_EXECUTION_OPENING_CONTRIBUTIONS_V3");
+    hasher.update(b"JOLT_NOVA_EXECUTION_OPENING_CONTRIBUTIONS_V4");
     update_usize(&mut hasher, contributions.len());
     for contribution in contributions {
         update_field(&mut hasher, *contribution);
@@ -7537,7 +7722,7 @@ fn digest_verified_jolt_lookup_opening_block<Digest>(
     contribution_digest: [u8; 32],
 ) -> [u8; 32] {
     let mut hasher = Sha3_256::new();
-    hasher.update(b"JOLT_NOVA_VERIFIED_EXECUTION_OPENING_BLOCK_V3");
+    hasher.update(b"JOLT_NOVA_VERIFIED_EXECUTION_OPENING_BLOCK_V4");
     hasher.update(opening_receipt_digest);
     update_usize(&mut hasher, public_input.block_index);
     update_usize(&mut hasher, public_input.global_cycle_start);
@@ -7552,12 +7737,13 @@ fn digest_verified_jolt_lookup_block_opening_receipt(
     receipt: &VerifiedJoltLookupBlockOpeningReceipt,
 ) -> [u8; 32] {
     let mut hasher = Sha3_256::new();
-    hasher.update(b"JOLT_NOVA_VERIFIED_EXECUTION_BLOCK_OPENING_RECEIPT_V3");
+    hasher.update(b"JOLT_NOVA_VERIFIED_EXECUTION_BLOCK_OPENING_RECEIPT_V4");
     hasher.update(receipt.version.to_le_bytes());
     hasher.update(receipt.lookup_receipt.digest());
     hasher.update(receipt.global_opening_receipt_digest);
     update_usize(&mut hasher, receipt.instruction_opening_count);
     update_usize(&mut hasher, receipt.register_opening_count);
+    update_usize(&mut hasher, receipt.ram_opening_count);
     update_usize(&mut hasher, receipt.authenticated_opening_count());
     update_usize(&mut hasher, receipt.blocks.len());
     for block in &receipt.blocks {
@@ -7581,7 +7767,7 @@ where
     Digest: AsRef<[u8]>,
 {
     let mut hasher = Sha3_256::new();
-    hasher.update(b"JOLT_NOVA_FOLD_INPUT_EXECUTION_OPENING_BINDING_V3");
+    hasher.update(b"JOLT_NOVA_FOLD_INPUT_EXECUTION_OPENING_BINDING_V4");
     update_usize(&mut hasher, fold_input.program_digest.as_ref().len());
     hasher.update(fold_input.program_digest.as_ref());
     hasher.update(receipt.digest());
@@ -9356,8 +9542,14 @@ mod tests {
     use common::constants::REGISTER_COUNT;
     use tracer::instruction::{
         add::ADD,
-        format::format_r::{FormatR, RegisterStateFormatR},
-        Cycle, RISCVCycle,
+        format::{
+            format_load::{FormatLoad, RegisterStateFormatLoad},
+            format_r::{FormatR, RegisterStateFormatR},
+            format_s::{FormatS, RegisterStateFormatS},
+        },
+        ld::LD,
+        sd::SD,
+        Cycle, RAMRead, RAMWrite, RISCVCycle,
     };
 
     fn boundary(global_cycle: usize, pc: u64) -> MachineBoundaryState {
@@ -9468,6 +9660,70 @@ mod tests {
         }
     }
 
+    fn ram_trace_block() -> TraceBlock {
+        let mut start_state = boundary(0, 0);
+        start_state.registers[1] = 0x1000;
+        start_state.registers[2] = 0;
+        start_state.registers[3] = 13;
+        let mut end_state = start_state.clone();
+        end_state.global_cycle = 2;
+        end_state.emulator_trace_len = 2;
+        end_state.registers[2] = 11;
+        let cycle0 = Cycle::LD(RISCVCycle {
+            instruction: LD {
+                address: 0,
+                operands: FormatLoad {
+                    rd: 2,
+                    rs1: 1,
+                    imm: 0,
+                },
+                virtual_sequence_remaining: None,
+                is_first_in_sequence: false,
+                is_compressed: false,
+            },
+            register_state: RegisterStateFormatLoad {
+                rd: (0, 11),
+                rs1: 0x1000,
+            },
+            ram_access: RAMRead {
+                address: 0x1000,
+                value: 11,
+            },
+        });
+        let cycle1 = Cycle::SD(RISCVCycle {
+            instruction: SD {
+                address: 4,
+                operands: FormatS {
+                    rs1: 1,
+                    rs2: 3,
+                    imm: 8,
+                },
+                virtual_sequence_remaining: None,
+                is_first_in_sequence: false,
+                is_compressed: false,
+            },
+            register_state: RegisterStateFormatS {
+                rs1: 0x1000,
+                rs2: 13,
+            },
+            ram_access: RAMWrite {
+                address: 0x1008,
+                pre_value: 7,
+                post_value: 13,
+            },
+        });
+        TraceBlock {
+            block_index: 0,
+            global_cycle_start: 0,
+            active_cycles: 2,
+            target_size: 2,
+            start_state,
+            end_state,
+            cycles: vec![cycle0, cycle1],
+            ended_at_tick_boundary: true,
+        }
+    }
+
     #[cfg(not(feature = "zk"))]
     fn test_lookup_opening_receipt(
         blocks: &[TraceBlock],
@@ -9475,6 +9731,7 @@ mod tests {
         corrupt_first_claim: bool,
         corrupt_tuple_claim: bool,
         corrupt_register_claim: bool,
+        corrupt_ram_claim: bool,
     ) -> VerifiedJoltLookupOpeningReceipt<ark_bn254::Fr> {
         type F = ark_bn254::Fr;
 
@@ -9639,6 +9896,106 @@ mod tests {
             rd_inc_claim += F::from_u64(1);
         }
 
+        let ram_start_address = 0x1000;
+        let ram_k = 16usize;
+        let ram_d = ram_k.log_2().div_ceil(log_k_chunk);
+        let ram_chunk_mask = (1u64 << log_k_chunk) - 1;
+        let mut ram_points = Vec::with_capacity(ram_d);
+        let mut ram_claims = Vec::with_capacity(ram_d);
+        for opening_index in 0..ram_d {
+            let point = (0..log_k_chunk + log_t)
+                .map(|coordinate| {
+                    <F as JoltField>::Challenge::from(
+                        (instruction_d * (log_k_chunk + log_t)
+                            + 4 * log_t
+                            + log_register_count
+                            + opening_index * (log_k_chunk + log_t)
+                            + coordinate
+                            + 2) as u128,
+                    )
+                })
+                .collect::<Vec<_>>();
+            let (r_address, r_cycle) = point.split_at(log_k_chunk);
+            let eq_address = EqPolynomial::<F>::evals(r_address);
+            let eq_cycle = EqPolynomial::<F>::evals(r_cycle);
+            let shift = log_k_chunk * (ram_d - 1 - opening_index);
+            let mut claim = F::zero();
+            for block in blocks {
+                for (local_cycle, cycle) in block.cycles.iter().enumerate() {
+                    let address = cycle.ram_access().address() as u64;
+                    if address == 0 {
+                        continue;
+                    }
+                    let remapped_address = (address - ram_start_address) / 8;
+                    let chunk = ((remapped_address >> shift) & ram_chunk_mask) as usize;
+                    let global_cycle = block.global_cycle_start + local_cycle;
+                    claim += eq_address[chunk] * eq_cycle[global_cycle];
+                }
+            }
+            ram_points.push(point);
+            ram_claims.push(claim);
+        }
+
+        let ram_tuple_point = (0..log_t)
+            .map(|coordinate| {
+                <F as JoltField>::Challenge::from(
+                    (instruction_d * (log_k_chunk + log_t)
+                        + 4 * log_t
+                        + log_register_count
+                        + ram_d * (log_k_chunk + log_t)
+                        + coordinate
+                        + 2) as u128,
+                )
+            })
+            .collect::<Vec<_>>();
+        let eq_ram_tuple_cycle = EqPolynomial::<F>::evals(&ram_tuple_point);
+        let mut ram_tuple_claims = [F::zero(); 3];
+        for block in blocks {
+            for (local_cycle, cycle) in block.cycles.iter().enumerate() {
+                let global_cycle = block.global_cycle_start + local_cycle;
+                let weight = eq_ram_tuple_cycle[global_cycle];
+                let (address, read_value, write_value) = match cycle.ram_access() {
+                    tracer::instruction::RAMAccess::Read(read) => {
+                        (read.address, read.value, read.value)
+                    }
+                    tracer::instruction::RAMAccess::Write(write) => {
+                        (write.address, write.pre_value, write.post_value)
+                    }
+                    tracer::instruction::RAMAccess::NoOp => (0, 0, 0),
+                };
+                ram_tuple_claims[0] += JoltField::mul_u64(&weight, address);
+                ram_tuple_claims[1] += JoltField::mul_u64(&weight, read_value);
+                ram_tuple_claims[2] += JoltField::mul_u64(&weight, write_value);
+            }
+        }
+
+        let ram_inc_point = (0..log_t)
+            .map(|coordinate| {
+                <F as JoltField>::Challenge::from(
+                    (instruction_d * (log_k_chunk + log_t)
+                        + 5 * log_t
+                        + log_register_count
+                        + ram_d * (log_k_chunk + log_t)
+                        + coordinate
+                        + 2) as u128,
+                )
+            })
+            .collect::<Vec<_>>();
+        let eq_ram_inc_cycle = EqPolynomial::<F>::evals(&ram_inc_point);
+        let mut ram_inc_claim = F::zero();
+        for block in blocks {
+            for (local_cycle, cycle) in block.cycles.iter().enumerate() {
+                if let tracer::instruction::RAMAccess::Write(write) = cycle.ram_access() {
+                    let global_cycle = block.global_cycle_start + local_cycle;
+                    ram_inc_claim += eq_ram_inc_cycle[global_cycle]
+                        * F::from_i128(write.post_value as i128 - write.pre_value as i128);
+                }
+            }
+        }
+        if corrupt_ram_claim {
+            ram_inc_claim += F::from_u64(1);
+        }
+
         VerifiedJoltLookupOpeningReceipt::new_for_test(
             VerifiedJoltLookupProofReceipt::new_for_test(41, trace_length),
             log_k_chunk,
@@ -9652,6 +10009,14 @@ mod tests {
             register_address_claims,
             rd_inc_point,
             rd_inc_claim,
+            ram_start_address,
+            ram_k,
+            ram_points,
+            ram_claims,
+            ram_tuple_point,
+            ram_tuple_claims,
+            ram_inc_point,
+            ram_inc_claim,
         )
     }
 
@@ -12864,7 +13229,7 @@ mod tests {
         let block0 = trace_block(0, boundary(0, 0), boundary(2, 0));
         let block1 = trace_block(1, block0.end_state.clone(), boundary(4, 0));
         let blocks = [block0, block1];
-        let opening_receipt = test_lookup_opening_receipt(&blocks, 8, false, false, false);
+        let opening_receipt = test_lookup_opening_receipt(&blocks, 8, false, false, false, false);
 
         let block_receipt = verify_jolt_lookup_block_openings(&blocks, &opening_receipt).unwrap();
         assert_eq!(block_receipt.block_count(), blocks.len());
@@ -12874,12 +13239,13 @@ mod tests {
         );
         assert_eq!(
             block_receipt.authenticated_opening_count(),
-            crate::zkvm::instruction_lookups::LOG_K / 8 + 3 + 7
+            crate::zkvm::instruction_lookups::LOG_K / 8 + 3 + 7 + 5
         );
         assert_eq!(block_receipt.register_opening_count(), 7);
+        assert_eq!(block_receipt.ram_opening_count(), 5);
         assert_ne!(block_receipt.digest(), [0; 32]);
 
-        let corrupt_receipt = test_lookup_opening_receipt(&blocks, 8, true, false, false);
+        let corrupt_receipt = test_lookup_opening_receipt(&blocks, 8, true, false, false, false);
         assert!(matches!(
             verify_jolt_lookup_block_openings(&blocks, &corrupt_receipt),
             Err(BlockTraceError::VerifiedJoltLookupReceiptMismatch {
@@ -12889,7 +13255,8 @@ mod tests {
             })
         ));
 
-        let corrupt_tuple_receipt = test_lookup_opening_receipt(&blocks, 8, false, true, false);
+        let corrupt_tuple_receipt =
+            test_lookup_opening_receipt(&blocks, 8, false, true, false, false);
         assert!(matches!(
             verify_jolt_lookup_block_openings(&blocks, &corrupt_tuple_receipt),
             Err(BlockTraceError::VerifiedJoltLookupReceiptMismatch {
@@ -12898,11 +13265,22 @@ mod tests {
             })
         ));
 
-        let corrupt_register_receipt = test_lookup_opening_receipt(&blocks, 8, false, false, true);
+        let corrupt_register_receipt =
+            test_lookup_opening_receipt(&blocks, 8, false, false, true, false);
         assert!(matches!(
             verify_jolt_lookup_block_openings(&blocks, &corrupt_register_receipt),
             Err(BlockTraceError::VerifiedJoltLookupReceiptMismatch {
                 reason: "block register increments do not reconstruct the committed RdInc opening",
+                ..
+            })
+        ));
+
+        let corrupt_ram_receipt =
+            test_lookup_opening_receipt(&blocks, 8, false, false, false, true);
+        assert!(matches!(
+            verify_jolt_lookup_block_openings(&blocks, &corrupt_ram_receipt),
+            Err(BlockTraceError::VerifiedJoltLookupReceiptMismatch {
+                reason: "block RAM increments do not reconstruct the committed RamInc opening",
                 ..
             })
         ));
@@ -12912,10 +13290,21 @@ mod tests {
     #[test]
     fn authenticated_jolt_register_openings_reconstruct_nonzero_accesses() {
         let blocks = [register_trace_block()];
-        let opening_receipt = test_lookup_opening_receipt(&blocks, 4, false, false, false);
+        let opening_receipt = test_lookup_opening_receipt(&blocks, 4, false, false, false, false);
         let block_receipt = verify_jolt_lookup_block_openings(&blocks, &opening_receipt).unwrap();
 
         assert_eq!(block_receipt.register_opening_count(), 7);
+        assert_ne!(block_receipt.digest(), [0; 32]);
+    }
+
+    #[cfg(not(feature = "zk"))]
+    #[test]
+    fn authenticated_jolt_ram_openings_reconstruct_nonzero_accesses() {
+        let blocks = [ram_trace_block()];
+        let opening_receipt = test_lookup_opening_receipt(&blocks, 4, false, false, false, false);
+        let block_receipt = verify_jolt_lookup_block_openings(&blocks, &opening_receipt).unwrap();
+
+        assert_eq!(block_receipt.ram_opening_count(), 5);
         assert_ne!(block_receipt.digest(), [0; 32]);
     }
 
@@ -12926,7 +13315,7 @@ mod tests {
         let block0 = trace_block(0, boundary(0, 0), boundary(2, 0));
         let block1 = trace_block(1, block0.end_state.clone(), boundary(4, 0));
         let blocks = [block0, block1];
-        let opening_receipt = test_lookup_opening_receipt(&blocks, 8, false, false, false);
+        let opening_receipt = test_lookup_opening_receipt(&blocks, 8, false, false, false, false);
         let receipt = verify_jolt_lookup_block_openings(&blocks, &opening_receipt).unwrap();
         let pipeline =
             BlockProofPipeline::<_, ark_bn254::Fr, MockFoldingBackend>::
@@ -12987,7 +13376,7 @@ mod tests {
         let block0 = trace_block(0, boundary(0, 0), boundary(2, 0));
         let block1 = trace_block(1, block0.end_state.clone(), boundary(4, 0));
         let blocks = [block0, block1];
-        let opening_receipt = test_lookup_opening_receipt(&blocks, 8, false, false, false);
+        let opening_receipt = test_lookup_opening_receipt(&blocks, 8, false, false, false, false);
         let receipt = verify_jolt_lookup_block_openings(&blocks, &opening_receipt).unwrap();
         let backend = NovaFoldingBackend::default();
         let pipeline =

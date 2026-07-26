@@ -192,8 +192,8 @@ impl VerifiedJoltLookupProofReceipt {
     }
 }
 
-/// The instruction-lookup and register openings authenticated by a complete
-/// Jolt verification.
+/// The instruction-lookup, register, and RAM openings authenticated by a
+/// complete Jolt verification.
 ///
 /// For every committed `InstructionRa(i)` polynomial, this receipt retains the
 /// opening at `HammingWeightClaimReduction`. Those claims are part of Jolt's
@@ -207,6 +207,10 @@ impl VerifiedJoltLookupProofReceipt {
 /// `Rs1Value`, `Rs2Value`, and `RdWriteValue`; the shared address-cycle opening
 /// and claims for `Rs1Ra`, `Rs2Ra`, and `RdWa`; and the final committed `RdInc`
 /// opening produced by `IncClaimReduction`.
+///
+/// The RAM side retains all committed `RamRa(i)` openings, the shared Spartan
+/// opening and claims for `RamAddress`, `RamReadValue`, and `RamWriteValue`,
+/// and the final committed `RamInc` opening produced by `IncClaimReduction`.
 ///
 /// The opening point and claims remain private: callers can only obtain this
 /// type from `JoltVerifier::verify_with_lookup_opening_receipt`.
@@ -232,12 +236,22 @@ pub struct VerifiedJoltLookupOpeningReceipt<F: JoltField> {
     rd_wa_claim: F,
     rd_inc_opening_point: Vec<F::Challenge>,
     rd_inc_claim: F,
+    ram_start_address: u64,
+    ram_k: usize,
+    ram_opening_points: Vec<Vec<F::Challenge>>,
+    ram_opening_claims: Vec<F>,
+    ram_tuple_opening_point: Vec<F::Challenge>,
+    ram_address_claim: F,
+    ram_read_value_claim: F,
+    ram_write_value_claim: F,
+    ram_inc_opening_point: Vec<F::Challenge>,
+    ram_inc_claim: F,
     receipt_digest: [u8; 32],
 }
 
 #[cfg(not(feature = "zk"))]
 impl<F: JoltField> VerifiedJoltLookupOpeningReceipt<F> {
-    pub const VERSION: u16 = 3;
+    pub const VERSION: u16 = 4;
 
     pub fn lookup_receipt(&self) -> &VerifiedJoltLookupProofReceipt {
         &self.lookup_receipt
@@ -252,11 +266,15 @@ impl<F: JoltField> VerifiedJoltLookupOpeningReceipt<F> {
     }
 
     pub fn authenticated_opening_count(&self) -> usize {
-        self.opening_claims.len() + 3 + self.register_opening_count()
+        self.opening_claims.len() + 3 + self.register_opening_count() + self.ram_opening_count()
     }
 
     pub fn register_opening_count(&self) -> usize {
         7
+    }
+
+    pub fn ram_opening_count(&self) -> usize {
+        self.ram_opening_claims.len() + 4
     }
 
     pub fn digest(&self) -> [u8; 32] {
@@ -311,6 +329,38 @@ impl<F: JoltField> VerifiedJoltLookupOpeningReceipt<F> {
         (&self.rd_inc_opening_point, self.rd_inc_claim)
     }
 
+    pub(crate) fn ram_start_address(&self) -> u64 {
+        self.ram_start_address
+    }
+
+    pub(crate) fn ram_k(&self) -> usize {
+        self.ram_k
+    }
+
+    pub(crate) fn ram_opening_points(&self) -> &[Vec<F::Challenge>] {
+        &self.ram_opening_points
+    }
+
+    pub(crate) fn ram_opening_claims(&self) -> &[F] {
+        &self.ram_opening_claims
+    }
+
+    pub(crate) fn ram_tuple_opening_point(&self) -> &[F::Challenge] {
+        &self.ram_tuple_opening_point
+    }
+
+    pub(crate) fn ram_tuple_opening_claims(&self) -> [F; 3] {
+        [
+            self.ram_address_claim,
+            self.ram_read_value_claim,
+            self.ram_write_value_claim,
+        ]
+    }
+
+    pub(crate) fn ram_inc_opening(&self) -> (&[F::Challenge], F) {
+        (&self.ram_inc_opening_point, self.ram_inc_claim)
+    }
+
     pub(crate) fn from_verified_openings(
         lookup_receipt: VerifiedJoltLookupProofReceipt,
         log_k_chunk: usize,
@@ -330,6 +380,16 @@ impl<F: JoltField> VerifiedJoltLookupOpeningReceipt<F> {
         rd_wa_claim: F,
         rd_inc_opening_point: Vec<F::Challenge>,
         rd_inc_claim: F,
+        ram_start_address: u64,
+        ram_k: usize,
+        ram_opening_points: Vec<Vec<F::Challenge>>,
+        ram_opening_claims: Vec<F>,
+        ram_tuple_opening_point: Vec<F::Challenge>,
+        ram_address_claim: F,
+        ram_read_value_claim: F,
+        ram_write_value_claim: F,
+        ram_inc_opening_point: Vec<F::Challenge>,
+        ram_inc_claim: F,
     ) -> Self {
         let mut receipt = Self {
             version: Self::VERSION,
@@ -353,6 +413,16 @@ impl<F: JoltField> VerifiedJoltLookupOpeningReceipt<F> {
             rd_wa_claim,
             rd_inc_opening_point,
             rd_inc_claim,
+            ram_start_address,
+            ram_k,
+            ram_opening_points,
+            ram_opening_claims,
+            ram_tuple_opening_point,
+            ram_address_claim,
+            ram_read_value_claim,
+            ram_write_value_claim,
+            ram_inc_opening_point,
+            ram_inc_claim,
             receipt_digest: [0; 32],
         };
         receipt.receipt_digest = receipt.compute_digest();
@@ -373,6 +443,14 @@ impl<F: JoltField> VerifiedJoltLookupOpeningReceipt<F> {
         register_address_opening_claims: [F; 3],
         rd_inc_opening_point: Vec<F::Challenge>,
         rd_inc_claim: F,
+        ram_start_address: u64,
+        ram_k: usize,
+        ram_opening_points: Vec<Vec<F::Challenge>>,
+        ram_opening_claims: Vec<F>,
+        ram_tuple_opening_point: Vec<F::Challenge>,
+        ram_tuple_opening_claims: [F; 3],
+        ram_inc_opening_point: Vec<F::Challenge>,
+        ram_inc_claim: F,
     ) -> Self {
         Self::from_verified_openings(
             lookup_receipt,
@@ -393,12 +471,22 @@ impl<F: JoltField> VerifiedJoltLookupOpeningReceipt<F> {
             register_address_opening_claims[2],
             rd_inc_opening_point,
             rd_inc_claim,
+            ram_start_address,
+            ram_k,
+            ram_opening_points,
+            ram_opening_claims,
+            ram_tuple_opening_point,
+            ram_tuple_opening_claims[0],
+            ram_tuple_opening_claims[1],
+            ram_tuple_opening_claims[2],
+            ram_inc_opening_point,
+            ram_inc_claim,
         )
     }
 
     fn compute_digest(&self) -> [u8; 32] {
         let mut hasher = Sha3_256::new();
-        hasher.update(b"jolt-nova/verified-jolt-execution-opening-receipt/v3");
+        hasher.update(b"jolt-nova/verified-jolt-execution-opening-receipt/v4");
         hasher.update(self.version.to_le_bytes());
         hasher.update(self.lookup_receipt.digest());
         hasher.update([self.log_k_chunk]);
@@ -454,6 +542,37 @@ impl<F: JoltField> VerifiedJoltLookupOpeningReceipt<F> {
         hasher.update(canonical_digest(
             b"register-rd-inc-opening-claim",
             &self.rd_inc_claim,
+        ));
+        hasher.update(self.ram_start_address.to_le_bytes());
+        hasher.update((self.ram_k as u64).to_le_bytes());
+        hasher.update((self.ram_opening_claims.len() as u64).to_le_bytes());
+        hasher.update(canonical_digest(
+            b"ram-ra-opening-points",
+            &self.ram_opening_points,
+        ));
+        hasher.update(canonical_digest(
+            b"ram-ra-opening-claims",
+            &self.ram_opening_claims,
+        ));
+        hasher.update(canonical_digest(
+            b"ram-tuple-opening-point",
+            &self.ram_tuple_opening_point,
+        ));
+        hasher.update(canonical_digest(
+            b"ram-tuple-opening-claims",
+            &[
+                self.ram_address_claim,
+                self.ram_read_value_claim,
+                self.ram_write_value_claim,
+            ],
+        ));
+        hasher.update(canonical_digest(
+            b"ram-inc-opening-point",
+            &self.ram_inc_opening_point,
+        ));
+        hasher.update(canonical_digest(
+            b"ram-inc-opening-claim",
+            &self.ram_inc_claim,
         ));
         hasher.finalize().into()
     }
