@@ -103,7 +103,8 @@ for commands and measurement semantics, and the
 [Stage 9 guide](./jolt-core/examples/jolt_nova_stage9.md) for partial-prefix
 lookahead binding, production-size fixtures, repeatable multi-run comparisons,
 versioned per-block binary trace storage, the selectable real block-level LogUp
-relation, the verified full-Jolt lookup receipt bridge, and the current research
+relation, the verified full-Jolt lookup receipt bridge, authenticated
+per-block `InstructionRa` opening reconstruction, and the current research
 roadmap.
 
 ## Performance profiling

@@ -28,6 +28,8 @@ use crate::zkvm::bytecode::chunks::{
 use crate::zkvm::claim_reductions::RegistersClaimReductionSumcheckVerifier;
 use crate::zkvm::config::{OneHotParams, ProgramMode};
 use crate::zkvm::program::{CommittedProgramProverData, ProgramMetadata, ProgramPreprocessing};
+#[cfg(not(feature = "zk"))]
+use crate::zkvm::proof_serialization::VerifiedJoltLookupOpeningReceipt;
 #[cfg(feature = "prover")]
 use crate::zkvm::prover::JoltProverPreprocessing;
 #[cfg(feature = "zk")]
@@ -410,6 +412,10 @@ impl<
 
     #[tracing::instrument(skip_all)]
     pub fn verify(self) -> Result<(), ProofVerifyError> {
+        self.verify_preserving_state().map(|_| ())
+    }
+
+    fn verify_preserving_state(self) -> Result<Self, ProofVerifyError> {
         // In test/debug builds, let panics propagate for full backtraces.
         // In release builds, catch panics from malformed proofs (e.g., missing
         // opening claims) and convert them to clean error returns.
@@ -450,8 +456,48 @@ impl<
         Ok(receipt)
     }
 
+    /// Verifies the complete Jolt proof and returns the authenticated
+    /// `InstructionRa` openings needed to check that a sequence of lookup
+    /// blocks decomposes the same committed lookup-index witness.
+    ///
+    /// The normal Jolt verifier reconstructs every opening point from the
+    /// Fiat-Shamir transcript and checks the claims' reduction into the joint
+    /// PCS opening before this opaque receipt is returned.
+    #[cfg(not(feature = "zk"))]
+    pub fn verify_with_lookup_opening_receipt(
+        self,
+    ) -> Result<VerifiedJoltLookupOpeningReceipt<F>, ProofVerifyError> {
+        let lookup_receipt = self.proof.lookup_receipt_candidate(
+            &self.program_io,
+            self.preprocessing.shared.digest(),
+            &self.preprocessing.generators,
+            &self.trusted_advice_commitment,
+        );
+        let verified = self.verify_preserving_state()?;
+        let log_k_chunk = verified.one_hot_params.log_k_chunk;
+        let instruction_d = verified.one_hot_params.instruction_d;
+        let mut opening_points = Vec::with_capacity(instruction_d);
+        let mut opening_claims = Vec::with_capacity(instruction_d);
+        for index in 0..instruction_d {
+            let (point, claim) = verified
+                .opening_accumulator
+                .get_committed_polynomial_opening(
+                    CommittedPolynomial::InstructionRa(index),
+                    SumcheckId::HammingWeightClaimReduction,
+                );
+            opening_points.push(point.r);
+            opening_claims.push(claim);
+        }
+        Ok(VerifiedJoltLookupOpeningReceipt::from_verified_openings(
+            lookup_receipt,
+            log_k_chunk,
+            opening_points,
+            opening_claims,
+        ))
+    }
+
     #[cfg_attr(not(feature = "zk"), allow(unused_variables))]
-    fn verify_inner(mut self) -> Result<(), ProofVerifyError> {
+    fn verify_inner(mut self) -> Result<Self, ProofVerifyError> {
         let _pprof_verify = pprof_scope!("verify");
         let zk_mode = self.opening_accumulator.zk_mode;
 
@@ -638,7 +684,7 @@ impl<
             return Err(ProofVerifyError::ZkFeatureRequired);
         }
 
-        Ok(())
+        Ok(self)
     }
 
     #[cfg_attr(not(feature = "zk"), allow(unused_variables))]

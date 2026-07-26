@@ -2598,7 +2598,7 @@ mod tests {
         prover::JoltProverPreprocessing,
         ram::populate_memory_states,
         verifier::{JoltVerifier, JoltVerifierPreprocessing},
-        RV64IMACProver, RV64IMACVerifier,
+        RV64IMACProof, RV64IMACProver, RV64IMACVerifier, Serializable,
     };
     #[cfg(feature = "zk")]
     use crate::{curve::JoltCurve, field::JoltField};
@@ -2724,6 +2724,8 @@ mod tests {
         let io_device = prover.program_io.clone();
         let padded_trace_len = prover.padded_trace_len;
         let (jolt_proof, debug_info) = prover.prove();
+        let serialized_proof = jolt_proof.serialize_to_bytes().unwrap();
+        let jolt_proof = RV64IMACProof::deserialize_from_bytes(&serialized_proof).unwrap();
 
         let verifier_preprocessing = JoltVerifierPreprocessing::from(&prover_preprocessing);
         let verifier = RV64IMACVerifier::new(
@@ -2734,11 +2736,14 @@ mod tests {
             debug_info,
         )
         .expect("Failed to create verifier");
-        let receipt = verifier
-            .verify_with_lookup_receipt()
-            .expect("Failed to verify proof and emit lookup receipt");
+        let opening_receipt = verifier
+            .verify_with_lookup_opening_receipt()
+            .expect("Failed to verify proof and emit authenticated lookup openings");
+        let receipt = opening_receipt.lookup_receipt();
         assert_eq!(receipt.trace_length(), padded_trace_len);
         assert!(receipt.commitment_count() > 0);
+        assert!(opening_receipt.instruction_opening_count() > 0);
+        assert_ne!(opening_receipt.digest(), [0; 32]);
         assert_ne!(receipt.stage2_sumcheck_digest(), [0; 32]);
         assert_ne!(receipt.stage5_sumcheck_digest(), [0; 32]);
         assert_ne!(receipt.stage6b_sumcheck_digest(), [0; 32]);

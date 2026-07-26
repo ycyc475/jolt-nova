@@ -192,6 +192,109 @@ impl VerifiedJoltLookupProofReceipt {
     }
 }
 
+/// The instruction-lookup one-hot openings authenticated by a complete Jolt
+/// verification.
+///
+/// For every committed `InstructionRa(i)` polynomial, this receipt retains the
+/// opening at `HammingWeightClaimReduction`. Those claims are part of Jolt's
+/// joint PCS opening, so downstream block code can decompose each authenticated
+/// MLE evaluation into per-block contributions without creating a second,
+/// unrelated commitment.
+///
+/// The opening point and claims remain private: callers can only obtain this
+/// type from `JoltVerifier::verify_with_lookup_opening_receipt`.
+#[cfg(not(feature = "zk"))]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct VerifiedJoltLookupOpeningReceipt<F: JoltField> {
+    version: u16,
+    lookup_receipt: VerifiedJoltLookupProofReceipt,
+    log_k_chunk: u8,
+    opening_points: Vec<Vec<F::Challenge>>,
+    opening_claims: Vec<F>,
+    receipt_digest: [u8; 32],
+}
+
+#[cfg(not(feature = "zk"))]
+impl<F: JoltField> VerifiedJoltLookupOpeningReceipt<F> {
+    pub const VERSION: u16 = 1;
+
+    pub fn lookup_receipt(&self) -> &VerifiedJoltLookupProofReceipt {
+        &self.lookup_receipt
+    }
+
+    pub fn trace_length(&self) -> usize {
+        self.lookup_receipt.trace_length()
+    }
+
+    pub fn instruction_opening_count(&self) -> usize {
+        self.opening_claims.len()
+    }
+
+    pub fn digest(&self) -> [u8; 32] {
+        self.receipt_digest
+    }
+
+    pub(crate) fn log_k_chunk(&self) -> usize {
+        self.log_k_chunk as usize
+    }
+
+    pub(crate) fn opening_points(&self) -> &[Vec<F::Challenge>] {
+        &self.opening_points
+    }
+
+    pub(crate) fn opening_claims(&self) -> &[F] {
+        &self.opening_claims
+    }
+
+    pub(crate) fn from_verified_openings(
+        lookup_receipt: VerifiedJoltLookupProofReceipt,
+        log_k_chunk: usize,
+        opening_points: Vec<Vec<F::Challenge>>,
+        opening_claims: Vec<F>,
+    ) -> Self {
+        let mut receipt = Self {
+            version: Self::VERSION,
+            lookup_receipt,
+            log_k_chunk: log_k_chunk
+                .try_into()
+                .expect("test lookup chunk size must fit in u8"),
+            opening_points,
+            opening_claims,
+            receipt_digest: [0; 32],
+        };
+        receipt.receipt_digest = receipt.compute_digest();
+        receipt
+    }
+
+    #[cfg(test)]
+    pub(crate) fn new_for_test(
+        lookup_receipt: VerifiedJoltLookupProofReceipt,
+        log_k_chunk: usize,
+        opening_points: Vec<Vec<F::Challenge>>,
+        opening_claims: Vec<F>,
+    ) -> Self {
+        Self::from_verified_openings(lookup_receipt, log_k_chunk, opening_points, opening_claims)
+    }
+
+    fn compute_digest(&self) -> [u8; 32] {
+        let mut hasher = Sha3_256::new();
+        hasher.update(b"jolt-nova/verified-jolt-lookup-opening-receipt/v1");
+        hasher.update(self.version.to_le_bytes());
+        hasher.update(self.lookup_receipt.digest());
+        hasher.update([self.log_k_chunk]);
+        hasher.update((self.opening_claims.len() as u64).to_le_bytes());
+        hasher.update(canonical_digest(
+            b"instruction-ra-opening-points",
+            &self.opening_points,
+        ));
+        hasher.update(canonical_digest(
+            b"instruction-ra-opening-claims",
+            &self.opening_claims,
+        ));
+        hasher.finalize().into()
+    }
+}
+
 fn canonical_digest<T: CanonicalSerialize>(domain: &'static [u8], item: &T) -> [u8; 32] {
     let mut bytes = Vec::new();
     item.serialize_compressed(&mut bytes)

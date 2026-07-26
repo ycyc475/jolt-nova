@@ -294,10 +294,81 @@ per-block opening/reduction claims tied to the original commitments, or a
 proof-carrying recursive composition whose verifier is represented inside the
 folding relation. That is the next cryptographic integration boundary.
 
+## Stage 9.6: authenticated block lookup openings
+
+Stage 9.6 closes the polynomial-opening gap left by Stage 9.5 for instruction
+lookup indices. It reuses openings that already belong to the original Jolt
+proof instead of introducing a second commitment scheme.
+
+For every committed `InstructionRa(i)` one-hot polynomial, Jolt already opens
+the polynomial at the `HammingWeightClaimReduction` point. Those claims are
+included in the joint Dory opening. After the complete Jolt verifier accepts,
+`JoltVerifier::verify_with_lookup_opening_receipt` returns an opaque receipt
+containing exactly those authenticated points and claims.
+
+The block bridge then reconstructs every global opening as
+
+```text
+sum over blocks and cycles:
+    eq(r_address, lookup_index_chunk_i)
+  * eq(r_cycle, global_cycle)
++ deterministic Jolt NoOp padding
+```
+
+and requires exact field equality with the authenticated Jolt claim. Only a
+successful reconstruction produces
+`VerifiedJoltLookupBlockOpeningReceipt`. The receipt commits to:
+
+- the complete Stage 9.5 verifier receipt;
+- all authenticated `InstructionRa` opening points and claims;
+- every block boundary and local lookup-claim digest;
+- every block's contribution to every global opening.
+
+The opening receipt, opening count, and per-block binding are added to the
+foldable state, Nova statement transcript, and both lookup subclaim backends.
+The Nova circuit constrains receipt presence to be Boolean, requires an opening
+receipt to imply a base Jolt receipt, and zeroes all opening fields when absent.
+Strict pipeline and final-proof verification APIs require the opaque receipt;
+the older Stage 9.5 verifier intentionally rejects opening-enriched states.
+
+Tests cover correct block reconstruction, corrupted opening claims, substituted
+or altered per-block bindings, folding through the real Nova backend, and a
+real Fibonacci Jolt/Dory proof that emits authenticated openings only after the
+complete verifier succeeds.
+
+### Security boundary
+
+Stage 9.6 probabilistically binds each block's lookup-index chunks to the same
+`InstructionRa` polynomials committed by the original Jolt proof. Soundness
+inherits the Fiat-Shamir-selected multilinear opening point and Jolt's joint
+Dory opening. It also handles Jolt's power-of-two trace padding explicitly.
+
+The Nova Pallas circuit does not execute BN254/Dory verification internally.
+It folds an opaque receipt produced by the host-side complete Jolt verifier.
+This therefore assumes the composition entry point actually runs that verifier
+and supplies its returned receipt.
+
+This stage authenticates lookup indices, not yet each block's lookup operands
+and output against all corresponding Jolt witness polynomials. It also does not
+replace Jolt's Lasso argument with the experimental block LogUp relation. Those
+are separate future relations and must be completed before the block pipeline
+can stand alone without the original Jolt proof.
+
+The current opening-receipt API is available for the non-ZK Jolt proof format,
+where opening claims are retained in `JoltProof`. Supporting the `zk` proof
+format requires deriving equivalent verified claims from the BlindFold path
+without exposing hidden witness information.
+
 ## Remaining Stage 9 work
 
-Stage 9.5 completes the externally verified full-Jolt lookup receipt bridge.
-Later Stage 9 work will internalize or recursively compose the Jolt lookup
-verifier, build controlled LogUp/Lasso comparisons, add per-relation profiling,
-finish streaming trace-to-fold execution, and perform adversarial soundness
-review.
+After Stage 9.6, the main cryptographic gaps are:
+
+- authenticate block lookup operands and outputs against the original Jolt
+  witness commitments;
+- compose or internalize the relevant Jolt/Dory verifier rather than relying
+  on an opaque host-verified receipt;
+- connect the block CPU, register, and RAM relations to their original Jolt
+  polynomial openings with the same strength;
+- build controlled Lasso/LogUp comparisons and perform adversarial soundness
+  review;
+- add per-relation profiling and finish streaming trace-to-fold execution.
