@@ -240,9 +240,64 @@ commitments directly to each folded block remains later Stage 9 work and is
 required before describing the experimental block pipeline as an independent
 production lookup proof.
 
+## Stage 9.5: verified full-Jolt lookup receipt bridge
+
+Stage 9.5 connects the existing block pipeline to the complete original Jolt
+lookup argument without placing the variable-size Dory verifier inside the Nova
+step circuit.
+
+The original Jolt lookup argument is distributed across the proof rather than
+stored in one `lookup_proof` field. The bridge therefore commits to:
+
+- the preprocessing and verifier PCS setup;
+- public program I/O and the trusted-advice commitment;
+- all polynomial commitments;
+- the Stage 2 lookup claim-reduction sumcheck;
+- the Stage 5 read/RAF sumcheck;
+- the Stage 6b RA-virtualization sumcheck;
+- the Stage 7 reduction closure;
+- the joint PCS opening proof and the complete serialized Jolt proof.
+
+`JoltVerifier::verify_with_lookup_receipt` returns an opaque
+`VerifiedJoltLookupProofReceipt` only after the complete normal Jolt verifier
+accepts. A receipt-aware block pipeline then:
+
+1. copies the receipt digest and shape metadata into every
+   `FoldableBlockState`;
+2. derives a per-block digest that also binds the program digest, block
+   boundaries, local lookup claims, and block LogUp proof;
+3. includes those fields in the Nova statement digest and both lookup
+   subclaim backends;
+4. constrains receipt presence to be Boolean and requires every receipt field
+   to be zero when the receipt is absent;
+5. exposes strict verification entry points that require the original opaque
+   receipt and reject a self-asserted digest.
+
+The receipt-aware Nova path is covered through recursive folding and the final
+folded proof envelope. Tampered receipts, substituted receipts, and altered
+per-block bindings are rejected.
+
+### Security boundary
+
+This stage provides a verified-receipt bridge: the complete Jolt sumchecks and
+Dory joint opening are verified outside Nova, and Nova cryptographically binds
+the accepted result into every recursive step. It is stronger than merely
+copying host-generated lookup data into the witness.
+
+It does not make the final Spartan proof independently re-execute the Jolt/Dory
+verifier. It also does not yet prove that each block's local lookup tuples are
+openings of the same witness polynomials committed by that Jolt proof: the
+per-block digest binds the two statements together, but a digest is not a
+polynomial-opening equality argument. Achieving the stronger composition
+requires either an in-circuit verifier for the relevant Jolt algebraic claims,
+per-block opening/reduction claims tied to the original commitments, or a
+proof-carrying recursive composition whose verifier is represented inside the
+folding relation. That is the next cryptographic integration boundary.
+
 ## Remaining Stage 9 work
 
-Stage 9.4 completes the real block-level LogUp arithmetic and its Nova binding.
-Later Stage 9 work will connect full Jolt lookup commitments, build controlled
-LogUp/Lasso comparisons, add per-relation profiling, finish streaming
-trace-to-fold execution, and perform adversarial soundness review.
+Stage 9.5 completes the externally verified full-Jolt lookup receipt bridge.
+Later Stage 9 work will internalize or recursively compose the Jolt lookup
+verifier, build controlled LogUp/Lasso comparisons, add per-relation profiling,
+finish streaming trace-to-fold execution, and perform adversarial soundness
+review.

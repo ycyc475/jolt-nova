@@ -54,7 +54,7 @@ use crate::zkvm::{
         ra_virtual::RaSumcheckVerifier as LookupsRaSumcheckVerifier,
         read_raf_checking::InstructionReadRafSumcheckVerifier,
     },
-    proof_serialization::JoltProof,
+    proof_serialization::{JoltProof, VerifiedJoltLookupProofReceipt},
     r1cs::key::UniformSpartanKey,
     ram::{
         compute_max_ram_K, compute_min_ram_K,
@@ -430,6 +430,24 @@ impl<
                     Err(ProofVerifyError::InternalError)
                 })
         }
+    }
+
+    /// Verifies the complete Jolt proof and, on success, returns a fixed-size
+    /// receipt committing to the lookup sumchecks and their joint PCS opening.
+    ///
+    /// The candidate receipt is computed before `verify` consumes `self`, but
+    /// is never returned unless the full verifier succeeds.
+    pub fn verify_with_lookup_receipt(
+        self,
+    ) -> Result<VerifiedJoltLookupProofReceipt, ProofVerifyError> {
+        let receipt = self.proof.lookup_receipt_candidate(
+            &self.program_io,
+            self.preprocessing.shared.digest(),
+            &self.preprocessing.generators,
+            &self.trusted_advice_commitment,
+        );
+        self.verify()?;
+        Ok(receipt)
     }
 
     #[cfg_attr(not(feature = "zk"), allow(unused_variables))]

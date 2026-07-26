@@ -6,6 +6,7 @@ use ark_serialize::{
     CanonicalDeserialize, CanonicalSerialize, Compress, SerializationError, Valid, Validate,
 };
 use num::FromPrimitive;
+use sha3::{Digest as ShaDigest, Sha3_256};
 use strum::EnumCount;
 
 #[cfg(not(feature = "zk"))]
@@ -64,9 +65,195 @@ pub struct JoltProof<
     pub dory_layout: DoryLayout,
 }
 
+/// A compact commitment to the lookup-related portions of a fully verified
+/// Jolt proof.
+///
+/// This receipt is deliberately not constructible by downstream callers. It
+/// is returned by `JoltVerifier::verify_with_lookup_receipt` only after the
+/// complete Jolt verifier has accepted all sumchecks and the joint PCS
+/// opening. Nova can bind this fixed-size receipt into every recursive step
+/// without carrying the variable-size Jolt proof as circuit witness.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct VerifiedJoltLookupProofReceipt {
+    version: u16,
+    trace_length: u64,
+    commitment_count: u64,
+    preprocessing_digest: [u8; 32],
+    verifier_setup_digest: [u8; 32],
+    public_io_digest: [u8; 32],
+    trusted_advice_commitment_digest: [u8; 32],
+    commitments_digest: [u8; 32],
+    stage2_sumcheck_digest: [u8; 32],
+    stage5_sumcheck_digest: [u8; 32],
+    stage6b_sumcheck_digest: [u8; 32],
+    stage7_sumcheck_digest: [u8; 32],
+    joint_opening_proof_digest: [u8; 32],
+    full_proof_digest: [u8; 32],
+    receipt_digest: [u8; 32],
+}
+
+impl VerifiedJoltLookupProofReceipt {
+    pub const VERSION: u16 = 1;
+
+    pub fn trace_length(&self) -> usize {
+        self.trace_length as usize
+    }
+
+    pub fn commitment_count(&self) -> usize {
+        self.commitment_count as usize
+    }
+
+    pub fn preprocessing_digest(&self) -> [u8; 32] {
+        self.preprocessing_digest
+    }
+
+    pub fn verifier_setup_digest(&self) -> [u8; 32] {
+        self.verifier_setup_digest
+    }
+
+    pub fn public_io_digest(&self) -> [u8; 32] {
+        self.public_io_digest
+    }
+
+    pub fn commitments_digest(&self) -> [u8; 32] {
+        self.commitments_digest
+    }
+
+    pub fn stage2_sumcheck_digest(&self) -> [u8; 32] {
+        self.stage2_sumcheck_digest
+    }
+
+    pub fn stage5_sumcheck_digest(&self) -> [u8; 32] {
+        self.stage5_sumcheck_digest
+    }
+
+    pub fn stage6b_sumcheck_digest(&self) -> [u8; 32] {
+        self.stage6b_sumcheck_digest
+    }
+
+    pub fn stage7_sumcheck_digest(&self) -> [u8; 32] {
+        self.stage7_sumcheck_digest
+    }
+
+    pub fn joint_opening_proof_digest(&self) -> [u8; 32] {
+        self.joint_opening_proof_digest
+    }
+
+    pub fn full_proof_digest(&self) -> [u8; 32] {
+        self.full_proof_digest
+    }
+
+    pub fn digest(&self) -> [u8; 32] {
+        self.receipt_digest
+    }
+
+    #[cfg(test)]
+    pub(crate) fn new_for_test(seed: u8, trace_length: usize) -> Self {
+        let digest = |domain: u8| [seed.wrapping_add(domain); 32];
+        let mut receipt = Self {
+            version: Self::VERSION,
+            trace_length: trace_length as u64,
+            commitment_count: 4,
+            preprocessing_digest: digest(1),
+            verifier_setup_digest: digest(2),
+            public_io_digest: digest(3),
+            trusted_advice_commitment_digest: digest(4),
+            commitments_digest: digest(5),
+            stage2_sumcheck_digest: digest(6),
+            stage5_sumcheck_digest: digest(7),
+            stage6b_sumcheck_digest: digest(8),
+            stage7_sumcheck_digest: digest(9),
+            joint_opening_proof_digest: digest(10),
+            full_proof_digest: digest(11),
+            receipt_digest: [0; 32],
+        };
+        receipt.receipt_digest = receipt.compute_digest();
+        receipt
+    }
+
+    fn compute_digest(&self) -> [u8; 32] {
+        let mut hasher = Sha3_256::new();
+        hasher.update(b"jolt-nova/verified-jolt-lookup-receipt/v1");
+        hasher.update(self.version.to_le_bytes());
+        hasher.update(self.trace_length.to_le_bytes());
+        hasher.update(self.commitment_count.to_le_bytes());
+        hasher.update(self.preprocessing_digest);
+        hasher.update(self.verifier_setup_digest);
+        hasher.update(self.public_io_digest);
+        hasher.update(self.trusted_advice_commitment_digest);
+        hasher.update(self.commitments_digest);
+        hasher.update(self.stage2_sumcheck_digest);
+        hasher.update(self.stage5_sumcheck_digest);
+        hasher.update(self.stage6b_sumcheck_digest);
+        hasher.update(self.stage7_sumcheck_digest);
+        hasher.update(self.joint_opening_proof_digest);
+        hasher.update(self.full_proof_digest);
+        hasher.finalize().into()
+    }
+}
+
+fn canonical_digest<T: CanonicalSerialize>(domain: &'static [u8], item: &T) -> [u8; 32] {
+    let mut bytes = Vec::new();
+    item.serialize_compressed(&mut bytes)
+        .expect("canonical serialization into a Vec cannot fail");
+    let mut hasher = Sha3_256::new();
+    hasher.update(b"jolt-nova/canonical-digest/v1");
+    hasher.update((domain.len() as u64).to_le_bytes());
+    hasher.update(domain);
+    hasher.update((bytes.len() as u64).to_le_bytes());
+    hasher.update(bytes);
+    hasher.finalize().into()
+}
+
 impl<F: JoltField, C: JoltCurve<F = F>, PCS: CommitmentScheme<Field = F>, FS: Transcript>
     JoltProof<F, C, PCS, FS>
 {
+    pub(crate) fn lookup_receipt_candidate<PublicIo: CanonicalSerialize>(
+        &self,
+        public_io: &PublicIo,
+        preprocessing_digest: [u8; 32],
+        verifier_setup: &PCS::VerifierSetup,
+        trusted_advice_commitment: &Option<PCS::Commitment>,
+    ) -> VerifiedJoltLookupProofReceipt {
+        let mut receipt = VerifiedJoltLookupProofReceipt {
+            version: VerifiedJoltLookupProofReceipt::VERSION,
+            trace_length: self.trace_length as u64,
+            commitment_count: self.commitments.len() as u64,
+            preprocessing_digest,
+            verifier_setup_digest: canonical_digest(b"verifier-setup", verifier_setup),
+            public_io_digest: canonical_digest(b"public-io", public_io),
+            trusted_advice_commitment_digest: canonical_digest(
+                b"trusted-advice-commitment",
+                trusted_advice_commitment,
+            ),
+            commitments_digest: canonical_digest(b"commitments", &self.commitments),
+            stage2_sumcheck_digest: canonical_digest(
+                b"lookup-stage-2-sumcheck",
+                &self.stage2_sumcheck_proof,
+            ),
+            stage5_sumcheck_digest: canonical_digest(
+                b"lookup-stage-5-sumcheck",
+                &self.stage5_sumcheck_proof,
+            ),
+            stage6b_sumcheck_digest: canonical_digest(
+                b"lookup-stage-6b-sumcheck",
+                &self.stage6b_sumcheck_proof,
+            ),
+            stage7_sumcheck_digest: canonical_digest(
+                b"lookup-stage-7-sumcheck",
+                &self.stage7_sumcheck_proof,
+            ),
+            joint_opening_proof_digest: canonical_digest(
+                b"joint-opening-proof",
+                &self.joint_opening_proof,
+            ),
+            full_proof_digest: canonical_digest(b"full-jolt-proof", self),
+            receipt_digest: [0; 32],
+        };
+        receipt.receipt_digest = receipt.compute_digest();
+        receipt
+    }
+
     /// Verifies all sumcheck and uniskip proofs use the same ZK variant.
     /// Returns the ZK mode if consistent, or an error if any stage disagrees.
     pub fn verify_zk_consistency(&self) -> Result<bool, ProofVerifyError> {

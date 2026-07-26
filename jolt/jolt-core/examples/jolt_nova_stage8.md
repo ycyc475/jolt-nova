@@ -113,8 +113,11 @@ Stage 8 now provides:
 - Stage 9.3 adds per-block binary serialization; the proving pipeline still
   materializes decoded blocks for repeated prefix experiments.
 - Stage 9.4 adds a selectable real block-level LogUp fractional-sum relation and
-  binds it into Nova. Full Jolt virtual-table commitments, openings, and
-  sumcheck integration remain later work.
+  binds it into Nova.
+- Stage 9.5 verifies the complete original Jolt lookup sumchecks and joint PCS
+  opening outside Nova, emits an opaque receipt, and binds that receipt into
+  every recursive step. An in-circuit or recursively composed Jolt/Dory
+  verifier remains later work.
 - Peak-memory sampling is best effort and does not replace heap profiling.
 - The runner measures the current Nova backend and Spartan final proof; it can
   select transcript or LogUp lookup folding, but it is not yet a controlled
@@ -132,8 +135,10 @@ comparative research:
 3. ~~binary-encode trace blocks one record at a time to reduce JSON memory and
    I/O overhead~~ (completed in Stage 9.3);
 4. ~~introduce a real block-level LogUp lookup relation behind the existing
-   replaceable lookup interface~~ (completed in Stage 9.4), then connect the
-   full Jolt lookup commitments and compare it with Lasso;
-5. profile per-relation witness generation and Nova step-circuit costs;
-6. perform adversarial trace, boundary, and final-proof soundness review before
+   replaceable lookup interface~~ (completed in Stage 9.4);
+5. ~~connect a fully verified Jolt lookup receipt to every Nova step~~
+   (completed in Stage 9.5), then internalize or recursively compose the Jolt
+   lookup verifier and compare LogUp with Lasso;
+6. profile per-relation witness generation and Nova step-circuit costs;
+7. perform adversarial trace, boundary, and final-proof soundness review before
    claiming a production proof system.

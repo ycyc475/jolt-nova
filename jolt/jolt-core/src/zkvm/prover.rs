@@ -2722,6 +2722,7 @@ mod tests {
             None,
         );
         let io_device = prover.program_io.clone();
+        let padded_trace_len = prover.padded_trace_len;
         let (jolt_proof, debug_info) = prover.prove();
 
         let verifier_preprocessing = JoltVerifierPreprocessing::from(&prover_preprocessing);
@@ -2733,7 +2734,17 @@ mod tests {
             debug_info,
         )
         .expect("Failed to create verifier");
-        verifier.verify().expect("Failed to verify proof");
+        let receipt = verifier
+            .verify_with_lookup_receipt()
+            .expect("Failed to verify proof and emit lookup receipt");
+        assert_eq!(receipt.trace_length(), padded_trace_len);
+        assert!(receipt.commitment_count() > 0);
+        assert_ne!(receipt.stage2_sumcheck_digest(), [0; 32]);
+        assert_ne!(receipt.stage5_sumcheck_digest(), [0; 32]);
+        assert_ne!(receipt.stage6b_sumcheck_digest(), [0; 32]);
+        assert_ne!(receipt.stage7_sumcheck_digest(), [0; 32]);
+        assert_ne!(receipt.joint_opening_proof_digest(), [0; 32]);
+        assert_ne!(receipt.digest(), [0; 32]);
     }
 
     #[test]

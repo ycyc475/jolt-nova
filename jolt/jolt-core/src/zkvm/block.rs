@@ -14,6 +14,7 @@ use crate::{
     zkvm::{
         bytecode::BytecodePreprocessing,
         instruction::LookupQuery,
+        proof_serialization::VerifiedJoltLookupProofReceipt,
         r1cs::{evaluation::R1CSEval, inputs::R1CSCycleInputs, key::UniformSpartanKey},
     },
 };
@@ -562,6 +563,15 @@ pub struct FoldableBlockState<F = ark_bn254::Fr> {
     pub lookup_logup_denominator_retry_count: usize,
     pub lookup_logup_query_sum: ark_bn254::Fr,
     pub lookup_logup_table_sum: ark_bn254::Fr,
+    /// True when this block is bound to a receipt emitted by the complete
+    /// original Jolt verifier.
+    pub verified_jolt_lookup_receipt_present: bool,
+    pub verified_jolt_lookup_receipt_digest: [u8; 32],
+    pub verified_jolt_lookup_receipt_trace_length: usize,
+    pub verified_jolt_lookup_receipt_commitment_count: usize,
+    /// Per-block binding of the global receipt to this block's program and
+    /// lookup statement.
+    pub verified_jolt_lookup_block_binding_digest: [u8; 32],
     pub r1cs_rows_checked: usize,
     pub r1cs_num_steps: usize,
     pub r1cs_vk_digest: F,
@@ -1863,6 +1873,11 @@ struct BlockFoldStatement {
     lookup_logup_denominator_retry_count: NovaScalar,
     lookup_logup_query_sum: NovaScalar,
     lookup_logup_table_sum: NovaScalar,
+    verified_jolt_lookup_receipt_present: NovaScalar,
+    verified_jolt_lookup_receipt_digest: NovaScalar,
+    verified_jolt_lookup_receipt_trace_length: NovaScalar,
+    verified_jolt_lookup_receipt_commitment_count: NovaScalar,
+    verified_jolt_lookup_block_binding_digest: NovaScalar,
     r1cs_rows_checked: NovaScalar,
     r1cs_num_steps: NovaScalar,
     r1cs_vk_digest: NovaScalar,
@@ -2090,6 +2105,34 @@ impl BlockFoldStatement {
                 "lookup_logup_balanced_sum",
                 state.lookup_logup_table_sum,
             ),
+            verified_jolt_lookup_receipt_present: NovaScalar::from(u64::from(
+                state.verified_jolt_lookup_receipt_present,
+            )),
+            verified_jolt_lookup_receipt_digest: if state.verified_jolt_lookup_receipt_present {
+                nova_hash_bytes_to_scalar(
+                    "statement-field",
+                    "verified_jolt_lookup_receipt_digest",
+                    &state.verified_jolt_lookup_receipt_digest,
+                )
+            } else {
+                NovaScalar::zero()
+            },
+            verified_jolt_lookup_receipt_trace_length: NovaScalar::from(
+                state.verified_jolt_lookup_receipt_trace_length as u64,
+            ),
+            verified_jolt_lookup_receipt_commitment_count: NovaScalar::from(
+                state.verified_jolt_lookup_receipt_commitment_count as u64,
+            ),
+            verified_jolt_lookup_block_binding_digest: if state.verified_jolt_lookup_receipt_present
+            {
+                nova_hash_bytes_to_scalar(
+                    "statement-field",
+                    "verified_jolt_lookup_block_binding_digest",
+                    &state.verified_jolt_lookup_block_binding_digest,
+                )
+            } else {
+                NovaScalar::zero()
+            },
             r1cs_rows_checked: NovaScalar::from(state.r1cs_rows_checked as u64),
             r1cs_num_steps: NovaScalar::from(state.r1cs_num_steps as u64),
             r1cs_vk_digest: nova_jolt_field_to_scalar("r1cs_vk_digest", state.r1cs_vk_digest),
@@ -2129,6 +2172,11 @@ impl BlockFoldStatement {
             self.lookup_logup_denominator_retry_count,
             self.lookup_logup_query_sum,
             self.lookup_logup_table_sum,
+            self.verified_jolt_lookup_receipt_present,
+            self.verified_jolt_lookup_receipt_digest,
+            self.verified_jolt_lookup_receipt_trace_length,
+            self.verified_jolt_lookup_receipt_commitment_count,
+            self.verified_jolt_lookup_block_binding_digest,
             self.r1cs_rows_checked,
             self.r1cs_num_steps,
             self.r1cs_vk_digest,
@@ -2189,6 +2237,26 @@ impl BlockFoldStatement {
                 ),
                 ("lookup_logup_query_sum", self.lookup_logup_query_sum),
                 ("lookup_logup_table_sum", self.lookup_logup_table_sum),
+                (
+                    "verified_jolt_lookup_receipt_present",
+                    self.verified_jolt_lookup_receipt_present,
+                ),
+                (
+                    "verified_jolt_lookup_receipt_digest",
+                    self.verified_jolt_lookup_receipt_digest,
+                ),
+                (
+                    "verified_jolt_lookup_receipt_trace_length",
+                    self.verified_jolt_lookup_receipt_trace_length,
+                ),
+                (
+                    "verified_jolt_lookup_receipt_commitment_count",
+                    self.verified_jolt_lookup_receipt_commitment_count,
+                ),
+                (
+                    "verified_jolt_lookup_block_binding_digest",
+                    self.verified_jolt_lookup_block_binding_digest,
+                ),
                 ("r1cs_rows_checked", self.r1cs_rows_checked),
                 ("r1cs_num_steps", self.r1cs_num_steps),
                 ("r1cs_vk_digest", self.r1cs_vk_digest),
@@ -2276,6 +2344,26 @@ impl BlockFoldStatement {
                     "lookup_distinct_entry_count",
                     self.lookup_distinct_entry_count,
                 ),
+                (
+                    "verified_jolt_lookup_receipt_present",
+                    self.verified_jolt_lookup_receipt_present,
+                ),
+                (
+                    "verified_jolt_lookup_receipt_digest",
+                    self.verified_jolt_lookup_receipt_digest,
+                ),
+                (
+                    "verified_jolt_lookup_receipt_trace_length",
+                    self.verified_jolt_lookup_receipt_trace_length,
+                ),
+                (
+                    "verified_jolt_lookup_receipt_commitment_count",
+                    self.verified_jolt_lookup_receipt_commitment_count,
+                ),
+                (
+                    "verified_jolt_lookup_block_binding_digest",
+                    self.verified_jolt_lookup_block_binding_digest,
+                ),
             ],
         )
     }
@@ -2313,6 +2401,26 @@ impl BlockFoldStatement {
                 ),
                 ("lookup_logup_query_sum", self.lookup_logup_query_sum),
                 ("lookup_logup_table_sum", self.lookup_logup_table_sum),
+                (
+                    "verified_jolt_lookup_receipt_present",
+                    self.verified_jolt_lookup_receipt_present,
+                ),
+                (
+                    "verified_jolt_lookup_receipt_digest",
+                    self.verified_jolt_lookup_receipt_digest,
+                ),
+                (
+                    "verified_jolt_lookup_receipt_trace_length",
+                    self.verified_jolt_lookup_receipt_trace_length,
+                ),
+                (
+                    "verified_jolt_lookup_receipt_commitment_count",
+                    self.verified_jolt_lookup_receipt_commitment_count,
+                ),
+                (
+                    "verified_jolt_lookup_block_binding_digest",
+                    self.verified_jolt_lookup_block_binding_digest,
+                ),
             ],
         )
     }
@@ -2438,6 +2546,11 @@ struct JoltNovaStepWitness {
     lookup_logup_denominator_retry_count: NovaScalar,
     lookup_logup_query_sum: NovaScalar,
     lookup_logup_table_sum: NovaScalar,
+    verified_jolt_lookup_receipt_present: NovaScalar,
+    verified_jolt_lookup_receipt_digest: NovaScalar,
+    verified_jolt_lookup_receipt_trace_length: NovaScalar,
+    verified_jolt_lookup_receipt_commitment_count: NovaScalar,
+    verified_jolt_lookup_block_binding_digest: NovaScalar,
     lookup_backend_selector: NovaScalar,
     lookup_claim_fingerprint: NovaScalar,
     r1cs_rows_checked: NovaScalar,
@@ -2510,6 +2623,14 @@ impl JoltNovaStepWitness {
             lookup_logup_denominator_retry_count: statement.lookup_logup_denominator_retry_count,
             lookup_logup_query_sum: statement.lookup_logup_query_sum,
             lookup_logup_table_sum: statement.lookup_logup_table_sum,
+            verified_jolt_lookup_receipt_present: statement.verified_jolt_lookup_receipt_present,
+            verified_jolt_lookup_receipt_digest: statement.verified_jolt_lookup_receipt_digest,
+            verified_jolt_lookup_receipt_trace_length: statement
+                .verified_jolt_lookup_receipt_trace_length,
+            verified_jolt_lookup_receipt_commitment_count: statement
+                .verified_jolt_lookup_receipt_commitment_count,
+            verified_jolt_lookup_block_binding_digest: statement
+                .verified_jolt_lookup_block_binding_digest,
             lookup_backend_selector: subclaim_backend.lookup_backend_selector(),
             lookup_claim_fingerprint: subclaims.lookup,
             r1cs_rows_checked: statement.r1cs_rows_checked,
@@ -2550,6 +2671,14 @@ impl JoltNovaStepWitness {
             lookup_logup_denominator_retry_count: self.lookup_logup_denominator_retry_count,
             lookup_logup_query_sum: self.lookup_logup_query_sum,
             lookup_logup_table_sum: self.lookup_logup_table_sum,
+            verified_jolt_lookup_receipt_present: self.verified_jolt_lookup_receipt_present,
+            verified_jolt_lookup_receipt_digest: self.verified_jolt_lookup_receipt_digest,
+            verified_jolt_lookup_receipt_trace_length: self
+                .verified_jolt_lookup_receipt_trace_length,
+            verified_jolt_lookup_receipt_commitment_count: self
+                .verified_jolt_lookup_receipt_commitment_count,
+            verified_jolt_lookup_block_binding_digest: self
+                .verified_jolt_lookup_block_binding_digest,
             r1cs_rows_checked: self.r1cs_rows_checked,
             r1cs_num_steps: self.r1cs_num_steps,
             r1cs_vk_digest: self.r1cs_vk_digest,
@@ -2778,6 +2907,31 @@ impl nova_snark::traits::circuit::StepCircuit<NovaScalar> for JoltNovaStepCircui
             cs,
             "lookup LogUp table sum",
             self.witness.lookup_logup_table_sum,
+        )?;
+        let verified_jolt_lookup_receipt_present = alloc_nova_witness(
+            cs,
+            "verified Jolt lookup receipt present",
+            self.witness.verified_jolt_lookup_receipt_present,
+        )?;
+        let verified_jolt_lookup_receipt_digest = alloc_nova_witness(
+            cs,
+            "verified Jolt lookup receipt digest",
+            self.witness.verified_jolt_lookup_receipt_digest,
+        )?;
+        let verified_jolt_lookup_receipt_trace_length = alloc_nova_witness(
+            cs,
+            "verified Jolt lookup receipt trace length",
+            self.witness.verified_jolt_lookup_receipt_trace_length,
+        )?;
+        let verified_jolt_lookup_receipt_commitment_count = alloc_nova_witness(
+            cs,
+            "verified Jolt lookup receipt commitment count",
+            self.witness.verified_jolt_lookup_receipt_commitment_count,
+        )?;
+        let verified_jolt_lookup_block_binding_digest = alloc_nova_witness(
+            cs,
+            "verified Jolt lookup block binding digest",
+            self.witness.verified_jolt_lookup_block_binding_digest,
         )?;
         let lookup_backend_selector = alloc_nova_witness(
             cs,
@@ -3049,6 +3203,36 @@ impl nova_snark::traits::circuit::StepCircuit<NovaScalar> for JoltNovaStepCircui
                 ) + (
                     nova_transcript_challenge_scalar(
                         NOVA_TRANSCRIPT_DOMAIN_STATEMENT,
+                        "verified_jolt_lookup_receipt_present",
+                    ),
+                    verified_jolt_lookup_receipt_present.get_variable(),
+                ) + (
+                    nova_transcript_challenge_scalar(
+                        NOVA_TRANSCRIPT_DOMAIN_STATEMENT,
+                        "verified_jolt_lookup_receipt_digest",
+                    ),
+                    verified_jolt_lookup_receipt_digest.get_variable(),
+                ) + (
+                    nova_transcript_challenge_scalar(
+                        NOVA_TRANSCRIPT_DOMAIN_STATEMENT,
+                        "verified_jolt_lookup_receipt_trace_length",
+                    ),
+                    verified_jolt_lookup_receipt_trace_length.get_variable(),
+                ) + (
+                    nova_transcript_challenge_scalar(
+                        NOVA_TRANSCRIPT_DOMAIN_STATEMENT,
+                        "verified_jolt_lookup_receipt_commitment_count",
+                    ),
+                    verified_jolt_lookup_receipt_commitment_count.get_variable(),
+                ) + (
+                    nova_transcript_challenge_scalar(
+                        NOVA_TRANSCRIPT_DOMAIN_STATEMENT,
+                        "verified_jolt_lookup_block_binding_digest",
+                    ),
+                    verified_jolt_lookup_block_binding_digest.get_variable(),
+                ) + (
+                    nova_transcript_challenge_scalar(
+                        NOVA_TRANSCRIPT_DOMAIN_STATEMENT,
                         "r1cs_rows_checked",
                     ),
                     r1cs_rows_checked.get_variable(),
@@ -3293,6 +3477,42 @@ impl nova_snark::traits::circuit::StepCircuit<NovaScalar> for JoltNovaStepCircui
         );
 
         cs.enforce(
+            || "verified Jolt lookup receipt selector is boolean",
+            |lc| lc + verified_jolt_lookup_receipt_present.get_variable(),
+            |lc| {
+                lc + verified_jolt_lookup_receipt_present.get_variable()
+                    - (NovaScalar::from(1), CS::one())
+            },
+            |lc| lc,
+        );
+
+        for (label, value) in [
+            (
+                "absent verified Jolt receipt has zero digest",
+                &verified_jolt_lookup_receipt_digest,
+            ),
+            (
+                "absent verified Jolt receipt has zero trace length",
+                &verified_jolt_lookup_receipt_trace_length,
+            ),
+            (
+                "absent verified Jolt receipt has zero commitment count",
+                &verified_jolt_lookup_receipt_commitment_count,
+            ),
+            (
+                "absent verified Jolt receipt has zero block binding",
+                &verified_jolt_lookup_block_binding_digest,
+            ),
+        ] {
+            cs.enforce(
+                || label,
+                |lc| lc + CS::one() - verified_jolt_lookup_receipt_present.get_variable(),
+                |lc| lc + value.get_variable(),
+                |lc| lc,
+            );
+        }
+
+        cs.enforce(
             || "LogUp query and table sums balance",
             |lc| lc + lookup_logup_query_sum.get_variable() - lookup_logup_table_sum.get_variable(),
             |lc| lc + lookup_backend_selector.get_variable(),
@@ -3374,6 +3594,51 @@ impl nova_snark::traits::circuit::StepCircuit<NovaScalar> for JoltNovaStepCircui
                         "lookup_logup_table_sum",
                     ),
                     lookup_logup_table_sum.get_variable(),
+                ) + (
+                    nova_transcript_challenge_scalar(
+                        NOVA_TRANSCRIPT_DOMAIN_LOOKUP_LOGUP,
+                        "verified_jolt_lookup_receipt_present",
+                    ) - nova_transcript_challenge_scalar(
+                        NOVA_TRANSCRIPT_DOMAIN_LOOKUP,
+                        "verified_jolt_lookup_receipt_present",
+                    ),
+                    verified_jolt_lookup_receipt_present.get_variable(),
+                ) + (
+                    nova_transcript_challenge_scalar(
+                        NOVA_TRANSCRIPT_DOMAIN_LOOKUP_LOGUP,
+                        "verified_jolt_lookup_receipt_digest",
+                    ) - nova_transcript_challenge_scalar(
+                        NOVA_TRANSCRIPT_DOMAIN_LOOKUP,
+                        "verified_jolt_lookup_receipt_digest",
+                    ),
+                    verified_jolt_lookup_receipt_digest.get_variable(),
+                ) + (
+                    nova_transcript_challenge_scalar(
+                        NOVA_TRANSCRIPT_DOMAIN_LOOKUP_LOGUP,
+                        "verified_jolt_lookup_receipt_trace_length",
+                    ) - nova_transcript_challenge_scalar(
+                        NOVA_TRANSCRIPT_DOMAIN_LOOKUP,
+                        "verified_jolt_lookup_receipt_trace_length",
+                    ),
+                    verified_jolt_lookup_receipt_trace_length.get_variable(),
+                ) + (
+                    nova_transcript_challenge_scalar(
+                        NOVA_TRANSCRIPT_DOMAIN_LOOKUP_LOGUP,
+                        "verified_jolt_lookup_receipt_commitment_count",
+                    ) - nova_transcript_challenge_scalar(
+                        NOVA_TRANSCRIPT_DOMAIN_LOOKUP,
+                        "verified_jolt_lookup_receipt_commitment_count",
+                    ),
+                    verified_jolt_lookup_receipt_commitment_count.get_variable(),
+                ) + (
+                    nova_transcript_challenge_scalar(
+                        NOVA_TRANSCRIPT_DOMAIN_LOOKUP_LOGUP,
+                        "verified_jolt_lookup_block_binding_digest",
+                    ) - nova_transcript_challenge_scalar(
+                        NOVA_TRANSCRIPT_DOMAIN_LOOKUP,
+                        "verified_jolt_lookup_block_binding_digest",
+                    ),
+                    verified_jolt_lookup_block_binding_digest.get_variable(),
                 )
             },
             |lc| lc + lookup_backend_selector.get_variable(),
@@ -3406,6 +3671,41 @@ impl nova_snark::traits::circuit::StepCircuit<NovaScalar> for JoltNovaStepCircui
                             "lookup_distinct_entry_count",
                         ),
                         lookup_distinct_entry_count.get_variable(),
+                    )
+                    - (
+                        nova_transcript_challenge_scalar(
+                            NOVA_TRANSCRIPT_DOMAIN_LOOKUP,
+                            "verified_jolt_lookup_receipt_present",
+                        ),
+                        verified_jolt_lookup_receipt_present.get_variable(),
+                    )
+                    - (
+                        nova_transcript_challenge_scalar(
+                            NOVA_TRANSCRIPT_DOMAIN_LOOKUP,
+                            "verified_jolt_lookup_receipt_digest",
+                        ),
+                        verified_jolt_lookup_receipt_digest.get_variable(),
+                    )
+                    - (
+                        nova_transcript_challenge_scalar(
+                            NOVA_TRANSCRIPT_DOMAIN_LOOKUP,
+                            "verified_jolt_lookup_receipt_trace_length",
+                        ),
+                        verified_jolt_lookup_receipt_trace_length.get_variable(),
+                    )
+                    - (
+                        nova_transcript_challenge_scalar(
+                            NOVA_TRANSCRIPT_DOMAIN_LOOKUP,
+                            "verified_jolt_lookup_receipt_commitment_count",
+                        ),
+                        verified_jolt_lookup_receipt_commitment_count.get_variable(),
+                    )
+                    - (
+                        nova_transcript_challenge_scalar(
+                            NOVA_TRANSCRIPT_DOMAIN_LOOKUP,
+                            "verified_jolt_lookup_block_binding_digest",
+                        ),
+                        verified_jolt_lookup_block_binding_digest.get_variable(),
                     )
             },
         );
@@ -4356,6 +4656,7 @@ impl Error for NovaBlockProofPipelineBenchmarkArtifactError {
 pub struct BlockProofPipeline<Digest = [u8; 32], F = ark_bn254::Fr, Backend = MockFoldingBackend> {
     bundle_prover: BlockProofBundleProver<Digest, F>,
     folding_backend: Backend,
+    verified_jolt_lookup_receipt: Option<VerifiedJoltLookupProofReceipt>,
 }
 
 impl<Digest, F> BlockProofPipeline<Digest, F, MockFoldingBackend>
@@ -4378,6 +4679,21 @@ where
         Self {
             bundle_prover: BlockProofBundleProver::new(program_digest),
             folding_backend,
+            verified_jolt_lookup_receipt: None,
+        }
+    }
+
+    /// Constructs a block pipeline whose recursive statements are bound to a
+    /// receipt produced by the complete original Jolt verifier.
+    pub fn with_backend_and_verified_jolt_lookup_receipt(
+        program_digest: Digest,
+        folding_backend: Backend,
+        receipt: VerifiedJoltLookupProofReceipt,
+    ) -> Self {
+        Self {
+            bundle_prover: BlockProofBundleProver::new(program_digest),
+            folding_backend,
+            verified_jolt_lookup_receipt: Some(receipt),
         }
     }
 
@@ -4400,7 +4716,7 @@ where
             blocks,
             external_lookahead_cycle,
         )?;
-        let fold_inputs = build_block_fold_inputs(&bundles);
+        let mut fold_inputs = build_block_fold_inputs(&bundles);
         verify_block_fold_input_chain_with_external_lookahead(
             bytecode_preprocessing,
             blocks,
@@ -4408,6 +4724,10 @@ where
             &bundles,
             &fold_inputs,
         )?;
+        if let Some(receipt) = &self.verified_jolt_lookup_receipt {
+            bind_verified_jolt_lookup_receipt_to_fold_inputs(&mut fold_inputs, receipt)?;
+            verify_verified_jolt_lookup_receipt_bindings(&fold_inputs, receipt)?;
+        }
         let accumulator = self.folding_backend.fold(&fold_inputs)?;
 
         Ok(BlockProofPipelineOutput {
@@ -5004,6 +5324,44 @@ where
     )
 }
 
+/// Verifies a receipt-bound pipeline output.
+///
+/// This API intentionally requires the opaque receipt returned by the complete
+/// Jolt verifier. The ordinary pipeline verifier rejects receipt-enriched fold
+/// inputs because it cannot establish their provenance on its own.
+pub fn verify_block_proof_pipeline_with_backend_and_verified_jolt_lookup_receipt<
+    Digest,
+    F,
+    Backend,
+>(
+    bytecode_preprocessing: &BytecodePreprocessing,
+    blocks: &[TraceBlock],
+    output: &BlockProofPipelineOutput<Digest, F, Backend::Accumulator>,
+    folding_backend: &Backend,
+    receipt: &VerifiedJoltLookupProofReceipt,
+) -> Result<(), BlockTraceError>
+where
+    Digest: Clone + PartialEq + AsRef<[u8]>,
+    F: JoltField,
+    Backend: BlockFoldingBackend<Digest, F>,
+{
+    if let Some(final_proof) = &output.final_proof {
+        return Err(BlockTraceError::NovaFoldingBackendError {
+            block_index: final_proof.instance.metadata.last_block_index.unwrap_or(0),
+            reason:
+                "pipeline output carries a final folded proof; use the receipt-aware Nova final-proof verifier",
+        });
+    }
+    verify_block_proof_pipeline_core_with_backend_and_verified_jolt_lookup_receipt(
+        bytecode_preprocessing,
+        blocks,
+        None,
+        output,
+        folding_backend,
+        receipt,
+    )
+}
+
 fn verify_block_proof_pipeline_core_with_backend<Digest, F, Backend>(
     bytecode_preprocessing: &BytecodePreprocessing,
     blocks: &[TraceBlock],
@@ -5023,6 +5381,38 @@ where
         &output.bundles,
         &output.fold_inputs,
     )?;
+    folding_backend.verify(&output.fold_inputs, &output.accumulator)
+}
+
+fn verify_block_proof_pipeline_core_with_backend_and_verified_jolt_lookup_receipt<
+    Digest,
+    F,
+    Backend,
+>(
+    bytecode_preprocessing: &BytecodePreprocessing,
+    blocks: &[TraceBlock],
+    external_lookahead_cycle: Option<&Cycle>,
+    output: &BlockProofPipelineOutput<Digest, F, Backend::Accumulator>,
+    folding_backend: &Backend,
+    receipt: &VerifiedJoltLookupProofReceipt,
+) -> Result<(), BlockTraceError>
+where
+    Digest: Clone + PartialEq + AsRef<[u8]>,
+    F: JoltField,
+    Backend: BlockFoldingBackend<Digest, F>,
+{
+    let mut unbound_fold_inputs = output.fold_inputs.clone();
+    for fold_input in &mut unbound_fold_inputs {
+        clear_verified_jolt_lookup_receipt_binding(&mut fold_input.state);
+    }
+    verify_block_fold_input_chain_with_external_lookahead(
+        bytecode_preprocessing,
+        blocks,
+        external_lookahead_cycle,
+        &output.bundles,
+        &unbound_fold_inputs,
+    )?;
+    verify_verified_jolt_lookup_receipt_bindings(&output.fold_inputs, receipt)?;
     folding_backend.verify(&output.fold_inputs, &output.accumulator)
 }
 
@@ -5068,6 +5458,41 @@ where
         external_lookahead_cycle,
         output,
         folding_backend,
+    )?;
+    let final_proof =
+        output
+            .final_proof
+            .as_ref()
+            .ok_or(BlockTraceError::NovaFoldingBackendError {
+                block_index: output.accumulator.metadata.last_block_index.unwrap_or(0),
+                reason: "final folded proof is missing from pipeline output",
+            })?;
+    verify_configured_final_folded_proof(&output.accumulator, final_proof)
+}
+
+/// Receipt-aware verifier for a Nova pipeline carrying its configured final
+/// folded proof.
+pub fn verify_nova_block_proof_pipeline_with_final_proof_and_verified_jolt_lookup_receipt<
+    Digest,
+    F,
+>(
+    bytecode_preprocessing: &BytecodePreprocessing,
+    blocks: &[TraceBlock],
+    output: &BlockProofPipelineOutput<Digest, F, NovaFoldAccumulator<Digest>>,
+    folding_backend: &NovaFoldingBackend,
+    receipt: &VerifiedJoltLookupProofReceipt,
+) -> Result<(), BlockTraceError>
+where
+    Digest: Clone + PartialEq + AsRef<[u8]>,
+    F: JoltField,
+{
+    verify_block_proof_pipeline_core_with_backend_and_verified_jolt_lookup_receipt(
+        bytecode_preprocessing,
+        blocks,
+        None,
+        output,
+        folding_backend,
+        receipt,
     )?;
     let final_proof =
         output
@@ -5322,6 +5747,107 @@ where
     F: JoltField,
 {
     bundles.iter().map(build_block_fold_input).collect()
+}
+
+/// Binds one receipt from the complete Jolt verifier to every block statement.
+///
+/// The receipt is global, while `verified_jolt_lookup_block_binding_digest`
+/// commits the folded statement to its program, block, and local lookup claim.
+/// This detects a copied binding field, but does not by itself prove that the
+/// block trace is the same witness represented by the original Jolt
+/// commitments; that requires opening/folding those claims in a later stage.
+pub fn bind_verified_jolt_lookup_receipt_to_fold_inputs<Digest, F>(
+    fold_inputs: &mut [BlockFoldInput<Digest, F>],
+    receipt: &VerifiedJoltLookupProofReceipt,
+) -> Result<(), BlockTraceError>
+where
+    Digest: AsRef<[u8]>,
+    F: JoltField,
+{
+    for fold_input in fold_inputs {
+        if receipt.trace_length() < fold_input.state.global_cycle_end {
+            return Err(BlockTraceError::VerifiedJoltLookupReceiptMismatch {
+                block_index: fold_input.state.block_index,
+                reason: "verified Jolt trace is shorter than the bound block",
+            });
+        }
+
+        let state = &mut fold_input.state;
+        state.verified_jolt_lookup_receipt_present = true;
+        state.verified_jolt_lookup_receipt_digest = receipt.digest();
+        state.verified_jolt_lookup_receipt_trace_length = receipt.trace_length();
+        state.verified_jolt_lookup_receipt_commitment_count = receipt.commitment_count();
+        state.verified_jolt_lookup_block_binding_digest =
+            digest_verified_jolt_lookup_block_binding(&fold_input.program_digest, state, receipt);
+        state.state_digest = digest_foldable_block_state(state);
+    }
+    Ok(())
+}
+
+/// Verifies the fixed-size receipt fields and every per-block binding.
+///
+/// Callers must supply the `VerifiedJoltLookupProofReceipt` returned by
+/// `JoltVerifier::verify_with_lookup_receipt`; accepting only a digest embedded
+/// in the fold input would not establish that the original Jolt verifier ran.
+pub fn verify_verified_jolt_lookup_receipt_bindings<Digest, F>(
+    fold_inputs: &[BlockFoldInput<Digest, F>],
+    receipt: &VerifiedJoltLookupProofReceipt,
+) -> Result<(), BlockTraceError>
+where
+    Digest: AsRef<[u8]>,
+    F: JoltField,
+{
+    for fold_input in fold_inputs {
+        let state = &fold_input.state;
+        if !state.verified_jolt_lookup_receipt_present {
+            return Err(BlockTraceError::VerifiedJoltLookupReceiptMismatch {
+                block_index: state.block_index,
+                reason: "verified Jolt lookup receipt is missing",
+            });
+        }
+        if state.verified_jolt_lookup_receipt_digest != receipt.digest()
+            || state.verified_jolt_lookup_receipt_trace_length != receipt.trace_length()
+            || state.verified_jolt_lookup_receipt_commitment_count != receipt.commitment_count()
+        {
+            return Err(BlockTraceError::VerifiedJoltLookupReceiptMismatch {
+                block_index: state.block_index,
+                reason: "verified Jolt lookup receipt metadata mismatch",
+            });
+        }
+        if receipt.trace_length() < state.global_cycle_end {
+            return Err(BlockTraceError::VerifiedJoltLookupReceiptMismatch {
+                block_index: state.block_index,
+                reason: "verified Jolt trace is shorter than the bound block",
+            });
+        }
+        if state.verified_jolt_lookup_block_binding_digest
+            != digest_verified_jolt_lookup_block_binding(&fold_input.program_digest, state, receipt)
+        {
+            return Err(BlockTraceError::VerifiedJoltLookupReceiptMismatch {
+                block_index: state.block_index,
+                reason: "verified Jolt lookup receipt block binding mismatch",
+            });
+        }
+        if state.state_digest != digest_foldable_block_state(state) {
+            return Err(BlockTraceError::VerifiedJoltLookupReceiptMismatch {
+                block_index: state.block_index,
+                reason: "foldable state digest does not bind the verified Jolt receipt",
+            });
+        }
+    }
+    Ok(())
+}
+
+fn clear_verified_jolt_lookup_receipt_binding<F>(state: &mut FoldableBlockState<F>)
+where
+    F: JoltField,
+{
+    state.verified_jolt_lookup_receipt_present = false;
+    state.verified_jolt_lookup_receipt_digest = [0; 32];
+    state.verified_jolt_lookup_receipt_trace_length = 0;
+    state.verified_jolt_lookup_receipt_commitment_count = 0;
+    state.verified_jolt_lookup_block_binding_digest = [0; 32];
+    state.state_digest = digest_foldable_block_state(state);
 }
 
 pub fn verify_block_fold_input<Digest, F>(
@@ -5794,6 +6320,11 @@ where
         lookup_logup_denominator_retry_count: logup_proof.denominator_retry_count,
         lookup_logup_query_sum: logup_proof.query_sum,
         lookup_logup_table_sum: logup_proof.table_sum,
+        verified_jolt_lookup_receipt_present: false,
+        verified_jolt_lookup_receipt_digest: [0; 32],
+        verified_jolt_lookup_receipt_trace_length: 0,
+        verified_jolt_lookup_receipt_commitment_count: 0,
+        verified_jolt_lookup_block_binding_digest: [0; 32],
         r1cs_rows_checked: cpu_proof.r1cs_rows_checked,
         r1cs_num_steps: cpu_proof.r1cs_num_steps,
         r1cs_vk_digest: cpu_proof.r1cs_vk_digest,
@@ -5947,7 +6478,7 @@ where
     F: JoltField,
 {
     let mut hasher = Sha3_256::new();
-    hasher.update(b"JOLT_NOVA_FOLDABLE_BLOCK_STATE_V3");
+    hasher.update(b"JOLT_NOVA_FOLDABLE_BLOCK_STATE_V4");
     update_usize(&mut hasher, state.block_index);
     update_usize(&mut hasher, state.global_cycle_start);
     update_usize(&mut hasher, state.global_cycle_end);
@@ -5974,6 +6505,14 @@ where
     update_usize(&mut hasher, state.lookup_logup_denominator_retry_count);
     update_field(&mut hasher, state.lookup_logup_query_sum);
     update_field(&mut hasher, state.lookup_logup_table_sum);
+    hasher.update([u8::from(state.verified_jolt_lookup_receipt_present)]);
+    hasher.update(state.verified_jolt_lookup_receipt_digest);
+    update_usize(&mut hasher, state.verified_jolt_lookup_receipt_trace_length);
+    update_usize(
+        &mut hasher,
+        state.verified_jolt_lookup_receipt_commitment_count,
+    );
+    hasher.update(state.verified_jolt_lookup_block_binding_digest);
     update_usize(&mut hasher, state.r1cs_rows_checked);
     update_usize(&mut hasher, state.r1cs_num_steps);
     update_field(&mut hasher, state.r1cs_vk_digest);
@@ -5986,6 +6525,37 @@ where
         None => hasher.update([0]),
     }
 
+    finalize_digest(hasher)
+}
+
+fn digest_verified_jolt_lookup_block_binding<Digest, F>(
+    program_digest: &Digest,
+    state: &FoldableBlockState<F>,
+    receipt: &VerifiedJoltLookupProofReceipt,
+) -> [u8; 32]
+where
+    Digest: AsRef<[u8]>,
+{
+    let mut hasher = Sha3_256::new();
+    hasher.update(b"JOLT_NOVA_VERIFIED_JOLT_LOOKUP_BLOCK_BINDING_V1");
+    update_usize(&mut hasher, program_digest.as_ref().len());
+    hasher.update(program_digest.as_ref());
+    hasher.update(receipt.digest());
+    hasher.update(receipt.preprocessing_digest());
+    hasher.update(receipt.public_io_digest());
+    hasher.update(receipt.commitments_digest());
+    hasher.update(receipt.stage2_sumcheck_digest());
+    hasher.update(receipt.stage5_sumcheck_digest());
+    hasher.update(receipt.stage6b_sumcheck_digest());
+    hasher.update(receipt.stage7_sumcheck_digest());
+    hasher.update(receipt.joint_opening_proof_digest());
+    hasher.update(receipt.full_proof_digest());
+    update_usize(&mut hasher, state.block_index);
+    update_usize(&mut hasher, state.global_cycle_start);
+    update_usize(&mut hasher, state.global_cycle_end);
+    hasher.update(state.lookup_claims_digest);
+    hasher.update(state.lookup_entry_summaries_digest);
+    hasher.update(state.lookup_logup_proof_digest);
     finalize_digest(hasher)
 }
 
@@ -7406,6 +7976,10 @@ pub enum BlockTraceError {
         next_block: usize,
         reason: &'static str,
     },
+    VerifiedJoltLookupReceiptMismatch {
+        block_index: usize,
+        reason: &'static str,
+    },
     BlockFoldAccumulatorAbsorbMismatch {
         block_index: usize,
         reason: &'static str,
@@ -7673,6 +8247,13 @@ impl fmt::Display for BlockTraceError {
             } => write!(
                 f,
                 "block fold input boundary mismatch between block {current_block} and block {next_block}: {reason}"
+            ),
+            Self::VerifiedJoltLookupReceiptMismatch {
+                block_index,
+                reason,
+            } => write!(
+                f,
+                "verified Jolt lookup receipt mismatch at block {block_index}: {reason}"
             ),
             Self::BlockFoldAccumulatorAbsorbMismatch {
                 block_index,
@@ -10918,6 +11499,117 @@ mod tests {
         assert_eq!(output.accumulator.total_lookup_claims, 4);
         assert!(output.final_proof.is_none());
         verify_block_proof_pipeline(&bytecode, &[block0, block1], &output).unwrap();
+    }
+
+    #[test]
+    fn verified_jolt_lookup_receipt_binds_every_block_and_rejects_tampering() {
+        let bytecode = BytecodePreprocessing::default();
+        let block0 = trace_block(0, boundary(0, 0), boundary(2, 0));
+        let block1 = trace_block(1, block0.end_state.clone(), boundary(4, 0));
+        let blocks = [block0, block1];
+        let receipt = VerifiedJoltLookupProofReceipt::new_for_test(17, 8);
+        let backend = MockFoldingBackend;
+        let pipeline =
+            BlockProofPipeline::<_, ark_bn254::Fr, MockFoldingBackend>::
+                with_backend_and_verified_jolt_lookup_receipt(
+                    [9u8; 32],
+                    backend,
+                    receipt.clone(),
+                );
+
+        let output = pipeline.prove_blocks(&bytecode, &blocks).unwrap();
+
+        assert!(output.fold_inputs.iter().all(|fold_input| {
+            fold_input.state.verified_jolt_lookup_receipt_present
+                && fold_input.state.verified_jolt_lookup_receipt_digest == receipt.digest()
+                && fold_input.state.verified_jolt_lookup_block_binding_digest != [0; 32]
+        }));
+        verify_block_proof_pipeline_with_backend_and_verified_jolt_lookup_receipt(
+            &bytecode,
+            &blocks,
+            &output,
+            &MockFoldingBackend,
+            &receipt,
+        )
+        .unwrap();
+
+        assert!(matches!(
+            verify_block_proof_pipeline_with_backend(
+                &bytecode,
+                &blocks,
+                &output,
+                &MockFoldingBackend,
+            ),
+            Err(BlockTraceError::BlockFoldInputMismatch { block_index: 0 })
+        ));
+
+        let different_receipt = VerifiedJoltLookupProofReceipt::new_for_test(18, 8);
+        assert!(matches!(
+            verify_block_proof_pipeline_with_backend_and_verified_jolt_lookup_receipt(
+                &bytecode,
+                &blocks,
+                &output,
+                &MockFoldingBackend,
+                &different_receipt,
+            ),
+            Err(BlockTraceError::VerifiedJoltLookupReceiptMismatch { block_index: 0, .. })
+        ));
+
+        let mut tampered = output.clone();
+        tampered.fold_inputs[1]
+            .state
+            .verified_jolt_lookup_block_binding_digest[0] ^= 1;
+        assert!(matches!(
+            verify_block_proof_pipeline_with_backend_and_verified_jolt_lookup_receipt(
+                &bytecode,
+                &blocks,
+                &tampered,
+                &MockFoldingBackend,
+                &receipt,
+            ),
+            Err(BlockTraceError::VerifiedJoltLookupReceiptMismatch { block_index: 1, .. })
+        ));
+    }
+
+    #[cfg(feature = "nova")]
+    #[test]
+    fn nova_pipeline_folds_verified_jolt_lookup_receipt_into_final_proof() {
+        let bytecode = BytecodePreprocessing::default();
+        let block0 = trace_block(0, boundary(0, 0), boundary(2, 0));
+        let block1 = trace_block(1, block0.end_state.clone(), boundary(4, 0));
+        let blocks = [block0, block1];
+        let receipt = VerifiedJoltLookupProofReceipt::new_for_test(29, 8);
+        let backend = NovaFoldingBackend::default();
+        let pipeline =
+            BlockProofPipeline::<_, ark_bn254::Fr, NovaFoldingBackend>::
+                with_backend_and_verified_jolt_lookup_receipt(
+                    [9u8; 32],
+                    backend.clone(),
+                    receipt.clone(),
+                );
+
+        let output = pipeline
+            .prove_blocks_with_final_proof(&bytecode, &blocks)
+            .unwrap();
+
+        assert!(output.final_proof.is_some());
+        assert!(output.accumulator.recursive_snark_bytes.is_some());
+        verify_nova_block_proof_pipeline_with_final_proof_and_verified_jolt_lookup_receipt(
+            &bytecode, &blocks, &output, &backend, &receipt,
+        )
+        .unwrap();
+
+        let wrong_receipt = VerifiedJoltLookupProofReceipt::new_for_test(30, 8);
+        assert!(matches!(
+            verify_nova_block_proof_pipeline_with_final_proof_and_verified_jolt_lookup_receipt(
+                &bytecode,
+                &blocks,
+                &output,
+                &backend,
+                &wrong_receipt,
+            ),
+            Err(BlockTraceError::VerifiedJoltLookupReceiptMismatch { block_index: 0, .. })
+        ));
     }
 
     #[test]
