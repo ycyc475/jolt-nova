@@ -22,8 +22,10 @@ use jolt_core::{
     zkvm::{
         block::{
             validate_block_chain, BlockProofPipeline, BlockPublicInput, JoltNovaReportOutputFormat,
-            NovaBlockProofPipelineFinalProofSizeBenchmarkArtifact, NovaFoldingBackend,
-            JOLT_NOVA_FINAL_PROOF_SIZE_SCALING_REPORT_KIND, JOLT_NOVA_REPORT_SCHEMA_VERSION,
+            NovaBlockProofPipelineFinalProofSizeBenchmarkArtifact, NovaFoldConfig,
+            NovaFoldingBackend, JOLT_NOVA_FINAL_PROOF_SIZE_SCALING_REPORT_KIND,
+            JOLT_NOVA_REPORT_SCHEMA_VERSION, NOVA_LOGUP_SUBCLAIM_BACKEND_NAME,
+            NOVA_TRANSCRIPT_SUBCLAIM_BACKEND_NAME,
         },
         bytecode::BytecodePreprocessing,
     },
@@ -37,9 +39,9 @@ use tracer::{
 
 const DEFAULT_OUTPUT_PATH: &str = "benchmark-runs/jolt-nova/final-proof-size-scaling.json";
 const RUNNER_NAME: &str = "jolt_nova_final_proof_size_benchmark";
-const MANIFEST_SCHEMA_VERSION: &str = "jolt-nova-benchmark-runner-v4";
-const PERFORMANCE_SCHEMA_VERSION: &str = "jolt-nova-performance-baseline-v1";
-const MULTI_RUN_SCHEMA_VERSION: &str = "jolt-nova-multi-run-baseline-v1";
+const MANIFEST_SCHEMA_VERSION: &str = "jolt-nova-benchmark-runner-v5";
+const PERFORMANCE_SCHEMA_VERSION: &str = "jolt-nova-performance-baseline-v2";
+const MULTI_RUN_SCHEMA_VERSION: &str = "jolt-nova-multi-run-baseline-v2";
 const PRODUCTION_FIXTURE_SCHEMA_VERSION: &str = "jolt-nova-production-fixtures-v1";
 const TRACE_FILE_SCHEMA_VERSION: &str = "jolt-nova-trace-blocks-v1";
 const TRACE_BUNDLE_SCHEMA_VERSION: &str = "jolt-nova-trace-bundle-v1";
@@ -160,6 +162,10 @@ struct Args {
     /// Built-in production-size RV64 guest used with `--trace-source fixture`.
     #[arg(long, value_enum, default_value_t = ProductionFixture::CpuLookup64k)]
     fixture: ProductionFixture,
+
+    /// Lookup subclaim relation folded by Nova.
+    #[arg(long, value_enum, default_value_t = LookupBackend::Transcript)]
+    lookup_backend: LookupBackend,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
@@ -186,6 +192,36 @@ impl TraceSource {
 }
 
 impl fmt::Display for TraceSource {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+enum LookupBackend {
+    /// Existing digest/count transcript fingerprint baseline.
+    Transcript,
+    /// LogUp fractional-sum relation with in-circuit balance enforcement.
+    LogUp,
+}
+
+impl LookupBackend {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Transcript => "transcript",
+            Self::LogUp => "logup",
+        }
+    }
+
+    fn nova_subclaim_backend_name(self) -> &'static str {
+        match self {
+            Self::Transcript => NOVA_TRANSCRIPT_SUBCLAIM_BACKEND_NAME,
+            Self::LogUp => NOVA_LOGUP_SUBCLAIM_BACKEND_NAME,
+        }
+    }
+}
+
+impl fmt::Display for LookupBackend {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(self.as_str())
     }
@@ -313,6 +349,7 @@ struct PerformanceBaselineArtifact {
     schema_version: String,
     runner: String,
     trace_source: String,
+    lookup_backend: String,
     build_profile: String,
     target_os: String,
     target_arch: String,
@@ -362,6 +399,7 @@ struct MultiRunBaselineArtifact {
     schema_version: String,
     runner: String,
     trace_source: String,
+    lookup_backend: String,
     fixture: Option<String>,
     fixture_schema_version: Option<String>,
     build_profile: String,
@@ -727,9 +765,13 @@ fn run_once(args: &Args) -> Result<PerformanceBaselineArtifact, Box<dyn Error>> 
         .as_ref()
         .map(|metadata| metadata.sha3_256)
         .unwrap_or_else(|| synthetic_workload_digest(args, program_digest));
+    let folding_backend = NovaFoldingBackend::new(NovaFoldConfig {
+        subclaim_backend_name: args.lookup_backend.nova_subclaim_backend_name(),
+        ..NovaFoldConfig::default()
+    });
     let pipeline = BlockProofPipeline::<_, ark_bn254::Fr, NovaFoldingBackend>::with_backend(
         program_digest,
-        NovaFoldingBackend::default(),
+        folding_backend,
     );
 
     let prove_and_report_started = Instant::now();
@@ -779,6 +821,7 @@ fn run_once(args: &Args) -> Result<PerformanceBaselineArtifact, Box<dyn Error>> 
         selected_trace_profile(&args).unwrap_or("none")
     );
     println!("fixture {}", selected_fixture(args).unwrap_or("none"));
+    println!("lookup_backend {}", args.lookup_backend);
     if let Some(metadata) = &loaded_trace.file_metadata {
         println!("trace_file_schema {}", metadata.schema_version);
         println!("trace_storage_format {}", metadata.storage_format);
@@ -1739,6 +1782,7 @@ fn build_performance_artifact(
         schema_version: PERFORMANCE_SCHEMA_VERSION.to_string(),
         runner: RUNNER_NAME.to_string(),
         trace_source: args.trace_source.as_str().to_string(),
+        lookup_backend: args.lookup_backend.as_str().to_string(),
         build_profile: if cfg!(debug_assertions) {
             "debug".to_string()
         } else {
@@ -1802,6 +1846,7 @@ fn build_multi_run_baseline(
     })?;
     for (index, sample) in samples.iter().enumerate().skip(1) {
         if sample.trace_source != first.trace_source
+            || sample.lookup_backend != first.lookup_backend
             || sample.build_profile != first.build_profile
             || sample.target_os != first.target_os
             || sample.target_arch != first.target_arch
@@ -1865,6 +1910,7 @@ fn build_multi_run_baseline(
         schema_version: MULTI_RUN_SCHEMA_VERSION.to_string(),
         runner: RUNNER_NAME.to_string(),
         trace_source: first.trace_source.clone(),
+        lookup_backend: first.lookup_backend.clone(),
         fixture: (args.trace_source == TraceSource::Fixture)
             .then(|| args.fixture.as_str().to_string()),
         fixture_schema_version: (args.trace_source == TraceSource::Fixture)
@@ -2005,6 +2051,11 @@ fn validate_comparable_baselines(
             "trace_source",
             current.trace_source.as_str(),
             baseline.trace_source.as_str(),
+        ),
+        (
+            "lookup_backend",
+            current.lookup_backend.as_str(),
+            baseline.lookup_backend.as_str(),
         ),
         (
             "build_profile",
@@ -2168,6 +2219,8 @@ fn build_manifest_json(
     append_json_string_field(&mut json, "runner", RUNNER_NAME);
     json.push(',');
     append_json_string_field(&mut json, "trace_source", args.trace_source.as_str());
+    json.push(',');
+    append_json_string_field(&mut json, "lookup_backend", args.lookup_backend.as_str());
     json.push(',');
     append_json_optional_string_field(&mut json, "trace_profile", selected_trace_profile(args));
     json.push(',');
@@ -2552,6 +2605,7 @@ mod tests {
             baseline_input: None,
             max_regression_percent: 10.0,
             fixture: ProductionFixture::CpuLookup64k,
+            lookup_backend: LookupBackend::Transcript,
         };
 
         assert_eq!(
@@ -2744,6 +2798,18 @@ mod tests {
         assert_eq!(proving.regression_percent, 12.0);
         assert!(!proving.passed);
 
+        let mut different_backend = current.clone();
+        different_backend.lookup_backend = "logup".to_string();
+        assert!(compare_multi_run_baselines(
+            &different_backend,
+            &baseline,
+            Path::new("baseline.aggregate.json"),
+            10.0,
+        )
+        .unwrap_err()
+        .to_string()
+        .contains("lookup_backend"));
+
         let mut different_workload = current;
         different_workload.workload_sha3_256 = "cd".repeat(32);
         assert!(compare_multi_run_baselines(
@@ -2783,6 +2849,7 @@ mod tests {
             baseline_input: None,
             max_regression_percent: 10.0,
             fixture: ProductionFixture::CpuLookup64k,
+            lookup_backend: LookupBackend::Transcript,
         };
         assert_eq!(validate_runner_args(&args), Ok(()));
 
@@ -2850,6 +2917,7 @@ mod tests {
             baseline_input: None,
             max_regression_percent: 10.0,
             fixture: ProductionFixture::CpuLookup64k,
+            lookup_backend: LookupBackend::Transcript,
         };
         let loaded_trace = load_trace_blocks(&args).unwrap();
         let blocks = loaded_trace.blocks;
@@ -2899,6 +2967,7 @@ mod tests {
             baseline_input: None,
             max_regression_percent: 10.0,
             fixture: ProductionFixture::CpuLookup64k,
+            lookup_backend: LookupBackend::Transcript,
         };
         assert!(load_trace_blocks(&synthetic_with_input)
             .unwrap_err()
@@ -2928,6 +2997,7 @@ mod tests {
             baseline_input: None,
             max_regression_percent: 10.0,
             fixture: ProductionFixture::CpuLookup64k,
+            lookup_backend: LookupBackend::Transcript,
         };
         assert!(load_trace_blocks(&trace_file_without_input)
             .unwrap_err()
@@ -2961,6 +3031,7 @@ mod tests {
             baseline_input: None,
             max_regression_percent: 10.0,
             fixture: ProductionFixture::CpuLookup64k,
+            lookup_backend: LookupBackend::Transcript,
         };
         let loaded_trace = load_trace_blocks(&args).unwrap();
         let metadata = loaded_trace.file_metadata.unwrap();
@@ -3020,6 +3091,7 @@ mod tests {
             baseline_input: None,
             max_regression_percent: 10.0,
             fixture: ProductionFixture::CpuLookup64k,
+            lookup_backend: LookupBackend::Transcript,
         };
 
         let loaded = load_trace_blocks(&args).unwrap();
@@ -3220,6 +3292,7 @@ mod tests {
             baseline_input: None,
             max_regression_percent: 10.0,
             fixture: ProductionFixture::CpuLookup64k,
+            lookup_backend: LookupBackend::LogUp,
         };
 
         run(args).unwrap();
@@ -3235,6 +3308,7 @@ mod tests {
         assert!(report.contains("\"block_count\":2"));
         assert!(report.contains("\"recursive_snark_bytes_len\":"));
         assert!(manifest.contains("\"trace_source\":\"elf\""));
+        assert!(manifest.contains("\"lookup_backend\":\"logup\""));
         assert!(manifest.contains("\"trace_block_size\":1"));
         assert!(manifest.contains(&format!(
             "\"trace_file_schema_version\":\"{TRACE_BUNDLE_SCHEMA_VERSION}\""
@@ -3242,6 +3316,7 @@ mod tests {
         assert!(manifest.contains("\"trace_storage_format\":\"binary\""));
         assert_eq!(performance.schema_version, PERFORMANCE_SCHEMA_VERSION);
         assert_eq!(performance.trace_source, "elf");
+        assert_eq!(performance.lookup_backend, "logup");
         assert_eq!(performance.source_block_count, 2);
         assert_eq!(performance.reported_block_counts, vec![1, 2]);
         assert_eq!(performance.largest_reported_block_count, 2);
@@ -3254,6 +3329,7 @@ mod tests {
             .is_some());
         assert_eq!(performance.memory.sample_interval_ms, 1);
         assert_eq!(aggregate.schema_version, MULTI_RUN_SCHEMA_VERSION);
+        assert_eq!(aggregate.lookup_backend, "logup");
         assert_eq!(aggregate.measurement_runs, 2);
         assert_eq!(aggregate.samples.len(), 2);
         assert_eq!(aggregate.source_block_count, 2);
@@ -3351,13 +3427,15 @@ mod tests {
             baseline_input: None,
             max_regression_percent: 10.0,
             fixture: ProductionFixture::CpuLookup64k,
+            lookup_backend: LookupBackend::Transcript,
         };
         let block_counts = normalized_block_counts(&args, 2, false).unwrap();
         let artifact = sample_benchmark_artifact();
         let manifest_path = normalized_manifest_output(&args.output, args.manifest_output.as_ref());
         let json = build_manifest_json(&args, &block_counts, 2, None, &artifact, &manifest_path);
 
-        assert!(json.contains("\"schema_version\":\"jolt-nova-benchmark-runner-v4\""));
+        assert!(json.contains("\"schema_version\":\"jolt-nova-benchmark-runner-v5\""));
+        assert!(json.contains("\"lookup_backend\":\"transcript\""));
         assert!(json.contains("\"runner\":\"jolt_nova_final_proof_size_benchmark\""));
         assert!(json.contains("\"trace_source\":\"synthetic\""));
         assert!(json.contains("\"trace_profile\":\"synthetic-noop\""));
@@ -3372,7 +3450,7 @@ mod tests {
             json.contains("\"manifest_path\":\"benchmark-runs/jolt-nova/report.manifest.json\"")
         );
         assert!(
-            json.contains("\"performance_schema_version\":\"jolt-nova-performance-baseline-v1\"")
+            json.contains("\"performance_schema_version\":\"jolt-nova-performance-baseline-v2\"")
         );
         assert!(json
             .contains("\"performance_path\":\"benchmark-runs/jolt-nova/report.performance.json\""));
@@ -3416,6 +3494,7 @@ mod tests {
             baseline_input: None,
             max_regression_percent: 10.0,
             fixture: ProductionFixture::CpuLookup64k,
+            lookup_backend: LookupBackend::Transcript,
         };
         let artifact = sample_benchmark_artifact();
         let manifest_path = normalized_manifest_output(&args.output, args.manifest_output.as_ref());
@@ -3473,6 +3552,7 @@ mod tests {
             baseline_input: None,
             max_regression_percent: 10.0,
             fixture: ProductionFixture::CpuLookup64k,
+            lookup_backend: LookupBackend::Transcript,
         };
         let artifact = sample_benchmark_artifact();
         let manifest_path = temp_manifest_path("manifest-write", "report.manifest.json");
@@ -3482,7 +3562,7 @@ mod tests {
         std::fs::remove_file(&manifest_path).unwrap();
         std::fs::remove_dir(manifest_path.parent().unwrap()).unwrap();
 
-        assert!(manifest.contains("\"schema_version\":\"jolt-nova-benchmark-runner-v4\""));
+        assert!(manifest.contains("\"schema_version\":\"jolt-nova-benchmark-runner-v5\""));
         assert!(manifest.contains("\"block_counts\":[1]"));
     }
 
@@ -3512,6 +3592,7 @@ mod tests {
             baseline_input: None,
             max_regression_percent: 10.0,
             fixture: ProductionFixture::CpuLookup64k,
+            lookup_backend: LookupBackend::Transcript,
         };
         let blocks = build_noop_trace_blocks(2, 3).unwrap();
         let measurements = RunMeasurements {
@@ -3583,6 +3664,7 @@ mod tests {
             baseline_input: None,
             max_regression_percent: 10.0,
             fixture: ProductionFixture::CpuLookup64k,
+            lookup_backend: LookupBackend::Transcript,
         }
     }
 
@@ -3597,6 +3679,7 @@ mod tests {
             schema_version: PERFORMANCE_SCHEMA_VERSION.to_string(),
             runner: RUNNER_NAME.to_string(),
             trace_source: "synthetic".to_string(),
+            lookup_backend: "transcript".to_string(),
             build_profile: "debug".to_string(),
             target_os: std::env::consts::OS.to_string(),
             target_arch: std::env::consts::ARCH.to_string(),

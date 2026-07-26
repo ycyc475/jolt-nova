@@ -422,6 +422,24 @@ pub struct LookupEntrySummary {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BlockLogUpProof {
+    /// Fiat-Shamir challenge used to compress a lookup tuple into one field element.
+    pub tuple_challenge: ark_bn254::Fr,
+    /// Fiat-Shamir challenge used as the LogUp denominator offset.
+    pub denominator_challenge: ark_bn254::Fr,
+    /// Number of deterministic increments needed to avoid a zero denominator.
+    pub denominator_retry_count: usize,
+    /// `sum_i 1 / (beta + query_i)`.
+    pub query_sum: ark_bn254::Fr,
+    /// `sum_j multiplicity_j / (beta + table_entry_j)`.
+    pub table_sum: ark_bn254::Fr,
+    pub query_count: usize,
+    pub table_distinct_entry_count: usize,
+    /// Domain-separated binding of the challenges, sums, and cardinalities.
+    pub proof_digest: [u8; 32],
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct BlockLookupClaim {
     pub block_index: usize,
     pub global_cycle_start: usize,
@@ -430,6 +448,7 @@ pub struct BlockLookupClaim {
     pub distinct_lookup_entry_count: usize,
     pub claims_digest: [u8; 32],
     pub entry_summaries_digest: [u8; 32],
+    pub logup_proof: BlockLogUpProof,
 }
 
 impl BlockLookupClaim {
@@ -482,6 +501,20 @@ impl BlockLookupClaim {
             });
         }
 
+        if self.logup_proof.query_count != self.lookup_count {
+            return Err(BlockTraceError::BlockLookupClaimShapeMismatch {
+                block_index: block.block_index,
+                reason: "LogUp query count mismatch",
+            });
+        }
+
+        if self.logup_proof.table_distinct_entry_count != self.distinct_lookup_entry_count {
+            return Err(BlockTraceError::BlockLookupClaimShapeMismatch {
+                block_index: block.block_index,
+                reason: "LogUp table distinct-entry count mismatch",
+            });
+        }
+
         Ok(())
     }
 }
@@ -523,6 +556,12 @@ pub struct FoldableBlockState<F = ark_bn254::Fr> {
     pub lookup_entry_summaries_digest: [u8; 32],
     pub lookup_count: usize,
     pub lookup_distinct_entry_count: usize,
+    pub lookup_logup_proof_digest: [u8; 32],
+    pub lookup_logup_tuple_challenge: ark_bn254::Fr,
+    pub lookup_logup_denominator_challenge: ark_bn254::Fr,
+    pub lookup_logup_denominator_retry_count: usize,
+    pub lookup_logup_query_sum: ark_bn254::Fr,
+    pub lookup_logup_table_sum: ark_bn254::Fr,
     pub r1cs_rows_checked: usize,
     pub r1cs_num_steps: usize,
     pub r1cs_vk_digest: F,
@@ -806,6 +845,7 @@ pub struct NovaFoldConfig {
 
 pub const NOVA_BLOCK_FOLD_RELATION_NAME: &str = "jolt-nova-block-fold-v1";
 pub const NOVA_TRANSCRIPT_SUBCLAIM_BACKEND_NAME: &str = "transcript-subclaim-fingerprints";
+pub const NOVA_LOGUP_SUBCLAIM_BACKEND_NAME: &str = "logup-subclaim-v1";
 
 impl Default for NovaFoldConfig {
     fn default() -> Self {
@@ -1615,7 +1655,9 @@ fn ensure_supported_nova_subclaim_backend(
     config: &NovaFoldConfig,
     block_index: usize,
 ) -> Result<(), BlockTraceError> {
-    if config.subclaim_backend_name == NOVA_TRANSCRIPT_SUBCLAIM_BACKEND_NAME {
+    if config.subclaim_backend_name == NOVA_TRANSCRIPT_SUBCLAIM_BACKEND_NAME
+        || config.subclaim_backend_name == NOVA_LOGUP_SUBCLAIM_BACKEND_NAME
+    {
         Ok(())
     } else {
         Err(BlockTraceError::NovaFoldingBackendError {
@@ -1781,6 +1823,8 @@ const NOVA_TRANSCRIPT_DOMAIN_RAM: &str = "ram";
 #[cfg(feature = "nova")]
 const NOVA_TRANSCRIPT_DOMAIN_LOOKUP: &str = "lookup";
 #[cfg(feature = "nova")]
+const NOVA_TRANSCRIPT_DOMAIN_LOOKUP_LOGUP: &str = "lookup-logup";
+#[cfg(feature = "nova")]
 const NOVA_TRANSCRIPT_DOMAIN_CPU: &str = "cpu";
 #[cfg(feature = "nova")]
 const NOVA_TRANSCRIPT_DOMAIN_STATEMENT: &str = "statement";
@@ -1813,6 +1857,12 @@ struct BlockFoldStatement {
     lookup_entry_summaries_digest: NovaScalar,
     lookup_count: NovaScalar,
     lookup_distinct_entry_count: NovaScalar,
+    lookup_logup_proof_digest: NovaScalar,
+    lookup_logup_tuple_challenge: NovaScalar,
+    lookup_logup_denominator_challenge: NovaScalar,
+    lookup_logup_denominator_retry_count: NovaScalar,
+    lookup_logup_query_sum: NovaScalar,
+    lookup_logup_table_sum: NovaScalar,
     r1cs_rows_checked: NovaScalar,
     r1cs_num_steps: NovaScalar,
     r1cs_vk_digest: NovaScalar,
@@ -1831,6 +1881,10 @@ struct BlockFoldSubclaimFingerprints {
 #[cfg(feature = "nova")]
 trait NovaSubclaimFoldingBackend {
     fn name(&self) -> &'static str;
+
+    fn lookup_backend_selector(&self) -> NovaScalar {
+        NovaScalar::zero()
+    }
 
     fn subclaim_fingerprints(
         &self,
@@ -1853,6 +1907,64 @@ impl NovaSubclaimFoldingBackend for TranscriptSubclaimFoldingBackend {
         statement: &BlockFoldStatement,
     ) -> BlockFoldSubclaimFingerprints {
         statement.subclaim_fingerprints()
+    }
+}
+
+#[cfg(feature = "nova")]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct LogUpSubclaimFoldingBackend;
+
+#[cfg(feature = "nova")]
+impl NovaSubclaimFoldingBackend for LogUpSubclaimFoldingBackend {
+    fn name(&self) -> &'static str {
+        NOVA_LOGUP_SUBCLAIM_BACKEND_NAME
+    }
+
+    fn lookup_backend_selector(&self) -> NovaScalar {
+        NovaScalar::from(1)
+    }
+
+    fn subclaim_fingerprints(
+        &self,
+        statement: &BlockFoldStatement,
+    ) -> BlockFoldSubclaimFingerprints {
+        let mut subclaims = statement.subclaim_fingerprints();
+        subclaims.lookup = statement.lookup_logup_fingerprint();
+        subclaims
+    }
+}
+
+#[cfg(feature = "nova")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ConfiguredSubclaimFoldingBackend {
+    Transcript(TranscriptSubclaimFoldingBackend),
+    LogUp(LogUpSubclaimFoldingBackend),
+}
+
+#[cfg(feature = "nova")]
+impl NovaSubclaimFoldingBackend for ConfiguredSubclaimFoldingBackend {
+    fn name(&self) -> &'static str {
+        match self {
+            Self::Transcript(backend) => backend.name(),
+            Self::LogUp(backend) => backend.name(),
+        }
+    }
+
+    fn lookup_backend_selector(&self) -> NovaScalar {
+        match self {
+            Self::Transcript(backend) => backend.lookup_backend_selector(),
+            Self::LogUp(backend) => backend.lookup_backend_selector(),
+        }
+    }
+
+    fn subclaim_fingerprints(
+        &self,
+        statement: &BlockFoldStatement,
+    ) -> BlockFoldSubclaimFingerprints {
+        match self {
+            Self::Transcript(backend) => backend.subclaim_fingerprints(statement),
+            Self::LogUp(backend) => backend.subclaim_fingerprints(statement),
+        }
     }
 }
 
@@ -1954,6 +2066,30 @@ impl BlockFoldStatement {
             ),
             lookup_count: NovaScalar::from(state.lookup_count as u64),
             lookup_distinct_entry_count: NovaScalar::from(state.lookup_distinct_entry_count as u64),
+            lookup_logup_proof_digest: nova_hash_bytes_to_scalar(
+                "statement-field",
+                "lookup_logup_proof_digest",
+                &state.lookup_logup_proof_digest,
+            ),
+            lookup_logup_tuple_challenge: nova_jolt_field_to_scalar(
+                "lookup_logup_tuple_challenge",
+                state.lookup_logup_tuple_challenge,
+            ),
+            lookup_logup_denominator_challenge: nova_jolt_field_to_scalar(
+                "lookup_logup_denominator_challenge",
+                state.lookup_logup_denominator_challenge,
+            ),
+            lookup_logup_denominator_retry_count: NovaScalar::from(
+                state.lookup_logup_denominator_retry_count as u64,
+            ),
+            lookup_logup_query_sum: nova_jolt_field_to_scalar(
+                "lookup_logup_balanced_sum",
+                state.lookup_logup_query_sum,
+            ),
+            lookup_logup_table_sum: nova_jolt_field_to_scalar(
+                "lookup_logup_balanced_sum",
+                state.lookup_logup_table_sum,
+            ),
             r1cs_rows_checked: NovaScalar::from(state.r1cs_rows_checked as u64),
             r1cs_num_steps: NovaScalar::from(state.r1cs_num_steps as u64),
             r1cs_vk_digest: nova_jolt_field_to_scalar("r1cs_vk_digest", state.r1cs_vk_digest),
@@ -1987,6 +2123,12 @@ impl BlockFoldStatement {
             self.lookup_entry_summaries_digest,
             self.lookup_count,
             self.lookup_distinct_entry_count,
+            self.lookup_logup_proof_digest,
+            self.lookup_logup_tuple_challenge,
+            self.lookup_logup_denominator_challenge,
+            self.lookup_logup_denominator_retry_count,
+            self.lookup_logup_query_sum,
+            self.lookup_logup_table_sum,
             self.r1cs_rows_checked,
             self.r1cs_num_steps,
             self.r1cs_vk_digest,
@@ -2032,6 +2174,21 @@ impl BlockFoldStatement {
                     "lookup_distinct_entry_count",
                     self.lookup_distinct_entry_count,
                 ),
+                ("lookup_logup_proof_digest", self.lookup_logup_proof_digest),
+                (
+                    "lookup_logup_tuple_challenge",
+                    self.lookup_logup_tuple_challenge,
+                ),
+                (
+                    "lookup_logup_denominator_challenge",
+                    self.lookup_logup_denominator_challenge,
+                ),
+                (
+                    "lookup_logup_denominator_retry_count",
+                    self.lookup_logup_denominator_retry_count,
+                ),
+                ("lookup_logup_query_sum", self.lookup_logup_query_sum),
+                ("lookup_logup_table_sum", self.lookup_logup_table_sum),
                 ("r1cs_rows_checked", self.r1cs_rows_checked),
                 ("r1cs_num_steps", self.r1cs_num_steps),
                 ("r1cs_vk_digest", self.r1cs_vk_digest),
@@ -2125,6 +2282,39 @@ impl BlockFoldStatement {
 
     fn lookup_delta(&self) -> NovaScalar {
         self.lookup_fingerprint()
+    }
+
+    fn lookup_logup_fingerprint(&self) -> NovaScalar {
+        nova_transcript_delta(
+            NOVA_TRANSCRIPT_DOMAIN_LOOKUP_LOGUP,
+            [
+                ("lookup_claims_digest", self.lookup_claims_digest),
+                (
+                    "lookup_entry_summaries_digest",
+                    self.lookup_entry_summaries_digest,
+                ),
+                ("lookup_count", self.lookup_count),
+                (
+                    "lookup_distinct_entry_count",
+                    self.lookup_distinct_entry_count,
+                ),
+                ("lookup_logup_proof_digest", self.lookup_logup_proof_digest),
+                (
+                    "lookup_logup_tuple_challenge",
+                    self.lookup_logup_tuple_challenge,
+                ),
+                (
+                    "lookup_logup_denominator_challenge",
+                    self.lookup_logup_denominator_challenge,
+                ),
+                (
+                    "lookup_logup_denominator_retry_count",
+                    self.lookup_logup_denominator_retry_count,
+                ),
+                ("lookup_logup_query_sum", self.lookup_logup_query_sum),
+                ("lookup_logup_table_sum", self.lookup_logup_table_sum),
+            ],
+        )
     }
 
     fn cpu_fingerprint(&self) -> NovaScalar {
@@ -2242,6 +2432,13 @@ struct JoltNovaStepWitness {
     lookup_entry_summaries_digest: NovaScalar,
     lookup_count: NovaScalar,
     lookup_distinct_entry_count: NovaScalar,
+    lookup_logup_proof_digest: NovaScalar,
+    lookup_logup_tuple_challenge: NovaScalar,
+    lookup_logup_denominator_challenge: NovaScalar,
+    lookup_logup_denominator_retry_count: NovaScalar,
+    lookup_logup_query_sum: NovaScalar,
+    lookup_logup_table_sum: NovaScalar,
+    lookup_backend_selector: NovaScalar,
     lookup_claim_fingerprint: NovaScalar,
     r1cs_rows_checked: NovaScalar,
     r1cs_num_steps: NovaScalar,
@@ -2307,6 +2504,13 @@ impl JoltNovaStepWitness {
             lookup_entry_summaries_digest: statement.lookup_entry_summaries_digest,
             lookup_count: statement.lookup_count,
             lookup_distinct_entry_count: statement.lookup_distinct_entry_count,
+            lookup_logup_proof_digest: statement.lookup_logup_proof_digest,
+            lookup_logup_tuple_challenge: statement.lookup_logup_tuple_challenge,
+            lookup_logup_denominator_challenge: statement.lookup_logup_denominator_challenge,
+            lookup_logup_denominator_retry_count: statement.lookup_logup_denominator_retry_count,
+            lookup_logup_query_sum: statement.lookup_logup_query_sum,
+            lookup_logup_table_sum: statement.lookup_logup_table_sum,
+            lookup_backend_selector: subclaim_backend.lookup_backend_selector(),
             lookup_claim_fingerprint: subclaims.lookup,
             r1cs_rows_checked: statement.r1cs_rows_checked,
             r1cs_num_steps: statement.r1cs_num_steps,
@@ -2340,6 +2544,12 @@ impl JoltNovaStepWitness {
             lookup_entry_summaries_digest: self.lookup_entry_summaries_digest,
             lookup_count: self.lookup_count,
             lookup_distinct_entry_count: self.lookup_distinct_entry_count,
+            lookup_logup_proof_digest: self.lookup_logup_proof_digest,
+            lookup_logup_tuple_challenge: self.lookup_logup_tuple_challenge,
+            lookup_logup_denominator_challenge: self.lookup_logup_denominator_challenge,
+            lookup_logup_denominator_retry_count: self.lookup_logup_denominator_retry_count,
+            lookup_logup_query_sum: self.lookup_logup_query_sum,
+            lookup_logup_table_sum: self.lookup_logup_table_sum,
             r1cs_rows_checked: self.r1cs_rows_checked,
             r1cs_num_steps: self.r1cs_num_steps,
             r1cs_vk_digest: self.r1cs_vk_digest,
@@ -2538,6 +2748,41 @@ impl nova_snark::traits::circuit::StepCircuit<NovaScalar> for JoltNovaStepCircui
             cs,
             "lookup distinct entry count",
             self.witness.lookup_distinct_entry_count,
+        )?;
+        let lookup_logup_proof_digest = alloc_nova_witness(
+            cs,
+            "lookup LogUp proof digest",
+            self.witness.lookup_logup_proof_digest,
+        )?;
+        let lookup_logup_tuple_challenge = alloc_nova_witness(
+            cs,
+            "lookup LogUp tuple challenge",
+            self.witness.lookup_logup_tuple_challenge,
+        )?;
+        let lookup_logup_denominator_challenge = alloc_nova_witness(
+            cs,
+            "lookup LogUp denominator challenge",
+            self.witness.lookup_logup_denominator_challenge,
+        )?;
+        let lookup_logup_denominator_retry_count = alloc_nova_witness(
+            cs,
+            "lookup LogUp denominator retry count",
+            self.witness.lookup_logup_denominator_retry_count,
+        )?;
+        let lookup_logup_query_sum = alloc_nova_witness(
+            cs,
+            "lookup LogUp query sum",
+            self.witness.lookup_logup_query_sum,
+        )?;
+        let lookup_logup_table_sum = alloc_nova_witness(
+            cs,
+            "lookup LogUp table sum",
+            self.witness.lookup_logup_table_sum,
+        )?;
+        let lookup_backend_selector = alloc_nova_witness(
+            cs,
+            "lookup backend selector",
+            self.witness.lookup_backend_selector,
         )?;
         let lookup_claim_fingerprint = alloc_nova_witness(
             cs,
@@ -2765,6 +3010,42 @@ impl nova_snark::traits::circuit::StepCircuit<NovaScalar> for JoltNovaStepCircui
                         "lookup_distinct_entry_count",
                     ),
                     lookup_distinct_entry_count.get_variable(),
+                ) + (
+                    nova_transcript_challenge_scalar(
+                        NOVA_TRANSCRIPT_DOMAIN_STATEMENT,
+                        "lookup_logup_proof_digest",
+                    ),
+                    lookup_logup_proof_digest.get_variable(),
+                ) + (
+                    nova_transcript_challenge_scalar(
+                        NOVA_TRANSCRIPT_DOMAIN_STATEMENT,
+                        "lookup_logup_tuple_challenge",
+                    ),
+                    lookup_logup_tuple_challenge.get_variable(),
+                ) + (
+                    nova_transcript_challenge_scalar(
+                        NOVA_TRANSCRIPT_DOMAIN_STATEMENT,
+                        "lookup_logup_denominator_challenge",
+                    ),
+                    lookup_logup_denominator_challenge.get_variable(),
+                ) + (
+                    nova_transcript_challenge_scalar(
+                        NOVA_TRANSCRIPT_DOMAIN_STATEMENT,
+                        "lookup_logup_denominator_retry_count",
+                    ),
+                    lookup_logup_denominator_retry_count.get_variable(),
+                ) + (
+                    nova_transcript_challenge_scalar(
+                        NOVA_TRANSCRIPT_DOMAIN_STATEMENT,
+                        "lookup_logup_query_sum",
+                    ),
+                    lookup_logup_query_sum.get_variable(),
+                ) + (
+                    nova_transcript_challenge_scalar(
+                        NOVA_TRANSCRIPT_DOMAIN_STATEMENT,
+                        "lookup_logup_table_sum",
+                    ),
+                    lookup_logup_table_sum.get_variable(),
                 ) + (
                     nova_transcript_challenge_scalar(
                         NOVA_TRANSCRIPT_DOMAIN_STATEMENT,
@@ -3005,33 +3286,128 @@ impl nova_snark::traits::circuit::StepCircuit<NovaScalar> for JoltNovaStepCircui
         );
 
         cs.enforce(
+            || "lookup backend selector is boolean",
+            |lc| lc + lookup_backend_selector.get_variable(),
+            |lc| lc + lookup_backend_selector.get_variable() - (NovaScalar::from(1), CS::one()),
+            |lc| lc,
+        );
+
+        cs.enforce(
+            || "LogUp query and table sums balance",
+            |lc| lc + lookup_logup_query_sum.get_variable() - lookup_logup_table_sum.get_variable(),
+            |lc| lc + lookup_backend_selector.get_variable(),
+            |lc| lc,
+        );
+
+        cs.enforce(
             || "lookup claim fingerprint binds lookup fields",
             |lc| {
                 lc + (
                     nova_transcript_challenge_scalar(
+                        NOVA_TRANSCRIPT_DOMAIN_LOOKUP_LOGUP,
+                        "lookup_claims_digest",
+                    ) - nova_transcript_challenge_scalar(
                         NOVA_TRANSCRIPT_DOMAIN_LOOKUP,
                         "lookup_claims_digest",
                     ),
                     lookup_claims_digest.get_variable(),
                 ) + (
                     nova_transcript_challenge_scalar(
+                        NOVA_TRANSCRIPT_DOMAIN_LOOKUP_LOGUP,
+                        "lookup_entry_summaries_digest",
+                    ) - nova_transcript_challenge_scalar(
                         NOVA_TRANSCRIPT_DOMAIN_LOOKUP,
                         "lookup_entry_summaries_digest",
                     ),
                     lookup_entry_summaries_digest.get_variable(),
                 ) + (
-                    nova_transcript_challenge_scalar(NOVA_TRANSCRIPT_DOMAIN_LOOKUP, "lookup_count"),
+                    nova_transcript_challenge_scalar(
+                        NOVA_TRANSCRIPT_DOMAIN_LOOKUP_LOGUP,
+                        "lookup_count",
+                    ) - nova_transcript_challenge_scalar(
+                        NOVA_TRANSCRIPT_DOMAIN_LOOKUP,
+                        "lookup_count",
+                    ),
                     lookup_count.get_variable(),
                 ) + (
                     nova_transcript_challenge_scalar(
+                        NOVA_TRANSCRIPT_DOMAIN_LOOKUP_LOGUP,
+                        "lookup_distinct_entry_count",
+                    ) - nova_transcript_challenge_scalar(
                         NOVA_TRANSCRIPT_DOMAIN_LOOKUP,
                         "lookup_distinct_entry_count",
                     ),
                     lookup_distinct_entry_count.get_variable(),
+                ) + (
+                    nova_transcript_challenge_scalar(
+                        NOVA_TRANSCRIPT_DOMAIN_LOOKUP_LOGUP,
+                        "lookup_logup_proof_digest",
+                    ),
+                    lookup_logup_proof_digest.get_variable(),
+                ) + (
+                    nova_transcript_challenge_scalar(
+                        NOVA_TRANSCRIPT_DOMAIN_LOOKUP_LOGUP,
+                        "lookup_logup_tuple_challenge",
+                    ),
+                    lookup_logup_tuple_challenge.get_variable(),
+                ) + (
+                    nova_transcript_challenge_scalar(
+                        NOVA_TRANSCRIPT_DOMAIN_LOOKUP_LOGUP,
+                        "lookup_logup_denominator_challenge",
+                    ),
+                    lookup_logup_denominator_challenge.get_variable(),
+                ) + (
+                    nova_transcript_challenge_scalar(
+                        NOVA_TRANSCRIPT_DOMAIN_LOOKUP_LOGUP,
+                        "lookup_logup_denominator_retry_count",
+                    ),
+                    lookup_logup_denominator_retry_count.get_variable(),
+                ) + (
+                    nova_transcript_challenge_scalar(
+                        NOVA_TRANSCRIPT_DOMAIN_LOOKUP_LOGUP,
+                        "lookup_logup_query_sum",
+                    ),
+                    lookup_logup_query_sum.get_variable(),
+                ) + (
+                    nova_transcript_challenge_scalar(
+                        NOVA_TRANSCRIPT_DOMAIN_LOOKUP_LOGUP,
+                        "lookup_logup_table_sum",
+                    ),
+                    lookup_logup_table_sum.get_variable(),
                 )
             },
-            |lc| lc + CS::one(),
-            |lc| lc + lookup_claim_fingerprint.get_variable(),
+            |lc| lc + lookup_backend_selector.get_variable(),
+            |lc| {
+                lc + lookup_claim_fingerprint.get_variable()
+                    - (
+                        nova_transcript_challenge_scalar(
+                            NOVA_TRANSCRIPT_DOMAIN_LOOKUP,
+                            "lookup_claims_digest",
+                        ),
+                        lookup_claims_digest.get_variable(),
+                    )
+                    - (
+                        nova_transcript_challenge_scalar(
+                            NOVA_TRANSCRIPT_DOMAIN_LOOKUP,
+                            "lookup_entry_summaries_digest",
+                        ),
+                        lookup_entry_summaries_digest.get_variable(),
+                    )
+                    - (
+                        nova_transcript_challenge_scalar(
+                            NOVA_TRANSCRIPT_DOMAIN_LOOKUP,
+                            "lookup_count",
+                        ),
+                        lookup_count.get_variable(),
+                    )
+                    - (
+                        nova_transcript_challenge_scalar(
+                            NOVA_TRANSCRIPT_DOMAIN_LOOKUP,
+                            "lookup_distinct_entry_count",
+                        ),
+                        lookup_distinct_entry_count.get_variable(),
+                    )
+            },
         );
 
         cs.enforce(
@@ -3330,9 +3706,17 @@ where
 fn nova_subclaim_backend_from_config(
     config: &NovaFoldConfig,
     block_index: usize,
-) -> Result<TranscriptSubclaimFoldingBackend, BlockTraceError> {
+) -> Result<ConfiguredSubclaimFoldingBackend, BlockTraceError> {
     ensure_supported_nova_subclaim_backend(config, block_index)?;
-    Ok(TranscriptSubclaimFoldingBackend)
+    match config.subclaim_backend_name {
+        NOVA_TRANSCRIPT_SUBCLAIM_BACKEND_NAME => Ok(ConfiguredSubclaimFoldingBackend::Transcript(
+            TranscriptSubclaimFoldingBackend,
+        )),
+        NOVA_LOGUP_SUBCLAIM_BACKEND_NAME => Ok(ConfiguredSubclaimFoldingBackend::LogUp(
+            LogUpSubclaimFoldingBackend,
+        )),
+        _ => unreachable!("subclaim backend was validated above"),
+    }
 }
 
 #[cfg(feature = "nova")]
@@ -5335,6 +5719,11 @@ pub fn verify_block_lookup_claim(
 
     let expected = build_block_lookup_claim_unchecked(block, io_claims);
     if lookup_claim != &expected {
+        if lookup_claim.logup_proof != expected.logup_proof {
+            return Err(BlockTraceError::BlockLookupLogUpProofMismatch {
+                block_index: block.block_index,
+            });
+        }
         return Err(BlockTraceError::BlockLookupClaimMismatch {
             block_index: block.block_index,
         });
@@ -5376,6 +5765,7 @@ where
     let register_claim = &bundle.register_claim;
     let ram_claim = &bundle.ram_claim;
     let lookup_claim = &bundle.lookup_claim;
+    let logup_proof = &lookup_claim.logup_proof;
 
     let mut state = FoldableBlockState {
         block_index: public_input.block_index,
@@ -5398,6 +5788,12 @@ where
         lookup_entry_summaries_digest: lookup_claim.entry_summaries_digest,
         lookup_count: lookup_claim.lookup_count,
         lookup_distinct_entry_count: lookup_claim.distinct_lookup_entry_count,
+        lookup_logup_proof_digest: logup_proof.proof_digest,
+        lookup_logup_tuple_challenge: logup_proof.tuple_challenge,
+        lookup_logup_denominator_challenge: logup_proof.denominator_challenge,
+        lookup_logup_denominator_retry_count: logup_proof.denominator_retry_count,
+        lookup_logup_query_sum: logup_proof.query_sum,
+        lookup_logup_table_sum: logup_proof.table_sum,
         r1cs_rows_checked: cpu_proof.r1cs_rows_checked,
         r1cs_num_steps: cpu_proof.r1cs_num_steps,
         r1cs_vk_digest: cpu_proof.r1cs_vk_digest,
@@ -5478,6 +5874,15 @@ fn build_block_lookup_claim_unchecked(
     io_claims: &BlockIOClaims,
 ) -> BlockLookupClaim {
     let entry_summaries = lookup_entry_summaries(&io_claims.lookup_claims);
+    let claims_digest = digest_lookup_claims(&io_claims.lookup_claims);
+    let entry_summaries_digest = digest_lookup_entry_summaries(&entry_summaries);
+    let logup_proof = build_block_logup_proof(
+        block,
+        &io_claims.lookup_claims,
+        &entry_summaries,
+        claims_digest,
+        entry_summaries_digest,
+    );
 
     BlockLookupClaim {
         block_index: block.block_index,
@@ -5485,8 +5890,9 @@ fn build_block_lookup_claim_unchecked(
         active_cycles: block.active_cycles,
         lookup_count: io_claims.lookup_claims.len(),
         distinct_lookup_entry_count: entry_summaries.len(),
-        claims_digest: digest_lookup_claims(&io_claims.lookup_claims),
-        entry_summaries_digest: digest_lookup_entry_summaries(&entry_summaries),
+        claims_digest,
+        entry_summaries_digest,
+        logup_proof,
     }
 }
 
@@ -5541,7 +5947,7 @@ where
     F: JoltField,
 {
     let mut hasher = Sha3_256::new();
-    hasher.update(b"JOLT_NOVA_FOLDABLE_BLOCK_STATE_V2");
+    hasher.update(b"JOLT_NOVA_FOLDABLE_BLOCK_STATE_V3");
     update_usize(&mut hasher, state.block_index);
     update_usize(&mut hasher, state.global_cycle_start);
     update_usize(&mut hasher, state.global_cycle_end);
@@ -5562,6 +5968,12 @@ where
     hasher.update(state.lookup_entry_summaries_digest);
     update_usize(&mut hasher, state.lookup_count);
     update_usize(&mut hasher, state.lookup_distinct_entry_count);
+    hasher.update(state.lookup_logup_proof_digest);
+    update_field(&mut hasher, state.lookup_logup_tuple_challenge);
+    update_field(&mut hasher, state.lookup_logup_denominator_challenge);
+    update_usize(&mut hasher, state.lookup_logup_denominator_retry_count);
+    update_field(&mut hasher, state.lookup_logup_query_sum);
+    update_field(&mut hasher, state.lookup_logup_table_sum);
     update_usize(&mut hasher, state.r1cs_rows_checked);
     update_usize(&mut hasher, state.r1cs_num_steps);
     update_field(&mut hasher, state.r1cs_vk_digest);
@@ -5933,6 +6345,169 @@ fn digest_lookup_entry_summaries(summaries: &[LookupEntrySummary]) -> [u8; 32] {
     finalize_digest(hasher)
 }
 
+fn build_block_logup_proof(
+    block: &TraceBlock,
+    claims: &[LookupClaim],
+    query_entry_summaries: &[LookupEntrySummary],
+    claims_digest: [u8; 32],
+    entry_summaries_digest: [u8; 32],
+) -> BlockLogUpProof {
+    let table_entry_summaries = lookup_entry_summaries_for_block(block);
+    debug_assert_eq!(query_entry_summaries, table_entry_summaries);
+
+    let mut tuple_challenge = derive_logup_challenge(
+        b"tuple-compression",
+        block,
+        claims_digest,
+        entry_summaries_digest,
+    );
+    if tuple_challenge.is_zero() {
+        tuple_challenge = <ark_bn254::Fr as JoltField>::from_u64(1);
+    }
+
+    let query_values = claims
+        .iter()
+        .map(|claim| {
+            compress_logup_entry(
+                tuple_challenge,
+                claim.lookup_index,
+                claim.left_lookup_operand,
+                claim.right_lookup_operand,
+                claim.lookup_output,
+            )
+        })
+        .collect::<Vec<_>>();
+    let table_values = table_entry_summaries
+        .iter()
+        .map(|summary| {
+            compress_logup_entry(
+                tuple_challenge,
+                summary.lookup_index,
+                summary.left_lookup_operand,
+                summary.right_lookup_operand,
+                summary.lookup_output,
+            )
+        })
+        .collect::<Vec<_>>();
+
+    let base_denominator_challenge =
+        derive_logup_challenge(b"denominator", block, claims_digest, entry_summaries_digest);
+    let mut denominator_retry_count = 0usize;
+    let denominator_challenge = loop {
+        let candidate = base_denominator_challenge
+            + <ark_bn254::Fr as JoltField>::from_u64(denominator_retry_count as u64);
+        let has_zero_denominator = query_values
+            .iter()
+            .chain(table_values.iter())
+            .any(|value| (candidate + value).is_zero());
+        if !has_zero_denominator {
+            break candidate;
+        }
+        denominator_retry_count += 1;
+    };
+
+    let query_denominators = query_values
+        .iter()
+        .map(|value| denominator_challenge + value)
+        .collect::<Vec<_>>();
+    let table_denominators = table_values
+        .iter()
+        .map(|value| denominator_challenge + value)
+        .collect::<Vec<_>>();
+    let query_weights = vec![1usize; query_denominators.len()];
+    let table_weights = table_entry_summaries
+        .iter()
+        .map(|summary| summary.count)
+        .collect::<Vec<_>>();
+    let query_sum = logup_weighted_inverse_sum(&query_denominators, &query_weights);
+    let table_sum = logup_weighted_inverse_sum(&table_denominators, &table_weights);
+
+    let mut proof = BlockLogUpProof {
+        tuple_challenge,
+        denominator_challenge,
+        denominator_retry_count,
+        query_sum,
+        table_sum,
+        query_count: claims.len(),
+        table_distinct_entry_count: table_entry_summaries.len(),
+        proof_digest: [0u8; 32],
+    };
+    proof.proof_digest = digest_block_logup_proof(&proof);
+    proof
+}
+
+fn derive_logup_challenge(
+    label: &[u8],
+    block: &TraceBlock,
+    claims_digest: [u8; 32],
+    entry_summaries_digest: [u8; 32],
+) -> ark_bn254::Fr {
+    let mut hasher = Sha3_256::new();
+    hasher.update(b"JOLT_NOVA_BLOCK_LOGUP_CHALLENGE_V1");
+    update_usize(&mut hasher, label.len());
+    hasher.update(label);
+    update_usize(&mut hasher, block.block_index);
+    update_usize(&mut hasher, block.global_cycle_start);
+    update_usize(&mut hasher, block.active_cycles);
+    hasher.update(claims_digest);
+    hasher.update(entry_summaries_digest);
+    <ark_bn254::Fr as JoltField>::from_bytes(&finalize_digest(hasher))
+}
+
+fn compress_logup_entry(
+    tuple_challenge: ark_bn254::Fr,
+    lookup_index: u128,
+    left_lookup_operand: u64,
+    right_lookup_operand: u128,
+    lookup_output: u64,
+) -> ark_bn254::Fr {
+    let alpha_squared = tuple_challenge.square();
+    let alpha_cubed = alpha_squared * tuple_challenge;
+    <ark_bn254::Fr as JoltField>::from_u64(left_lookup_operand)
+        + tuple_challenge * <ark_bn254::Fr as JoltField>::from_u128(right_lookup_operand)
+        + alpha_squared * <ark_bn254::Fr as JoltField>::from_u128(lookup_index)
+        + alpha_cubed * <ark_bn254::Fr as JoltField>::from_u64(lookup_output)
+}
+
+fn logup_weighted_inverse_sum(denominators: &[ark_bn254::Fr], weights: &[usize]) -> ark_bn254::Fr {
+    debug_assert_eq!(denominators.len(), weights.len());
+    if denominators.is_empty() {
+        return ark_bn254::Fr::zero();
+    }
+
+    let one = <ark_bn254::Fr as JoltField>::from_u64(1);
+    let mut prefixes = Vec::with_capacity(denominators.len());
+    let mut product = one;
+    for denominator in denominators {
+        prefixes.push(product);
+        product *= denominator;
+    }
+
+    let mut inverse_suffix = product
+        .inverse()
+        .expect("LogUp denominator product must be non-zero");
+    let mut sum = ark_bn254::Fr::zero();
+    for index in (0..denominators.len()).rev() {
+        let denominator_inverse = inverse_suffix * prefixes[index];
+        inverse_suffix *= denominators[index];
+        sum += denominator_inverse * <ark_bn254::Fr as JoltField>::from_u64(weights[index] as u64);
+    }
+    sum
+}
+
+fn digest_block_logup_proof(proof: &BlockLogUpProof) -> [u8; 32] {
+    let mut hasher = Sha3_256::new();
+    hasher.update(b"JOLT_NOVA_BLOCK_LOGUP_PROOF_V1");
+    update_field(&mut hasher, proof.tuple_challenge);
+    update_field(&mut hasher, proof.denominator_challenge);
+    update_usize(&mut hasher, proof.denominator_retry_count);
+    update_field(&mut hasher, proof.query_sum);
+    update_field(&mut hasher, proof.table_sum);
+    update_usize(&mut hasher, proof.query_count);
+    update_usize(&mut hasher, proof.table_distinct_entry_count);
+    finalize_digest(hasher)
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 struct LookupEntryKey {
     lookup_index: u128,
@@ -5981,6 +6556,31 @@ fn lookup_entry_summaries(claims: &[LookupClaim]) -> Vec<LookupEntrySummary> {
         )
     });
     summaries
+}
+
+fn lookup_entry_summaries_for_block(block: &TraceBlock) -> Vec<LookupEntrySummary> {
+    let claims = block
+        .cycles
+        .iter()
+        .enumerate()
+        .map(|(local_cycle, cycle)| {
+            let (left_instruction_input, right_instruction_input) =
+                LookupQuery::<XLEN>::to_instruction_inputs(cycle);
+            let (left_lookup_operand, right_lookup_operand) =
+                LookupQuery::<XLEN>::to_lookup_operands(cycle);
+            LookupClaim {
+                local_cycle,
+                global_cycle: block.global_cycle_start + local_cycle,
+                left_instruction_input,
+                right_instruction_input,
+                left_lookup_operand,
+                right_lookup_operand,
+                lookup_index: LookupQuery::<XLEN>::to_lookup_index(cycle),
+                lookup_output: LookupQuery::<XLEN>::to_lookup_output(cycle),
+            }
+        })
+        .collect::<Vec<_>>();
+    lookup_entry_summaries(&claims)
 }
 
 fn append_usize(output: &mut Vec<u8>, value: usize) {
@@ -6781,6 +7381,9 @@ pub enum BlockTraceError {
     BlockLookupClaimMismatch {
         block_index: usize,
     },
+    BlockLookupLogUpProofMismatch {
+        block_index: usize,
+    },
     BlockLookupClaimChainLengthMismatch {
         blocks: usize,
         io_claims: usize,
@@ -7034,6 +7637,10 @@ impl fmt::Display for BlockTraceError {
             Self::BlockLookupClaimMismatch { block_index } => write!(
                 f,
                 "block lookup accumulator claim does not match block {block_index}"
+            ),
+            Self::BlockLookupLogUpProofMismatch { block_index } => write!(
+                f,
+                "block LogUp proof does not match lookup claims for block {block_index}"
             ),
             Self::BlockLookupClaimChainLengthMismatch {
                 blocks,
@@ -7912,6 +8519,13 @@ mod tests {
         assert_eq!(lookup_claim.active_cycles, 3);
         assert_eq!(lookup_claim.lookup_count, 3);
         assert_eq!(lookup_claim.distinct_lookup_entry_count, 1);
+        assert_eq!(lookup_claim.logup_proof.query_count, 3);
+        assert_eq!(lookup_claim.logup_proof.table_distinct_entry_count, 1);
+        assert_eq!(
+            lookup_claim.logup_proof.query_sum,
+            lookup_claim.logup_proof.table_sum
+        );
+        assert_ne!(lookup_claim.logup_proof.proof_digest, [0u8; 32]);
         verify_block_lookup_claim(&block, &io_claims, &lookup_claim).unwrap();
     }
 
@@ -7938,6 +8552,19 @@ mod tests {
         assert_eq!(
             verify_block_lookup_claim(&block, &io_claims, &lookup_claim).unwrap_err(),
             BlockTraceError::BlockLookupClaimMismatch { block_index: 0 }
+        );
+    }
+
+    #[test]
+    fn block_lookup_claim_verifier_rejects_tampered_logup_sum() {
+        let block = trace_block(0, boundary(0, 7), boundary(3, 7));
+        let io_claims = extract_block_io_claims(&block).unwrap();
+        let mut lookup_claim = build_block_lookup_claim(&block, &io_claims).unwrap();
+        lookup_claim.logup_proof.query_sum += <ark_bn254::Fr as JoltField>::from_u64(1);
+
+        assert_eq!(
+            verify_block_lookup_claim(&block, &io_claims, &lookup_claim).unwrap_err(),
+            BlockTraceError::BlockLookupLogUpProofMismatch { block_index: 0 }
         );
     }
 
@@ -9536,6 +10163,85 @@ mod tests {
 
     #[cfg(feature = "nova")]
     #[test]
+    fn nova_configured_logup_backend_satisfies_internal_balance_relation() {
+        let bytecode = BytecodePreprocessing::default();
+        let block = trace_block(0, boundary(0, 0), boundary(4, 0));
+        let prover = BlockProofBundleProver::<_, ark_bn254::Fr>::new([9u8; 32]);
+        let bundle = prover.prove_block(&bytecode, &block, None).unwrap();
+        let fold_input = build_block_fold_input(&bundle);
+        let statement = BlockFoldStatement::from_fold_input(&fold_input);
+        let config = NovaFoldConfig {
+            subclaim_backend_name: NOVA_LOGUP_SUBCLAIM_BACKEND_NAME,
+            ..NovaFoldConfig::default()
+        };
+        let backend =
+            nova_subclaim_backend_from_config(&config, fold_input.state.block_index).unwrap();
+        let witness =
+            JoltNovaStepWitness::from_fold_input_with_subclaim_backend(&fold_input, &backend);
+        let circuit = nova_step_circuit_for_fold_input_with_subclaim_backend(&fold_input, &backend);
+        let cs = synthesize_nova_step_circuit_for_test(&circuit);
+
+        assert_eq!(backend.name(), NOVA_LOGUP_SUBCLAIM_BACKEND_NAME);
+        assert_eq!(backend.lookup_backend_selector(), NovaScalar::from(1));
+        assert_eq!(witness.lookup_delta(), statement.lookup_logup_fingerprint());
+        assert_eq!(
+            witness.lookup_logup_query_sum,
+            witness.lookup_logup_table_sum
+        );
+        assert!(
+            cs.is_satisfied(),
+            "unsatisfied constraint: {:?}",
+            cs.which_is_unsatisfied()
+        );
+    }
+
+    #[cfg(feature = "nova")]
+    #[test]
+    fn nova_logup_backend_rejects_unbalanced_fractional_sum() {
+        let bytecode = BytecodePreprocessing::default();
+        let block = trace_block(0, boundary(0, 0), boundary(4, 0));
+        let prover = BlockProofBundleProver::<_, ark_bn254::Fr>::new([9u8; 32]);
+        let bundle = prover.prove_block(&bytecode, &block, None).unwrap();
+        let fold_input = build_block_fold_input(&bundle);
+        let mut statement = BlockFoldStatement::from_fold_input(&fold_input);
+        statement.lookup_logup_query_sum += NovaScalar::from(1);
+        let witness = JoltNovaStepWitness::from_statement_with_subclaim_backend(
+            statement,
+            &LogUpSubclaimFoldingBackend,
+        );
+        let circuit = JoltNovaStepCircuit { witness };
+        let cs = synthesize_nova_step_circuit_for_test(&circuit);
+
+        assert_eq!(
+            cs.which_is_unsatisfied(),
+            Some("LogUp query and table sums balance")
+        );
+    }
+
+    #[cfg(feature = "nova")]
+    #[test]
+    fn nova_lookup_backend_selector_rejects_non_boolean_value() {
+        let bytecode = BytecodePreprocessing::default();
+        let block = trace_block(0, boundary(0, 0), boundary(4, 0));
+        let prover = BlockProofBundleProver::<_, ark_bn254::Fr>::new([9u8; 32]);
+        let bundle = prover.prove_block(&bytecode, &block, None).unwrap();
+        let fold_input = build_block_fold_input(&bundle);
+        let mut witness = JoltNovaStepWitness::from_fold_input_with_subclaim_backend(
+            &fold_input,
+            &LogUpSubclaimFoldingBackend,
+        );
+        witness.lookup_backend_selector = NovaScalar::from(2);
+        let circuit = JoltNovaStepCircuit { witness };
+        let cs = synthesize_nova_step_circuit_for_test(&circuit);
+
+        assert_eq!(
+            cs.which_is_unsatisfied(),
+            Some("lookup backend selector is boolean")
+        );
+    }
+
+    #[cfg(feature = "nova")]
+    #[test]
     fn nova_step_circuit_satisfies_statement_digest_binding() {
         let bytecode = BytecodePreprocessing::default();
         let block = trace_block(0, boundary(0, 0), boundary(4, 0));
@@ -10160,6 +10866,38 @@ mod tests {
             &NovaFoldingBackend::default(),
         )
         .unwrap();
+    }
+
+    #[cfg(feature = "nova")]
+    #[test]
+    fn block_proof_pipeline_with_logup_backend_proves_and_verifies_blocks() {
+        let bytecode = BytecodePreprocessing::default();
+        let block0 = trace_block(0, boundary(0, 0), boundary(2, 0));
+        let block1 = trace_block(1, block0.end_state.clone(), boundary(4, 0));
+        let backend = NovaFoldingBackend::new(NovaFoldConfig {
+            subclaim_backend_name: NOVA_LOGUP_SUBCLAIM_BACKEND_NAME,
+            ..NovaFoldConfig::default()
+        });
+        let pipeline = BlockProofPipeline::<_, ark_bn254::Fr, NovaFoldingBackend>::with_backend(
+            [9u8; 32],
+            backend.clone(),
+        );
+
+        let output = pipeline
+            .prove_blocks(&bytecode, &[block0.clone(), block1.clone()])
+            .unwrap();
+
+        assert_eq!(
+            output.accumulator.config.subclaim_backend_name,
+            NOVA_LOGUP_SUBCLAIM_BACKEND_NAME
+        );
+        assert!(output
+            .bundles
+            .iter()
+            .all(|bundle| bundle.lookup_claim.logup_proof.query_sum
+                == bundle.lookup_claim.logup_proof.table_sum));
+        verify_block_proof_pipeline_with_backend(&bytecode, &[block0, block1], &output, &backend)
+            .unwrap();
     }
 
     #[test]

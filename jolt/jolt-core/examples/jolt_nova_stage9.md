@@ -171,8 +171,78 @@ Stage 9.3 tests cover JSON backward compatibility, binary real-ELF and
 per-block digest corruption, truncated payloads, trailing bytes, and the binary
 trace path through Nova folding and the Spartan report.
 
+## Stage 9.4: real block LogUp relation
+
+Stage 9.4 replaces the former LogUp naming/interface placeholder with an actual
+finite-field fractional-sum relation. For every block, the prover now:
+
+1. derives a domain-separated Fiat-Shamir tuple-compression challenge from the
+   block identity and canonical lookup digests;
+2. compresses each tuple
+   `(left_operand, right_operand, lookup_index, lookup_output)` into one BN254
+   field element;
+3. derives a separate denominator challenge `beta`;
+4. deterministically increments `beta` if any denominator is zero;
+5. computes the query-side sum
+   `sum_i 1 / (beta + query_i)`;
+6. independently reconstructs executed table entries from the trace cycles and
+   computes `sum_j multiplicity_j / (beta + table_j)`;
+7. binds the challenges, retry count, cardinalities, sums, and a
+   domain-separated proof digest into `BlockLookupClaim` and
+   `FoldableBlockState`.
+
+The implementation uses batch inversion, so each side needs one field inversion
+instead of one inversion per lookup.
+
+The Nova step circuit supports two fixed-shape lookup subclaim backends:
+
+- `transcript` retains the Stage 6 digest/count fingerprint baseline;
+- `log-up` selects `logup-subclaim-v1`.
+
+The circuit constrains the selector to be Boolean. With LogUp selected, it
+enforces equality of the query and table fractional sums and selects a
+LogUp-specific fingerprint that includes every challenge and proof field. The
+selected fingerprint advances both the lookup accumulator and semantic
+accumulator, so it is covered by the recursive Nova proof and final Spartan
+proof.
+
+Run the real LogUp path with:
+
+```text
+cargo run --release -p jolt-core --no-default-features --features nova \
+  --example jolt_nova_final_proof_size_benchmark -- \
+  --trace-source fixture \
+  --fixture cpu-lookup-64k \
+  --lookup-backend log-up \
+  --trace-output benchmark-runs/jolt-nova/cpu-lookup-64k.trace.bin \
+  --trace-block-size 1024 \
+  --block-counts 1,4,16,49 \
+  --measurement-runs 5 \
+  --output benchmark-runs/jolt-nova/cpu-lookup-64k.logup.report.json
+```
+
+The manifest, single-run performance artifact, and aggregate baseline record
+the selected lookup backend. Baseline comparison rejects results from different
+backends. Their schemas advance to runner manifest v5, performance baseline v2,
+and multi-run baseline v2.
+
+### Security boundary
+
+This is a real LogUp multiset equality over the executed block tuples, not a
+renamed transcript fingerprint. The host block verifier recomputes the
+challenges and both fractional sums, and Nova internally enforces the selected
+sum equality and binds the resulting proof.
+
+It is not yet a replacement for the complete Jolt instruction-lookup polynomial
+commitment argument: the full virtual table commitment, opening proofs, and
+sumcheck reduction still belong to Jolt's main lookup proof. Connecting those
+commitments directly to each folded block remains later Stage 9 work and is
+required before describing the experimental block pipeline as an independent
+production lookup proof.
+
 ## Remaining Stage 9 work
 
-Stage 9.3 completes versioned per-block binary trace storage. Later Stage 9 work
-will address real LogUp integration, per-relation profiling, fully streaming
-trace-to-fold execution, and adversarial soundness review.
+Stage 9.4 completes the real block-level LogUp arithmetic and its Nova binding.
+Later Stage 9 work will connect full Jolt lookup commitments, build controlled
+LogUp/Lasso comparisons, add per-relation profiling, finish streaming
+trace-to-fold execution, and perform adversarial soundness review.
