@@ -706,14 +706,33 @@ yet execute the BN254 sumcheck, Dory opening, or Spartan verifier equations
 inside the Pallas Nova circuit. The complete host-side Jolt verifier remains
 the source of acceptance for the capsule.
 
+## Stage 9.15: BlindFold/ZK receipt capsule
+
+Stage 9.15 adds the privacy-preserving receipt surface for Jolt's ZK proof
+path. `VerifiedJoltLookupProofReceipt` now records whether the accepted proof
+was verified in ZK mode and binds a fixed-width digest of the underlying
+`BlindFoldProof`. The new `VerifiedJoltBlindFoldReceipt` is a compact
+counterpart to the non-ZK receipt: it commits to the accepted lookup receipt,
+the verifier-stage relation, the recursive transcript root, and the BlindFold
+proof digest, without exposing any hidden opening claims.
+
+The block/Nova pipeline now carries the ZK-mode bit and BlindFold-receipt
+digest explicitly, so recursive folding can distinguish the privacy-preserving
+path from the clear opening path while still binding the accepted host-side
+verifier output.
+
+### Security boundary
+
+This stage still does not reconstruct the opening claims in ZK mode. It
+introduces a fixed-width, privacy-preserving receipt capsule that can be bound
+recursively, but the non-ZK opening extraction path remains separate.
+
 ## Remaining Stage 9 work
 
-After Stage 9.14, the main cryptographic gaps are:
+After Stage 9.15, the main cryptographic gaps are:
 
 - replace digest-only recursive verifier capsule transitions with in-circuit
   verifier gadgets;
-- derive a privacy-preserving equivalent receipt from the BlindFold/ZK proof
-  path;
 - build controlled Lasso/LogUp comparisons and perform adversarial soundness
   review;
 - add per-relation profiling and finish streaming trace-to-fold execution.

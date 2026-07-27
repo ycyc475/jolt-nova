@@ -81,6 +81,8 @@ pub struct VerifiedJoltLookupProofReceipt {
     version: u16,
     trace_length: u64,
     commitment_count: u64,
+    zk_mode: bool,
+    blindfold_proof_digest: [u8; 32],
     preprocessing_digest: [u8; 32],
     verifier_setup_digest: [u8; 32],
     public_io_digest: [u8; 32],
@@ -102,7 +104,7 @@ pub struct VerifiedJoltLookupProofReceipt {
 }
 
 impl VerifiedJoltLookupProofReceipt {
-    pub const VERSION: u16 = 2;
+    pub const VERSION: u16 = 3;
     pub const VERIFIER_STAGE_RELATION_COUNT: usize = 11;
 
     pub fn trace_length(&self) -> usize {
@@ -111,6 +113,14 @@ impl VerifiedJoltLookupProofReceipt {
 
     pub fn commitment_count(&self) -> usize {
         self.commitment_count as usize
+    }
+
+    pub fn zk_mode(&self) -> bool {
+        self.zk_mode
+    }
+
+    pub fn blindfold_proof_digest(&self) -> [u8; 32] {
+        self.blindfold_proof_digest
     }
 
     pub fn preprocessing_digest(&self) -> [u8; 32] {
@@ -187,10 +197,12 @@ impl VerifiedJoltLookupProofReceipt {
 
     pub fn verifier_stage_relation_digest(&self) -> [u8; 32] {
         let mut hasher = Sha3_256::new();
-        hasher.update(b"jolt-nova/verifier-stage-relation-capsule/v1");
+        hasher.update(b"jolt-nova/verifier-stage-relation-capsule/v2");
         hasher.update(self.version.to_le_bytes());
         hasher.update(self.trace_length.to_le_bytes());
         hasher.update(self.commitment_count.to_le_bytes());
+        hasher.update([u8::from(self.zk_mode)]);
+        hasher.update(self.blindfold_proof_digest);
         hasher.update(self.preprocessing_digest);
         hasher.update(self.verifier_setup_digest);
         hasher.update(self.public_io_digest);
@@ -218,8 +230,9 @@ impl VerifiedJoltLookupProofReceipt {
     pub fn recursive_transcript_stage_digests(&self) -> [[u8; 32]; 11] {
         [
             digest_bytes(
-                b"jolt-nova/verifier-transcript-preamble/v1",
+                b"jolt-nova/verifier-transcript-preamble/v2",
                 &[
+                    self.proof_mode_digest(),
                     self.preprocessing_digest,
                     self.verifier_setup_digest,
                     self.public_io_digest,
@@ -276,6 +289,12 @@ impl VerifiedJoltLookupProofReceipt {
         RecursiveVerifierTranscriptCapsule::from_receipt(self)
     }
 
+    /// Returns a fixed-width privacy-preserving BlindFold receipt when the
+    /// accepted proof uses Jolt's ZK proof format.
+    pub fn blindfold_receipt(&self) -> Option<VerifiedJoltBlindFoldReceipt> {
+        VerifiedJoltBlindFoldReceipt::from_lookup_receipt(self)
+    }
+
     #[cfg(test)]
     pub(crate) fn new_for_test(seed: u8, trace_length: usize) -> Self {
         let digest = |domain: u8| [seed.wrapping_add(domain); 32];
@@ -283,6 +302,8 @@ impl VerifiedJoltLookupProofReceipt {
             version: Self::VERSION,
             trace_length: trace_length as u64,
             commitment_count: 4,
+            zk_mode: false,
+            blindfold_proof_digest: [0; 32],
             preprocessing_digest: digest(1),
             verifier_setup_digest: digest(2),
             public_io_digest: digest(3),
@@ -306,12 +327,23 @@ impl VerifiedJoltLookupProofReceipt {
         receipt
     }
 
+    #[cfg(test)]
+    pub(crate) fn new_zk_for_test(seed: u8, trace_length: usize) -> Self {
+        let mut receipt = Self::new_for_test(seed, trace_length);
+        receipt.zk_mode = true;
+        receipt.blindfold_proof_digest = [seed.wrapping_add(18); 32];
+        receipt.receipt_digest = receipt.compute_digest();
+        receipt
+    }
+
     fn compute_digest(&self) -> [u8; 32] {
         let mut hasher = Sha3_256::new();
-        hasher.update(b"jolt-nova/verified-jolt-verifier-transcript-receipt/v2");
+        hasher.update(b"jolt-nova/verified-jolt-verifier-transcript-receipt/v3");
         hasher.update(self.version.to_le_bytes());
         hasher.update(self.trace_length.to_le_bytes());
         hasher.update(self.commitment_count.to_le_bytes());
+        hasher.update([u8::from(self.zk_mode)]);
+        hasher.update(self.blindfold_proof_digest);
         hasher.update(self.preprocessing_digest);
         hasher.update(self.verifier_setup_digest);
         hasher.update(self.public_io_digest);
@@ -329,6 +361,14 @@ impl VerifiedJoltLookupProofReceipt {
         hasher.update(self.stage7_sumcheck_digest);
         hasher.update(self.joint_opening_proof_digest);
         hasher.update(self.full_proof_digest);
+        hasher.finalize().into()
+    }
+
+    fn proof_mode_digest(&self) -> [u8; 32] {
+        let mut hasher = Sha3_256::new();
+        hasher.update(b"jolt-nova/verified-jolt-proof-mode/v1");
+        hasher.update([u8::from(self.zk_mode)]);
+        hasher.update(self.blindfold_proof_digest);
         hasher.finalize().into()
     }
 }
@@ -519,14 +559,109 @@ impl RecursiveVerifierTranscriptCapsule {
     }
 }
 
+/// A fixed-width receipt for Jolt's BlindFold/ZK verifier path.
+///
+/// It binds to an accepted `VerifiedJoltLookupProofReceipt` and to the
+/// BlindFold proof digest without exposing hidden opening claims. This is the
+/// Stage 9.15 privacy-preserving counterpart to the non-ZK opening-heavy
+/// receipt surface.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct VerifiedJoltBlindFoldReceipt {
+    version: u16,
+    trace_length: u64,
+    commitment_count: u64,
+    lookup_receipt_digest: [u8; 32],
+    verifier_stage_relation_digest: [u8; 32],
+    recursive_transcript_root: [u8; 32],
+    blindfold_proof_digest: [u8; 32],
+    receipt_digest: [u8; 32],
+}
+
+impl VerifiedJoltBlindFoldReceipt {
+    pub const VERSION: u16 = 1;
+
+    pub fn from_lookup_receipt(receipt: &VerifiedJoltLookupProofReceipt) -> Option<Self> {
+        if !receipt.zk_mode() {
+            return None;
+        }
+
+        let capsule = receipt.recursive_transcript_capsule();
+        let mut blindfold_receipt = Self {
+            version: Self::VERSION,
+            trace_length: receipt.trace_length as u64,
+            commitment_count: receipt.commitment_count as u64,
+            lookup_receipt_digest: receipt.digest(),
+            verifier_stage_relation_digest: receipt.verifier_stage_relation_digest(),
+            recursive_transcript_root: capsule.transcript_root(),
+            blindfold_proof_digest: receipt.blindfold_proof_digest(),
+            receipt_digest: [0; 32],
+        };
+        blindfold_receipt.receipt_digest = blindfold_receipt.compute_digest();
+        Some(blindfold_receipt)
+    }
+
+    pub fn trace_length(&self) -> usize {
+        self.trace_length as usize
+    }
+
+    pub fn commitment_count(&self) -> usize {
+        self.commitment_count as usize
+    }
+
+    pub fn lookup_receipt_digest(&self) -> [u8; 32] {
+        self.lookup_receipt_digest
+    }
+
+    pub fn verifier_stage_relation_digest(&self) -> [u8; 32] {
+        self.verifier_stage_relation_digest
+    }
+
+    pub fn recursive_transcript_root(&self) -> [u8; 32] {
+        self.recursive_transcript_root
+    }
+
+    pub fn blindfold_proof_digest(&self) -> [u8; 32] {
+        self.blindfold_proof_digest
+    }
+
+    pub fn digest(&self) -> [u8; 32] {
+        self.receipt_digest
+    }
+
+    pub fn verify_against(&self, receipt: &VerifiedJoltLookupProofReceipt) -> bool {
+        Self::from_lookup_receipt(receipt)
+            .map(|expected| expected == *self)
+            .unwrap_or(false)
+    }
+
+    fn compute_digest(&self) -> [u8; 32] {
+        let mut hasher = Sha3_256::new();
+        hasher.update(b"jolt-nova/verified-jolt-blindfold-receipt/v1");
+        hasher.update(self.version.to_le_bytes());
+        hasher.update(self.trace_length.to_le_bytes());
+        hasher.update(self.commitment_count.to_le_bytes());
+        hasher.update(self.lookup_receipt_digest);
+        hasher.update(self.verifier_stage_relation_digest);
+        hasher.update(self.recursive_transcript_root);
+        hasher.update(self.blindfold_proof_digest);
+        hasher.finalize().into()
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{RecursiveVerifierTranscriptCapsule, VerifiedJoltLookupProofReceipt};
+    use super::{
+        RecursiveVerifierTranscriptCapsule, VerifiedJoltBlindFoldReceipt,
+        VerifiedJoltLookupProofReceipt,
+    };
 
     #[test]
     fn verified_jolt_lookup_receipt_captures_full_verifier_transcript() {
         let receipt = VerifiedJoltLookupProofReceipt::new_for_test(7, 16);
         assert_eq!(receipt.version, VerifiedJoltLookupProofReceipt::VERSION);
+        assert!(!receipt.zk_mode());
+        assert_eq!(receipt.blindfold_proof_digest(), [0; 32]);
+        assert!(receipt.blindfold_receipt().is_none());
         assert_ne!(receipt.stage1_uni_skip_first_round_proof_digest(), [0; 32]);
         assert_ne!(receipt.stage1_sumcheck_digest(), [0; 32]);
         assert_ne!(receipt.stage2_uni_skip_first_round_proof_digest(), [0; 32]);
@@ -540,6 +675,43 @@ mod tests {
         );
         assert_ne!(receipt.verifier_stage_relation_digest(), [0; 32]);
         assert_ne!(receipt.digest(), [0; 32]);
+    }
+
+    #[test]
+    fn verified_jolt_blindfold_receipt_binds_zk_proof_path_without_openings() {
+        let receipt = VerifiedJoltLookupProofReceipt::new_zk_for_test(19, 32);
+        assert!(receipt.zk_mode());
+        assert_ne!(receipt.blindfold_proof_digest(), [0; 32]);
+
+        let blindfold_receipt = receipt
+            .blindfold_receipt()
+            .expect("ZK receipts expose a BlindFold receipt capsule");
+        assert_eq!(
+            blindfold_receipt.lookup_receipt_digest(),
+            receipt.digest()
+        );
+        assert_eq!(
+            blindfold_receipt.verifier_stage_relation_digest(),
+            receipt.verifier_stage_relation_digest()
+        );
+        assert_eq!(
+            blindfold_receipt.recursive_transcript_root(),
+            receipt.recursive_transcript_capsule().transcript_root()
+        );
+        assert_eq!(
+            blindfold_receipt.blindfold_proof_digest(),
+            receipt.blindfold_proof_digest()
+        );
+        assert!(blindfold_receipt.verify_against(&receipt));
+        assert_ne!(blindfold_receipt.digest(), [0; 32]);
+
+        let mut tampered = blindfold_receipt;
+        tampered.blindfold_proof_digest[0] ^= 1;
+        assert!(!tampered.verify_against(&receipt));
+        assert!(VerifiedJoltBlindFoldReceipt::from_lookup_receipt(
+            &VerifiedJoltLookupProofReceipt::new_for_test(19, 32)
+        )
+        .is_none());
     }
 
     #[test]
@@ -1028,10 +1200,21 @@ impl<F: JoltField, C: JoltCurve<F = F>, PCS: CommitmentScheme<Field = F>, FS: Tr
         verifier_setup: &PCS::VerifierSetup,
         trusted_advice_commitment: &Option<PCS::Commitment>,
     ) -> VerifiedJoltLookupProofReceipt {
+        let zk_mode = self.stage1_sumcheck_proof.is_zk();
+        #[cfg(feature = "zk")]
+        let blindfold_proof_digest = if zk_mode {
+            canonical_digest(b"blindfold-proof", &self.blindfold_proof)
+        } else {
+            [0; 32]
+        };
+        #[cfg(not(feature = "zk"))]
+        let blindfold_proof_digest = [0; 32];
         let mut receipt = VerifiedJoltLookupProofReceipt {
             version: VerifiedJoltLookupProofReceipt::VERSION,
             trace_length: self.trace_length as u64,
             commitment_count: self.commitments.len() as u64,
+            zk_mode,
+            blindfold_proof_digest,
             preprocessing_digest,
             verifier_setup_digest: canonical_digest(b"verifier-setup", verifier_setup),
             public_io_digest: canonical_digest(b"public-io", public_io),

@@ -651,6 +651,8 @@ pub struct FoldableBlockState<F = ark_bn254::Fr> {
     pub verified_jolt_lookup_receipt_digest: [u8; 32],
     pub verified_jolt_lookup_receipt_trace_length: usize,
     pub verified_jolt_lookup_receipt_commitment_count: usize,
+    pub verified_jolt_lookup_receipt_zk_mode: bool,
+    pub verified_jolt_blindfold_receipt_digest: [u8; 32],
     pub verified_jolt_verifier_stage_relation_digest: [u8; 32],
     pub verified_jolt_verifier_stage_relation_count: usize,
     pub verified_jolt_recursive_transcript_root: [u8; 32],
@@ -1970,6 +1972,8 @@ struct BlockFoldStatement {
     verified_jolt_lookup_receipt_digest: NovaScalar,
     verified_jolt_lookup_receipt_trace_length: NovaScalar,
     verified_jolt_lookup_receipt_commitment_count: NovaScalar,
+    verified_jolt_lookup_receipt_zk_mode: NovaScalar,
+    verified_jolt_blindfold_receipt_digest: NovaScalar,
     verified_jolt_verifier_stage_relation_digest: NovaScalar,
     verified_jolt_verifier_stage_relation_count: NovaScalar,
     verified_jolt_recursive_transcript_root: NovaScalar,
@@ -2224,6 +2228,18 @@ impl BlockFoldStatement {
             verified_jolt_lookup_receipt_commitment_count: NovaScalar::from(
                 state.verified_jolt_lookup_receipt_commitment_count as u64,
             ),
+            verified_jolt_lookup_receipt_zk_mode: NovaScalar::from(u64::from(
+                state.verified_jolt_lookup_receipt_zk_mode,
+            )),
+            verified_jolt_blindfold_receipt_digest: if state.verified_jolt_lookup_receipt_zk_mode {
+                nova_hash_bytes_to_scalar(
+                    "statement-field",
+                    "verified_jolt_blindfold_receipt_digest",
+                    &state.verified_jolt_blindfold_receipt_digest,
+                )
+            } else {
+                NovaScalar::zero()
+            },
             verified_jolt_verifier_stage_relation_digest: if state
                 .verified_jolt_lookup_receipt_present
             {
@@ -2296,7 +2312,7 @@ impl BlockFoldStatement {
 
     fn digest(&self) -> [u8; 32] {
         let mut hasher = Sha3_256::new();
-        hasher.update(b"JOLT_NOVA_BLOCK_FOLD_STATEMENT_V3");
+        hasher.update(b"JOLT_NOVA_BLOCK_FOLD_STATEMENT_V4");
         for value in [
             self.program_digest,
             self.block_index,
@@ -2330,6 +2346,8 @@ impl BlockFoldStatement {
             self.verified_jolt_lookup_receipt_digest,
             self.verified_jolt_lookup_receipt_trace_length,
             self.verified_jolt_lookup_receipt_commitment_count,
+            self.verified_jolt_lookup_receipt_zk_mode,
+            self.verified_jolt_blindfold_receipt_digest,
             self.verified_jolt_verifier_stage_relation_digest,
             self.verified_jolt_verifier_stage_relation_count,
             self.verified_jolt_recursive_transcript_root,
@@ -2414,6 +2432,14 @@ impl BlockFoldStatement {
                 (
                     "verified_jolt_lookup_receipt_commitment_count",
                     self.verified_jolt_lookup_receipt_commitment_count,
+                ),
+                (
+                    "verified_jolt_lookup_receipt_zk_mode",
+                    self.verified_jolt_lookup_receipt_zk_mode,
+                ),
+                (
+                    "verified_jolt_blindfold_receipt_digest",
+                    self.verified_jolt_blindfold_receipt_digest,
                 ),
                 (
                     "verified_jolt_verifier_stage_relation_digest",
@@ -2587,6 +2613,14 @@ impl BlockFoldStatement {
                     self.verified_jolt_lookup_receipt_commitment_count,
                 ),
                 (
+                    "verified_jolt_lookup_receipt_zk_mode",
+                    self.verified_jolt_lookup_receipt_zk_mode,
+                ),
+                (
+                    "verified_jolt_blindfold_receipt_digest",
+                    self.verified_jolt_blindfold_receipt_digest,
+                ),
+                (
                     "verified_jolt_verifier_stage_relation_digest",
                     self.verified_jolt_verifier_stage_relation_digest,
                 ),
@@ -2674,6 +2708,14 @@ impl BlockFoldStatement {
                 (
                     "verified_jolt_lookup_receipt_commitment_count",
                     self.verified_jolt_lookup_receipt_commitment_count,
+                ),
+                (
+                    "verified_jolt_lookup_receipt_zk_mode",
+                    self.verified_jolt_lookup_receipt_zk_mode,
+                ),
+                (
+                    "verified_jolt_blindfold_receipt_digest",
+                    self.verified_jolt_blindfold_receipt_digest,
                 ),
                 (
                     "verified_jolt_verifier_stage_relation_digest",
@@ -2856,6 +2898,8 @@ struct JoltNovaStepWitness {
     verified_jolt_lookup_receipt_digest: NovaScalar,
     verified_jolt_lookup_receipt_trace_length: NovaScalar,
     verified_jolt_lookup_receipt_commitment_count: NovaScalar,
+    verified_jolt_lookup_receipt_zk_mode: NovaScalar,
+    verified_jolt_blindfold_receipt_digest: NovaScalar,
     verified_jolt_verifier_stage_relation_digest: NovaScalar,
     verified_jolt_verifier_stage_relation_count: NovaScalar,
     verified_jolt_recursive_transcript_root: NovaScalar,
@@ -2943,6 +2987,9 @@ impl JoltNovaStepWitness {
                 .verified_jolt_lookup_receipt_trace_length,
             verified_jolt_lookup_receipt_commitment_count: statement
                 .verified_jolt_lookup_receipt_commitment_count,
+            verified_jolt_lookup_receipt_zk_mode: statement.verified_jolt_lookup_receipt_zk_mode,
+            verified_jolt_blindfold_receipt_digest: statement
+                .verified_jolt_blindfold_receipt_digest,
             verified_jolt_verifier_stage_relation_digest: statement
                 .verified_jolt_verifier_stage_relation_digest,
             verified_jolt_verifier_stage_relation_count: statement
@@ -3005,6 +3052,8 @@ impl JoltNovaStepWitness {
                 .verified_jolt_lookup_receipt_trace_length,
             verified_jolt_lookup_receipt_commitment_count: self
                 .verified_jolt_lookup_receipt_commitment_count,
+            verified_jolt_lookup_receipt_zk_mode: self.verified_jolt_lookup_receipt_zk_mode,
+            verified_jolt_blindfold_receipt_digest: self.verified_jolt_blindfold_receipt_digest,
             verified_jolt_verifier_stage_relation_digest: self
                 .verified_jolt_verifier_stage_relation_digest,
             verified_jolt_verifier_stage_relation_count: self
@@ -3268,6 +3317,16 @@ impl nova_snark::traits::circuit::StepCircuit<NovaScalar> for JoltNovaStepCircui
             cs,
             "verified Jolt lookup receipt commitment count",
             self.witness.verified_jolt_lookup_receipt_commitment_count,
+        )?;
+        let verified_jolt_lookup_receipt_zk_mode = alloc_nova_witness(
+            cs,
+            "verified Jolt lookup receipt ZK mode",
+            self.witness.verified_jolt_lookup_receipt_zk_mode,
+        )?;
+        let verified_jolt_blindfold_receipt_digest = alloc_nova_witness(
+            cs,
+            "verified Jolt BlindFold receipt digest",
+            self.witness.verified_jolt_blindfold_receipt_digest,
         )?;
         let verified_jolt_verifier_stage_relation_digest = alloc_nova_witness(
             cs,
@@ -3605,6 +3664,18 @@ impl nova_snark::traits::circuit::StepCircuit<NovaScalar> for JoltNovaStepCircui
                         "verified_jolt_lookup_receipt_commitment_count",
                     ),
                     verified_jolt_lookup_receipt_commitment_count.get_variable(),
+                ) + (
+                    nova_transcript_challenge_scalar(
+                        NOVA_TRANSCRIPT_DOMAIN_STATEMENT,
+                        "verified_jolt_lookup_receipt_zk_mode",
+                    ),
+                    verified_jolt_lookup_receipt_zk_mode.get_variable(),
+                ) + (
+                    nova_transcript_challenge_scalar(
+                        NOVA_TRANSCRIPT_DOMAIN_STATEMENT,
+                        "verified_jolt_blindfold_receipt_digest",
+                    ),
+                    verified_jolt_blindfold_receipt_digest.get_variable(),
                 ) + (
                     nova_transcript_challenge_scalar(
                         NOVA_TRANSCRIPT_DOMAIN_STATEMENT,
@@ -3964,6 +4035,16 @@ impl nova_snark::traits::circuit::StepCircuit<NovaScalar> for JoltNovaStepCircui
         );
 
         cs.enforce(
+            || "verified Jolt lookup receipt ZK mode is boolean",
+            |lc| lc + verified_jolt_lookup_receipt_zk_mode.get_variable(),
+            |lc| {
+                lc + verified_jolt_lookup_receipt_zk_mode.get_variable()
+                    - (NovaScalar::from(1), CS::one())
+            },
+            |lc| lc,
+        );
+
+        cs.enforce(
             || "verified Jolt lookup opening selector is boolean",
             |lc| lc + verified_jolt_lookup_opening_present.get_variable(),
             |lc| {
@@ -3980,6 +4061,13 @@ impl nova_snark::traits::circuit::StepCircuit<NovaScalar> for JoltNovaStepCircui
             |lc| lc,
         );
 
+        cs.enforce(
+            || "non-ZK verified Jolt receipt has zero BlindFold receipt digest",
+            |lc| lc + CS::one() - verified_jolt_lookup_receipt_zk_mode.get_variable(),
+            |lc| lc + verified_jolt_blindfold_receipt_digest.get_variable(),
+            |lc| lc,
+        );
+
         for (label, value) in [
             (
                 "absent verified Jolt receipt has zero digest",
@@ -3992,6 +4080,14 @@ impl nova_snark::traits::circuit::StepCircuit<NovaScalar> for JoltNovaStepCircui
             (
                 "absent verified Jolt receipt has zero commitment count",
                 &verified_jolt_lookup_receipt_commitment_count,
+            ),
+            (
+                "absent verified Jolt receipt has zero ZK mode",
+                &verified_jolt_lookup_receipt_zk_mode,
+            ),
+            (
+                "absent verified Jolt receipt has zero BlindFold receipt digest",
+                &verified_jolt_blindfold_receipt_digest,
             ),
             (
                 "absent verified Jolt receipt has zero verifier stage relation digest",
@@ -4165,6 +4261,24 @@ impl nova_snark::traits::circuit::StepCircuit<NovaScalar> for JoltNovaStepCircui
                 ) + (
                     nova_transcript_challenge_scalar(
                         NOVA_TRANSCRIPT_DOMAIN_LOOKUP_LOGUP,
+                        "verified_jolt_lookup_receipt_zk_mode",
+                    ) - nova_transcript_challenge_scalar(
+                        NOVA_TRANSCRIPT_DOMAIN_LOOKUP,
+                        "verified_jolt_lookup_receipt_zk_mode",
+                    ),
+                    verified_jolt_lookup_receipt_zk_mode.get_variable(),
+                ) + (
+                    nova_transcript_challenge_scalar(
+                        NOVA_TRANSCRIPT_DOMAIN_LOOKUP_LOGUP,
+                        "verified_jolt_blindfold_receipt_digest",
+                    ) - nova_transcript_challenge_scalar(
+                        NOVA_TRANSCRIPT_DOMAIN_LOOKUP,
+                        "verified_jolt_blindfold_receipt_digest",
+                    ),
+                    verified_jolt_blindfold_receipt_digest.get_variable(),
+                ) + (
+                    nova_transcript_challenge_scalar(
+                        NOVA_TRANSCRIPT_DOMAIN_LOOKUP_LOGUP,
                         "verified_jolt_verifier_stage_relation_digest",
                     ) - nova_transcript_challenge_scalar(
                         NOVA_TRANSCRIPT_DOMAIN_LOOKUP,
@@ -4303,6 +4417,20 @@ impl nova_snark::traits::circuit::StepCircuit<NovaScalar> for JoltNovaStepCircui
                             "verified_jolt_lookup_receipt_commitment_count",
                         ),
                         verified_jolt_lookup_receipt_commitment_count.get_variable(),
+                    )
+                    - (
+                        nova_transcript_challenge_scalar(
+                            NOVA_TRANSCRIPT_DOMAIN_LOOKUP,
+                            "verified_jolt_lookup_receipt_zk_mode",
+                        ),
+                        verified_jolt_lookup_receipt_zk_mode.get_variable(),
+                    )
+                    - (
+                        nova_transcript_challenge_scalar(
+                            NOVA_TRANSCRIPT_DOMAIN_LOOKUP,
+                            "verified_jolt_blindfold_receipt_digest",
+                        ),
+                        verified_jolt_blindfold_receipt_digest.get_variable(),
                     )
                     - (
                         nova_transcript_challenge_scalar(
@@ -7149,6 +7277,11 @@ where
         state.verified_jolt_lookup_receipt_digest = receipt.digest();
         state.verified_jolt_lookup_receipt_trace_length = receipt.trace_length();
         state.verified_jolt_lookup_receipt_commitment_count = receipt.commitment_count();
+        state.verified_jolt_lookup_receipt_zk_mode = receipt.zk_mode();
+        state.verified_jolt_blindfold_receipt_digest = receipt
+            .blindfold_receipt()
+            .map(|blindfold_receipt| blindfold_receipt.digest())
+            .unwrap_or([0; 32]);
         state.verified_jolt_verifier_stage_relation_digest =
             receipt.verifier_stage_relation_digest();
         state.verified_jolt_verifier_stage_relation_count = receipt.verifier_stage_relation_count();
@@ -7193,6 +7326,12 @@ where
         if state.verified_jolt_lookup_receipt_digest != receipt.digest()
             || state.verified_jolt_lookup_receipt_trace_length != receipt.trace_length()
             || state.verified_jolt_lookup_receipt_commitment_count != receipt.commitment_count()
+            || state.verified_jolt_lookup_receipt_zk_mode != receipt.zk_mode()
+            || state.verified_jolt_blindfold_receipt_digest
+                != receipt
+                    .blindfold_receipt()
+                    .map(|blindfold_receipt| blindfold_receipt.digest())
+                    .unwrap_or([0; 32])
             || state.verified_jolt_verifier_stage_relation_digest
                 != receipt.verifier_stage_relation_digest()
             || state.verified_jolt_verifier_stage_relation_count
@@ -7360,6 +7499,8 @@ where
     state.verified_jolt_lookup_receipt_digest = [0; 32];
     state.verified_jolt_lookup_receipt_trace_length = 0;
     state.verified_jolt_lookup_receipt_commitment_count = 0;
+    state.verified_jolt_lookup_receipt_zk_mode = false;
+    state.verified_jolt_blindfold_receipt_digest = [0; 32];
     state.verified_jolt_verifier_stage_relation_digest = [0; 32];
     state.verified_jolt_verifier_stage_relation_count = 0;
     state.verified_jolt_recursive_transcript_root = [0; 32];
@@ -7842,6 +7983,8 @@ where
         verified_jolt_lookup_receipt_digest: [0; 32],
         verified_jolt_lookup_receipt_trace_length: 0,
         verified_jolt_lookup_receipt_commitment_count: 0,
+        verified_jolt_lookup_receipt_zk_mode: false,
+        verified_jolt_blindfold_receipt_digest: [0; 32],
         verified_jolt_verifier_stage_relation_digest: [0; 32],
         verified_jolt_verifier_stage_relation_count: 0,
         verified_jolt_recursive_transcript_root: [0; 32],
@@ -8004,7 +8147,7 @@ where
     F: JoltField,
 {
     let mut hasher = Sha3_256::new();
-    hasher.update(b"JOLT_NOVA_FOLDABLE_BLOCK_STATE_V6");
+    hasher.update(b"JOLT_NOVA_FOLDABLE_BLOCK_STATE_V7");
     update_usize(&mut hasher, state.block_index);
     update_usize(&mut hasher, state.global_cycle_start);
     update_usize(&mut hasher, state.global_cycle_end);
@@ -8038,6 +8181,8 @@ where
         &mut hasher,
         state.verified_jolt_lookup_receipt_commitment_count,
     );
+    hasher.update([u8::from(state.verified_jolt_lookup_receipt_zk_mode)]);
+    hasher.update(state.verified_jolt_blindfold_receipt_digest);
     hasher.update(state.verified_jolt_verifier_stage_relation_digest);
     update_usize(
         &mut hasher,
@@ -8077,10 +8222,16 @@ where
     Digest: AsRef<[u8]>,
 {
     let mut hasher = Sha3_256::new();
-    hasher.update(b"JOLT_NOVA_VERIFIED_JOLT_LOOKUP_BLOCK_BINDING_V3");
+    hasher.update(b"JOLT_NOVA_VERIFIED_JOLT_LOOKUP_BLOCK_BINDING_V4");
     update_usize(&mut hasher, program_digest.as_ref().len());
     hasher.update(program_digest.as_ref());
     hasher.update(receipt.digest());
+    hasher.update([u8::from(receipt.zk_mode())]);
+    if let Some(blindfold_receipt) = receipt.blindfold_receipt() {
+        hasher.update(blindfold_receipt.digest());
+    } else {
+        hasher.update([0; 32]);
+    }
     hasher.update(receipt.preprocessing_digest());
     hasher.update(receipt.public_io_digest());
     hasher.update(receipt.commitments_digest());
@@ -13101,6 +13252,29 @@ mod tests {
 
     #[cfg(feature = "nova")]
     #[test]
+    fn nova_step_circuit_rejects_tampered_blindfold_receipt_digest_witness() {
+        let bytecode = BytecodePreprocessing::default();
+        let block = trace_block(0, boundary(0, 0), boundary(4, 0));
+        let prover = BlockProofBundleProver::<_, ark_bn254::Fr>::new([9u8; 32]);
+        let bundle = prover.prove_block(&bytecode, &block, None).unwrap();
+        let mut fold_inputs = vec![build_block_fold_input(&bundle)];
+        let receipt = VerifiedJoltLookupProofReceipt::new_zk_for_test(29, 32);
+        bind_verified_jolt_lookup_receipt_to_fold_inputs(&mut fold_inputs, &receipt).unwrap();
+        let mut circuit = nova_step_circuit_for_fold_input(&fold_inputs[0]);
+        circuit.witness.verified_jolt_blindfold_receipt_digest =
+            circuit.witness.verified_jolt_blindfold_receipt_digest + NovaScalar::from(1);
+        circuit.witness.statement_digest = circuit.witness.statement().statement_digest_scalar();
+
+        let cs = synthesize_nova_step_circuit_for_test(&circuit);
+
+        assert_eq!(
+            cs.which_is_unsatisfied(),
+            Some("lookup claim fingerprint binds lookup fields")
+        );
+    }
+
+    #[cfg(feature = "nova")]
+    #[test]
     fn nova_step_circuit_satisfies_cpu_fingerprint_binding() {
         let bytecode = BytecodePreprocessing::default();
         let block = trace_block(0, boundary(0, 0), boundary(4, 0));
@@ -13818,6 +13992,71 @@ mod tests {
                 &bytecode,
                 &blocks,
                 &tampered_transcript_capsule,
+                &MockFoldingBackend,
+                &receipt,
+            ),
+            Err(BlockTraceError::VerifiedJoltLookupReceiptMismatch { block_index: 0, .. })
+        ));
+    }
+
+    #[cfg(feature = "nova")]
+    #[test]
+    fn verified_jolt_zk_lookup_receipt_binds_blindfold_capsule_and_rejects_tampering() {
+        let bytecode = BytecodePreprocessing::default();
+        let block0 = trace_block(0, boundary(0, 0), boundary(2, 0));
+        let block1 = trace_block(1, block0.end_state.clone(), boundary(4, 0));
+        let blocks = [block0, block1];
+        let receipt = VerifiedJoltLookupProofReceipt::new_zk_for_test(23, 8);
+        let blindfold_receipt = receipt
+            .blindfold_receipt()
+            .expect("ZK receipts expose a BlindFold receipt capsule");
+        let backend = MockFoldingBackend;
+        let pipeline =
+            BlockProofPipeline::<_, ark_bn254::Fr, MockFoldingBackend>::with_backend_and_verified_jolt_lookup_receipt(
+                [9u8; 32],
+                backend,
+                receipt.clone(),
+            );
+
+        let output = pipeline.prove_blocks(&bytecode, &blocks).unwrap();
+
+        assert!(output.fold_inputs.iter().all(|fold_input| {
+            fold_input.state.verified_jolt_lookup_receipt_present
+                && fold_input.state.verified_jolt_lookup_receipt_zk_mode
+                && fold_input.state.verified_jolt_blindfold_receipt_digest
+                    == blindfold_receipt.digest()
+                && fold_input
+                    .state
+                    .verified_jolt_verifier_stage_relation_digest
+                    == receipt.verifier_stage_relation_digest()
+                && fold_input.state.verified_jolt_recursive_transcript_root
+                    == receipt.recursive_transcript_capsule().transcript_root()
+                && fold_input
+                    .state
+                    .verified_jolt_recursive_transcript_stage_count
+                    == receipt
+                        .recursive_transcript_capsule()
+                        .absorbed_stage_count()
+                && fold_input.state.verified_jolt_lookup_block_binding_digest != [0; 32]
+        }));
+        verify_block_proof_pipeline_with_backend_and_verified_jolt_lookup_receipt(
+            &bytecode,
+            &blocks,
+            &output,
+            &MockFoldingBackend,
+            &receipt,
+        )
+        .unwrap();
+
+        let mut tampered = output.clone();
+        tampered.fold_inputs[0]
+            .state
+            .verified_jolt_blindfold_receipt_digest[0] ^= 1;
+        assert!(matches!(
+            verify_block_proof_pipeline_with_backend_and_verified_jolt_lookup_receipt(
+                &bytecode,
+                &blocks,
+                &tampered,
                 &MockFoldingBackend,
                 &receipt,
             ),
