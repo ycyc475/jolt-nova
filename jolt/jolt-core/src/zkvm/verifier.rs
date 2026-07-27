@@ -37,6 +37,8 @@ use crate::zkvm::r1cs::constraints::{
     OUTER_FIRST_ROUND_POLY_NUM_COEFFS, OUTER_UNIVARIATE_SKIP_DOMAIN_SIZE,
     PRODUCT_VIRTUAL_FIRST_ROUND_POLY_NUM_COEFFS, PRODUCT_VIRTUAL_UNIVARIATE_SKIP_DOMAIN_SIZE,
 };
+#[cfg(not(feature = "zk"))]
+use crate::zkvm::r1cs::inputs::ALL_R1CS_INPUTS;
 use crate::zkvm::witness::all_committed_polynomials;
 #[cfg(not(feature = "zk"))]
 use crate::zkvm::witness::VirtualPolynomial;
@@ -605,6 +607,24 @@ impl<
                 CommittedPolynomial::RamInc,
                 SumcheckId::IncClaimReduction,
             );
+        let mut cpu_opening_point = None;
+        let mut cpu_opening_claims = Vec::with_capacity(ALL_R1CS_INPUTS.len());
+        for input in &ALL_R1CS_INPUTS {
+            let (point, claim) = verified.opening_accumulator.get_virtual_polynomial_opening(
+                VirtualPolynomial::from(input),
+                SumcheckId::SpartanOuter,
+            );
+            if let Some(shared_point) = &cpu_opening_point {
+                if shared_point != &point.r {
+                    return Err(ProofVerifyError::InternalError);
+                }
+            } else {
+                cpu_opening_point = Some(point.r);
+            }
+            cpu_opening_claims.push(claim);
+        }
+        let cpu_opening_point = cpu_opening_point.ok_or(ProofVerifyError::InternalError)?;
+
         Ok(VerifiedJoltLookupOpeningReceipt::from_verified_openings(
             lookup_receipt,
             log_k_chunk,
@@ -634,6 +654,8 @@ impl<
             ram_write_value_claim,
             ram_inc_opening_point.r,
             ram_inc_claim,
+            cpu_opening_point,
+            cpu_opening_claims,
         ))
     }
 

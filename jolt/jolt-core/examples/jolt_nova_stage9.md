@@ -540,17 +540,43 @@ for compatibility, while receipt version 4 authenticates lookup, register, and
 RAM execution data.
 
 The non-ZK proof format remains required for opening extraction. A
-privacy-preserving BlindFold/ZK path and authenticated CPU relation remain
-future work.
+privacy-preserving BlindFold/ZK path remains future work.
+
+## Stage 9.10: authenticated CPU/R1CS openings
+
+Stage 9.10 extends the verified execution-opening receipt to Jolt's CPU/R1CS
+outer sumcheck. After the complete original Jolt verifier accepts, receipt
+version 5 retains the shared Spartan outer opening point plus one authenticated
+claim for every entry in `ALL_R1CS_INPUTS`.
+
+The block verifier reconstructs each CPU claim from the local trace by
+materializing `R1CSCycleInputs::from_cycle_with_next` for every cycle and for
+the deterministic NoOp padding used after the final active cycle:
+
+```text
+sum over blocks and cycles:
+    eq(r_cycle, global_cycle) * r1cs_input_value(cycle)
++ deterministic Jolt NoOp padding
+```
+
+The receipt and block contribution digests now include those 35 CPU claims, and
+Nova's CPU fingerprint binds the opening receipt metadata alongside the CPU
+row-count fields. Tests cover nonzero ADD/LD/SD traces, corrupted CPU claims,
+lookup/register/RAM regressions, and Nova folding of the authenticated CPU
+receipt.
+
+### Security boundary
+
+This stage authenticates the CPU/R1CS claims already checked by the complete
+host-side Jolt verifier. It still folds an opaque receipt; the Nova circuit does
+not re-execute BN254/Dory verification internally.
 
 ## Remaining Stage 9 work
 
-After Stage 9.9, the main cryptographic gaps are:
+After Stage 9.10, the main cryptographic gaps are:
 
 - compose or internalize the relevant Jolt/Dory verifier rather than relying
   on an opaque host-verified receipt;
-- connect the block CPU relation to the original Jolt R1CS/Spartan claims with
-  the same strength;
 - derive a privacy-preserving equivalent receipt from the BlindFold/ZK proof
   path;
 - build controlled Lasso/LogUp comparisons and perform adversarial soundness

@@ -390,8 +390,7 @@ impl R1CSCycleInputs {
         }
     }
 
-    #[cfg(test)]
-    pub fn get_input_value(&self, input: JoltR1CSInputs) -> i128 {
+    pub(crate) fn get_input_value(&self, input: JoltR1CSInputs) -> i128 {
         match input {
             JoltR1CSInputs::PC => self.pc as i128,
             JoltR1CSInputs::UnexpandedPC => self.unexpanded_pc as i128,
