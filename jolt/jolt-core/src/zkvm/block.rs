@@ -653,6 +653,8 @@ pub struct FoldableBlockState<F = ark_bn254::Fr> {
     pub verified_jolt_lookup_receipt_commitment_count: usize,
     pub verified_jolt_verifier_stage_relation_digest: [u8; 32],
     pub verified_jolt_verifier_stage_relation_count: usize,
+    pub verified_jolt_recursive_transcript_root: [u8; 32],
+    pub verified_jolt_recursive_transcript_stage_count: usize,
     /// Per-block binding of the global receipt to this block's program and
     /// execution statement.
     pub verified_jolt_lookup_block_binding_digest: [u8; 32],
@@ -1970,6 +1972,8 @@ struct BlockFoldStatement {
     verified_jolt_lookup_receipt_commitment_count: NovaScalar,
     verified_jolt_verifier_stage_relation_digest: NovaScalar,
     verified_jolt_verifier_stage_relation_count: NovaScalar,
+    verified_jolt_recursive_transcript_root: NovaScalar,
+    verified_jolt_recursive_transcript_stage_count: NovaScalar,
     verified_jolt_lookup_block_binding_digest: NovaScalar,
     verified_jolt_lookup_opening_present: NovaScalar,
     verified_jolt_lookup_opening_receipt_digest: NovaScalar,
@@ -2234,6 +2238,18 @@ impl BlockFoldStatement {
             verified_jolt_verifier_stage_relation_count: NovaScalar::from(
                 state.verified_jolt_verifier_stage_relation_count as u64,
             ),
+            verified_jolt_recursive_transcript_root: if state.verified_jolt_lookup_receipt_present {
+                nova_hash_bytes_to_scalar(
+                    "statement-field",
+                    "verified_jolt_recursive_transcript_root",
+                    &state.verified_jolt_recursive_transcript_root,
+                )
+            } else {
+                NovaScalar::zero()
+            },
+            verified_jolt_recursive_transcript_stage_count: NovaScalar::from(
+                state.verified_jolt_recursive_transcript_stage_count as u64,
+            ),
             verified_jolt_lookup_block_binding_digest: if state.verified_jolt_lookup_receipt_present
             {
                 nova_hash_bytes_to_scalar(
@@ -2280,7 +2296,7 @@ impl BlockFoldStatement {
 
     fn digest(&self) -> [u8; 32] {
         let mut hasher = Sha3_256::new();
-        hasher.update(b"JOLT_NOVA_BLOCK_FOLD_STATEMENT_V2");
+        hasher.update(b"JOLT_NOVA_BLOCK_FOLD_STATEMENT_V3");
         for value in [
             self.program_digest,
             self.block_index,
@@ -2316,6 +2332,8 @@ impl BlockFoldStatement {
             self.verified_jolt_lookup_receipt_commitment_count,
             self.verified_jolt_verifier_stage_relation_digest,
             self.verified_jolt_verifier_stage_relation_count,
+            self.verified_jolt_recursive_transcript_root,
+            self.verified_jolt_recursive_transcript_stage_count,
             self.verified_jolt_lookup_block_binding_digest,
             self.verified_jolt_lookup_opening_present,
             self.verified_jolt_lookup_opening_receipt_digest,
@@ -2404,6 +2422,14 @@ impl BlockFoldStatement {
                 (
                     "verified_jolt_verifier_stage_relation_count",
                     self.verified_jolt_verifier_stage_relation_count,
+                ),
+                (
+                    "verified_jolt_recursive_transcript_root",
+                    self.verified_jolt_recursive_transcript_root,
+                ),
+                (
+                    "verified_jolt_recursive_transcript_stage_count",
+                    self.verified_jolt_recursive_transcript_stage_count,
                 ),
                 (
                     "verified_jolt_lookup_block_binding_digest",
@@ -2569,6 +2595,14 @@ impl BlockFoldStatement {
                     self.verified_jolt_verifier_stage_relation_count,
                 ),
                 (
+                    "verified_jolt_recursive_transcript_root",
+                    self.verified_jolt_recursive_transcript_root,
+                ),
+                (
+                    "verified_jolt_recursive_transcript_stage_count",
+                    self.verified_jolt_recursive_transcript_stage_count,
+                ),
+                (
                     "verified_jolt_lookup_block_binding_digest",
                     self.verified_jolt_lookup_block_binding_digest,
                 ),
@@ -2648,6 +2682,14 @@ impl BlockFoldStatement {
                 (
                     "verified_jolt_verifier_stage_relation_count",
                     self.verified_jolt_verifier_stage_relation_count,
+                ),
+                (
+                    "verified_jolt_recursive_transcript_root",
+                    self.verified_jolt_recursive_transcript_root,
+                ),
+                (
+                    "verified_jolt_recursive_transcript_stage_count",
+                    self.verified_jolt_recursive_transcript_stage_count,
                 ),
                 (
                     "verified_jolt_lookup_block_binding_digest",
@@ -2816,6 +2858,8 @@ struct JoltNovaStepWitness {
     verified_jolt_lookup_receipt_commitment_count: NovaScalar,
     verified_jolt_verifier_stage_relation_digest: NovaScalar,
     verified_jolt_verifier_stage_relation_count: NovaScalar,
+    verified_jolt_recursive_transcript_root: NovaScalar,
+    verified_jolt_recursive_transcript_stage_count: NovaScalar,
     verified_jolt_lookup_block_binding_digest: NovaScalar,
     verified_jolt_lookup_opening_present: NovaScalar,
     verified_jolt_lookup_opening_receipt_digest: NovaScalar,
@@ -2903,6 +2947,10 @@ impl JoltNovaStepWitness {
                 .verified_jolt_verifier_stage_relation_digest,
             verified_jolt_verifier_stage_relation_count: statement
                 .verified_jolt_verifier_stage_relation_count,
+            verified_jolt_recursive_transcript_root: statement
+                .verified_jolt_recursive_transcript_root,
+            verified_jolt_recursive_transcript_stage_count: statement
+                .verified_jolt_recursive_transcript_stage_count,
             verified_jolt_lookup_block_binding_digest: statement
                 .verified_jolt_lookup_block_binding_digest,
             verified_jolt_lookup_opening_present: statement.verified_jolt_lookup_opening_present,
@@ -2961,6 +3009,9 @@ impl JoltNovaStepWitness {
                 .verified_jolt_verifier_stage_relation_digest,
             verified_jolt_verifier_stage_relation_count: self
                 .verified_jolt_verifier_stage_relation_count,
+            verified_jolt_recursive_transcript_root: self.verified_jolt_recursive_transcript_root,
+            verified_jolt_recursive_transcript_stage_count: self
+                .verified_jolt_recursive_transcript_stage_count,
             verified_jolt_lookup_block_binding_digest: self
                 .verified_jolt_lookup_block_binding_digest,
             verified_jolt_lookup_opening_present: self.verified_jolt_lookup_opening_present,
@@ -3227,6 +3278,16 @@ impl nova_snark::traits::circuit::StepCircuit<NovaScalar> for JoltNovaStepCircui
             cs,
             "verified Jolt verifier stage relation count",
             self.witness.verified_jolt_verifier_stage_relation_count,
+        )?;
+        let verified_jolt_recursive_transcript_root = alloc_nova_witness(
+            cs,
+            "verified Jolt recursive transcript root",
+            self.witness.verified_jolt_recursive_transcript_root,
+        )?;
+        let verified_jolt_recursive_transcript_stage_count = alloc_nova_witness(
+            cs,
+            "verified Jolt recursive transcript stage count",
+            self.witness.verified_jolt_recursive_transcript_stage_count,
         )?;
         let verified_jolt_lookup_block_binding_digest = alloc_nova_witness(
             cs,
@@ -3556,6 +3617,18 @@ impl nova_snark::traits::circuit::StepCircuit<NovaScalar> for JoltNovaStepCircui
                         "verified_jolt_verifier_stage_relation_count",
                     ),
                     verified_jolt_verifier_stage_relation_count.get_variable(),
+                ) + (
+                    nova_transcript_challenge_scalar(
+                        NOVA_TRANSCRIPT_DOMAIN_STATEMENT,
+                        "verified_jolt_recursive_transcript_root",
+                    ),
+                    verified_jolt_recursive_transcript_root.get_variable(),
+                ) + (
+                    nova_transcript_challenge_scalar(
+                        NOVA_TRANSCRIPT_DOMAIN_STATEMENT,
+                        "verified_jolt_recursive_transcript_stage_count",
+                    ),
+                    verified_jolt_recursive_transcript_stage_count.get_variable(),
                 ) + (
                     nova_transcript_challenge_scalar(
                         NOVA_TRANSCRIPT_DOMAIN_STATEMENT,
@@ -3929,6 +4002,14 @@ impl nova_snark::traits::circuit::StepCircuit<NovaScalar> for JoltNovaStepCircui
                 &verified_jolt_verifier_stage_relation_count,
             ),
             (
+                "absent verified Jolt receipt has zero recursive transcript root",
+                &verified_jolt_recursive_transcript_root,
+            ),
+            (
+                "absent verified Jolt receipt has zero recursive transcript stage count",
+                &verified_jolt_recursive_transcript_stage_count,
+            ),
+            (
                 "absent verified Jolt receipt has zero block binding",
                 &verified_jolt_lookup_block_binding_digest,
             ),
@@ -4102,6 +4183,24 @@ impl nova_snark::traits::circuit::StepCircuit<NovaScalar> for JoltNovaStepCircui
                 ) + (
                     nova_transcript_challenge_scalar(
                         NOVA_TRANSCRIPT_DOMAIN_LOOKUP_LOGUP,
+                        "verified_jolt_recursive_transcript_root",
+                    ) - nova_transcript_challenge_scalar(
+                        NOVA_TRANSCRIPT_DOMAIN_LOOKUP,
+                        "verified_jolt_recursive_transcript_root",
+                    ),
+                    verified_jolt_recursive_transcript_root.get_variable(),
+                ) + (
+                    nova_transcript_challenge_scalar(
+                        NOVA_TRANSCRIPT_DOMAIN_LOOKUP_LOGUP,
+                        "verified_jolt_recursive_transcript_stage_count",
+                    ) - nova_transcript_challenge_scalar(
+                        NOVA_TRANSCRIPT_DOMAIN_LOOKUP,
+                        "verified_jolt_recursive_transcript_stage_count",
+                    ),
+                    verified_jolt_recursive_transcript_stage_count.get_variable(),
+                ) + (
+                    nova_transcript_challenge_scalar(
+                        NOVA_TRANSCRIPT_DOMAIN_LOOKUP_LOGUP,
                         "verified_jolt_lookup_block_binding_digest",
                     ) - nova_transcript_challenge_scalar(
                         NOVA_TRANSCRIPT_DOMAIN_LOOKUP,
@@ -4218,6 +4317,20 @@ impl nova_snark::traits::circuit::StepCircuit<NovaScalar> for JoltNovaStepCircui
                             "verified_jolt_verifier_stage_relation_count",
                         ),
                         verified_jolt_verifier_stage_relation_count.get_variable(),
+                    )
+                    - (
+                        nova_transcript_challenge_scalar(
+                            NOVA_TRANSCRIPT_DOMAIN_LOOKUP,
+                            "verified_jolt_recursive_transcript_root",
+                        ),
+                        verified_jolt_recursive_transcript_root.get_variable(),
+                    )
+                    - (
+                        nova_transcript_challenge_scalar(
+                            NOVA_TRANSCRIPT_DOMAIN_LOOKUP,
+                            "verified_jolt_recursive_transcript_stage_count",
+                        ),
+                        verified_jolt_recursive_transcript_stage_count.get_variable(),
                     )
                     - (
                         nova_transcript_challenge_scalar(
@@ -7039,6 +7152,10 @@ where
         state.verified_jolt_verifier_stage_relation_digest =
             receipt.verifier_stage_relation_digest();
         state.verified_jolt_verifier_stage_relation_count = receipt.verifier_stage_relation_count();
+        let transcript_capsule = receipt.recursive_transcript_capsule();
+        state.verified_jolt_recursive_transcript_root = transcript_capsule.transcript_root();
+        state.verified_jolt_recursive_transcript_stage_count =
+            transcript_capsule.absorbed_stage_count();
         state.verified_jolt_lookup_block_binding_digest =
             digest_verified_jolt_lookup_block_binding(&fold_input.program_digest, state, receipt);
         state.state_digest = digest_foldable_block_state(state);
@@ -7080,6 +7197,12 @@ where
                 != receipt.verifier_stage_relation_digest()
             || state.verified_jolt_verifier_stage_relation_count
                 != receipt.verifier_stage_relation_count()
+            || state.verified_jolt_recursive_transcript_root
+                != receipt.recursive_transcript_capsule().transcript_root()
+            || state.verified_jolt_recursive_transcript_stage_count
+                != receipt
+                    .recursive_transcript_capsule()
+                    .absorbed_stage_count()
         {
             return Err(BlockTraceError::VerifiedJoltLookupReceiptMismatch {
                 block_index: state.block_index,
@@ -7239,6 +7362,8 @@ where
     state.verified_jolt_lookup_receipt_commitment_count = 0;
     state.verified_jolt_verifier_stage_relation_digest = [0; 32];
     state.verified_jolt_verifier_stage_relation_count = 0;
+    state.verified_jolt_recursive_transcript_root = [0; 32];
+    state.verified_jolt_recursive_transcript_stage_count = 0;
     state.verified_jolt_lookup_block_binding_digest = [0; 32];
     state.state_digest = digest_foldable_block_state(state);
 }
@@ -7719,6 +7844,8 @@ where
         verified_jolt_lookup_receipt_commitment_count: 0,
         verified_jolt_verifier_stage_relation_digest: [0; 32],
         verified_jolt_verifier_stage_relation_count: 0,
+        verified_jolt_recursive_transcript_root: [0; 32],
+        verified_jolt_recursive_transcript_stage_count: 0,
         verified_jolt_lookup_block_binding_digest: [0; 32],
         verified_jolt_lookup_opening_present: false,
         verified_jolt_lookup_opening_receipt_digest: [0; 32],
@@ -7877,7 +8004,7 @@ where
     F: JoltField,
 {
     let mut hasher = Sha3_256::new();
-    hasher.update(b"JOLT_NOVA_FOLDABLE_BLOCK_STATE_V5");
+    hasher.update(b"JOLT_NOVA_FOLDABLE_BLOCK_STATE_V6");
     update_usize(&mut hasher, state.block_index);
     update_usize(&mut hasher, state.global_cycle_start);
     update_usize(&mut hasher, state.global_cycle_end);
@@ -7916,6 +8043,11 @@ where
         &mut hasher,
         state.verified_jolt_verifier_stage_relation_count,
     );
+    hasher.update(state.verified_jolt_recursive_transcript_root);
+    update_usize(
+        &mut hasher,
+        state.verified_jolt_recursive_transcript_stage_count,
+    );
     hasher.update(state.verified_jolt_lookup_block_binding_digest);
     hasher.update([u8::from(state.verified_jolt_lookup_opening_present)]);
     hasher.update(state.verified_jolt_lookup_opening_receipt_digest);
@@ -7945,7 +8077,7 @@ where
     Digest: AsRef<[u8]>,
 {
     let mut hasher = Sha3_256::new();
-    hasher.update(b"JOLT_NOVA_VERIFIED_JOLT_LOOKUP_BLOCK_BINDING_V2");
+    hasher.update(b"JOLT_NOVA_VERIFIED_JOLT_LOOKUP_BLOCK_BINDING_V3");
     update_usize(&mut hasher, program_digest.as_ref().len());
     hasher.update(program_digest.as_ref());
     hasher.update(receipt.digest());
@@ -7972,6 +8104,11 @@ where
     hasher.update(state.lookup_claims_digest);
     hasher.update(state.lookup_entry_summaries_digest);
     hasher.update(state.lookup_logup_proof_digest);
+    hasher.update(state.verified_jolt_recursive_transcript_root);
+    update_usize(
+        &mut hasher,
+        state.verified_jolt_recursive_transcript_stage_count,
+    );
     finalize_digest(hasher)
 }
 
@@ -11840,6 +11977,7 @@ mod tests {
         bind_verified_jolt_lookup_receipt_to_fold_inputs(&mut fold_inputs, &receipt).unwrap();
         let statement = BlockFoldStatement::from_fold_input(&fold_inputs[0]);
         let lookup_fingerprint = statement.lookup_fingerprint();
+        let lookup_logup_fingerprint = statement.lookup_logup_fingerprint();
 
         fold_inputs[0]
             .state
@@ -11848,6 +11986,40 @@ mod tests {
         let tampered_statement = BlockFoldStatement::from_fold_input(&fold_inputs[0]);
 
         assert_ne!(lookup_fingerprint, tampered_statement.lookup_fingerprint());
+        assert_ne!(
+            lookup_logup_fingerprint,
+            tampered_statement.lookup_logup_fingerprint()
+        );
+        assert_ne!(statement.lookup_delta(), tampered_statement.lookup_delta());
+        assert_ne!(
+            statement.statement_digest_scalar(),
+            tampered_statement.statement_digest_scalar()
+        );
+    }
+
+    #[cfg(feature = "nova")]
+    #[test]
+    fn nova_lookup_fingerprint_tracks_recursive_transcript_capsule() {
+        let bytecode = BytecodePreprocessing::default();
+        let block = trace_block(0, boundary(0, 0), boundary(4, 0));
+        let prover = BlockProofBundleProver::<_, ark_bn254::Fr>::new([9u8; 32]);
+        let bundle = prover.prove_block(&bytecode, &block, None).unwrap();
+        let mut fold_inputs = vec![build_block_fold_input(&bundle)];
+        let receipt = VerifiedJoltLookupProofReceipt::new_for_test(21, 8);
+        bind_verified_jolt_lookup_receipt_to_fold_inputs(&mut fold_inputs, &receipt).unwrap();
+        let statement = BlockFoldStatement::from_fold_input(&fold_inputs[0]);
+        let lookup_fingerprint = statement.lookup_fingerprint();
+        let lookup_logup_fingerprint = statement.lookup_logup_fingerprint();
+
+        fold_inputs[0].state.verified_jolt_recursive_transcript_root[0] ^= 1;
+        fold_inputs[0].state.state_digest = digest_foldable_block_state(&fold_inputs[0].state);
+        let tampered_statement = BlockFoldStatement::from_fold_input(&fold_inputs[0]);
+
+        assert_ne!(lookup_fingerprint, tampered_statement.lookup_fingerprint());
+        assert_ne!(
+            lookup_logup_fingerprint,
+            tampered_statement.lookup_logup_fingerprint()
+        );
         assert_ne!(statement.lookup_delta(), tampered_statement.lookup_delta());
         assert_ne!(
             statement.statement_digest_scalar(),
@@ -13562,6 +13734,14 @@ mod tests {
                     == receipt.verifier_stage_relation_digest()
                 && fold_input.state.verified_jolt_verifier_stage_relation_count
                     == receipt.verifier_stage_relation_count()
+                && fold_input.state.verified_jolt_recursive_transcript_root
+                    == receipt.recursive_transcript_capsule().transcript_root()
+                && fold_input
+                    .state
+                    .verified_jolt_recursive_transcript_stage_count
+                    == receipt
+                        .recursive_transcript_capsule()
+                        .absorbed_stage_count()
                 && fold_input.state.verified_jolt_lookup_block_binding_digest != [0; 32]
         }));
         verify_block_proof_pipeline_with_backend_and_verified_jolt_lookup_receipt(
@@ -13619,6 +13799,25 @@ mod tests {
                 &bytecode,
                 &blocks,
                 &tampered_stage_relation,
+                &MockFoldingBackend,
+                &receipt,
+            ),
+            Err(BlockTraceError::VerifiedJoltLookupReceiptMismatch { block_index: 0, .. })
+        ));
+
+        let mut tampered_transcript_capsule = output.clone();
+        tampered_transcript_capsule.fold_inputs[0]
+            .state
+            .verified_jolt_recursive_transcript_root[0] ^= 1;
+        tampered_transcript_capsule.fold_inputs[0]
+            .state
+            .state_digest =
+            digest_foldable_block_state(&tampered_transcript_capsule.fold_inputs[0].state);
+        assert!(matches!(
+            verify_block_proof_pipeline_with_backend_and_verified_jolt_lookup_receipt(
+                &bytecode,
+                &blocks,
+                &tampered_transcript_capsule,
                 &MockFoldingBackend,
                 &receipt,
             ),

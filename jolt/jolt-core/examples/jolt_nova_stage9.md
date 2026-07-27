@@ -677,12 +677,41 @@ claim. It does not yet execute the BN254 sumcheck or Dory equations inside the
 Pallas Nova circuit. The complete Jolt verifier must still accept before these
 objects are created.
 
+## Stage 9.14: recursive verifier transcript capsule binding
+
+Stage 9.14 carries the complete `RecursiveVerifierTranscriptCapsule` output
+through the block and Nova folding interfaces. Each receipt-aware
+`FoldableBlockState` now stores the capsule transcript root and absorbed stage
+count derived from the accepted Jolt receipt. The strict receipt binder
+populates those fields, the strict verifier rejects mismatches, and the
+per-block receipt binding digest absorbs them with the local lookup statement.
+
+Nova's block statement and step witness now carry the capsule root and stage
+count explicitly. The step circuit:
+
+- includes both values in the in-circuit statement transcript;
+- includes both values in the lookup verifier fingerprint, including the LogUp
+  backend-selected path;
+- requires both values to be zero when no verified Jolt receipt is present.
+
+This makes the verifier transcript capsule a recursive, fixed-width object in
+the block-folding relation. Later stages can replace the current digest-only
+capsule transition with in-circuit verifier gadgets without changing the
+external block/Nova interface again.
+
+### Security boundary
+
+This stage still binds a digest-level recursive verifier object. It does not
+yet execute the BN254 sumcheck, Dory opening, or Spartan verifier equations
+inside the Pallas Nova circuit. The complete host-side Jolt verifier remains
+the source of acceptance for the capsule.
+
 ## Remaining Stage 9 work
 
-After Stage 9.13, the main cryptographic gaps are:
+After Stage 9.14, the main cryptographic gaps are:
 
-- carry the recursive verifier transcript object through the block and Nova
-  relations, then replace digest-only stage transitions with verifier gadgets;
+- replace digest-only recursive verifier capsule transitions with in-circuit
+  verifier gadgets;
 - derive a privacy-preserving equivalent receipt from the BlindFold/ZK proof
   path;
 - build controlled Lasso/LogUp comparisons and perform adversarial soundness
