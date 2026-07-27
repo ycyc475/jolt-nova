@@ -729,10 +729,29 @@ recursively, but the non-ZK opening extraction path remains separate.
 
 ## Remaining Stage 9 work
 
-After Stage 9.15, the main cryptographic gaps are:
+## Stage 9.16: Lasso/LogUp comparison and audit
+
+Stage 9.16 turns the existing lookup-backend switch into a controlled
+comparison harness. The benchmark/example code can now compare the original
+Lasso-style transcript path against the LogUp backend on the same workload,
+recording the relative timing, throughput, and memory deltas in a dedicated
+comparison artifact. The comparison helper also rejects mismatched workloads,
+measurement shapes, and identical backends, so it is safe to use as an
+apples-to-apples experiment surface.
+
+Security-wise, the stage does not change the lookup proof itself. Instead it
+packages the already-existing LogUp soundness checks and the transcript
+baseline into a repeatable audit flow, so later profiling and streaming work
+can reuse the same comparison input.
+
+### Security boundary
+
+This stage compares two already-verified backends and records their
+performance/audit metadata. It does not yet alter the cryptographic lookup
+argument or internalize more of the Jolt verifier.
+
+After Stage 9.16, the main cryptographic gaps are:
 
 - replace digest-only recursive verifier capsule transitions with in-circuit
   verifier gadgets;
-- build controlled Lasso/LogUp comparisons and perform adversarial soundness
-  review;
 - add per-relation profiling and finish streaming trace-to-fold execution.

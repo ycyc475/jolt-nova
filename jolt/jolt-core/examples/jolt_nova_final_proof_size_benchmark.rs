@@ -42,6 +42,7 @@ const RUNNER_NAME: &str = "jolt_nova_final_proof_size_benchmark";
 const MANIFEST_SCHEMA_VERSION: &str = "jolt-nova-benchmark-runner-v5";
 const PERFORMANCE_SCHEMA_VERSION: &str = "jolt-nova-performance-baseline-v2";
 const MULTI_RUN_SCHEMA_VERSION: &str = "jolt-nova-multi-run-baseline-v2";
+const LOOKUP_BACKEND_COMPARISON_SCHEMA_VERSION: &str = "jolt-nova-lookup-backend-comparison-v1";
 const PRODUCTION_FIXTURE_SCHEMA_VERSION: &str = "jolt-nova-production-fixtures-v1";
 const TRACE_FILE_SCHEMA_VERSION: &str = "jolt-nova-trace-blocks-v1";
 const TRACE_BUNDLE_SCHEMA_VERSION: &str = "jolt-nova-trace-bundle-v1";
@@ -455,6 +456,49 @@ struct MetricComparison {
     current_mean: f64,
     regression_percent: f64,
     passed: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+struct LookupBackendComparisonArtifact {
+    schema_version: String,
+    runner: String,
+    trace_source: String,
+    build_profile: String,
+    target_os: String,
+    target_arch: String,
+    workload_sha3_256: String,
+    left_lookup_backend: String,
+    right_lookup_backend: String,
+    measurement_runs: usize,
+    warmup_runs: usize,
+    source_block_count: usize,
+    reported_block_counts: Vec<usize>,
+    processed_block_count: usize,
+    processed_active_cycles: usize,
+    audit: LookupBackendComparisonAudit,
+    metrics: Vec<LookupBackendMetricComparison>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+struct LookupBackendComparisonAudit {
+    distinct_lookup_backends: bool,
+    matching_workload_identity: bool,
+    matching_block_shape: bool,
+    matching_execution_volume: bool,
+    passed: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+struct LookupBackendMetricComparison {
+    metric: String,
+    direction: MetricDirection,
+    left_mean: f64,
+    right_mean: f64,
+    right_vs_left_percent: Option<f64>,
+    better_lookup_backend: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -2035,6 +2079,89 @@ fn compare_multi_run_baselines(
     })
 }
 
+fn compare_lookup_backend_baselines(
+    left: &MultiRunBaselineArtifact,
+    right: &MultiRunBaselineArtifact,
+) -> Result<LookupBackendComparisonArtifact, io::Error> {
+    validate_lookup_backend_comparison_inputs(left, right)?;
+    let left_sample = left.samples.first().ok_or_else(|| {
+        invalid_input("lookup backend comparison requires at least one left sample".to_string())
+    })?;
+
+    Ok(LookupBackendComparisonArtifact {
+        schema_version: LOOKUP_BACKEND_COMPARISON_SCHEMA_VERSION.to_string(),
+        runner: left.runner.clone(),
+        trace_source: left.trace_source.clone(),
+        build_profile: left.build_profile.clone(),
+        target_os: left.target_os.clone(),
+        target_arch: left.target_arch.clone(),
+        workload_sha3_256: left.workload_sha3_256.clone(),
+        left_lookup_backend: left.lookup_backend.clone(),
+        right_lookup_backend: right.lookup_backend.clone(),
+        measurement_runs: left.measurement_runs,
+        warmup_runs: left.warmup_runs,
+        source_block_count: left.source_block_count,
+        reported_block_counts: left.reported_block_counts.clone(),
+        processed_block_count: left_sample.processed_block_count,
+        processed_active_cycles: left_sample.processed_active_cycles,
+        audit: LookupBackendComparisonAudit {
+            distinct_lookup_backends: left.lookup_backend != right.lookup_backend,
+            matching_workload_identity: true,
+            matching_block_shape: true,
+            matching_execution_volume: true,
+            passed: true,
+        },
+        metrics: vec![
+            compare_lookup_backend_metric(
+                "nova_fold_and_spartan_report_ms",
+                MetricDirection::LowerIsBetter,
+                Some(left.stats.nova_fold_and_spartan_report_ms.mean),
+                &left.lookup_backend,
+                Some(right.stats.nova_fold_and_spartan_report_ms.mean),
+                &right.lookup_backend,
+            ),
+            compare_lookup_backend_metric(
+                "measured_total_ms",
+                MetricDirection::LowerIsBetter,
+                Some(left.stats.measured_total_ms.mean),
+                &left.lookup_backend,
+                Some(right.stats.measured_total_ms.mean),
+                &right.lookup_backend,
+            ),
+            compare_lookup_backend_metric(
+                "proving_processed_active_cycles_per_second",
+                MetricDirection::HigherIsBetter,
+                left.stats
+                    .proving_processed_active_cycles_per_second
+                    .as_ref()
+                    .map(|summary| summary.mean),
+                &left.lookup_backend,
+                right
+                    .stats
+                    .proving_processed_active_cycles_per_second
+                    .as_ref()
+                    .map(|summary| summary.mean),
+                &right.lookup_backend,
+            ),
+            compare_lookup_backend_metric(
+                "peak_delta_bytes",
+                MetricDirection::LowerIsBetter,
+                left.stats
+                    .peak_delta_bytes
+                    .as_ref()
+                    .map(|summary| summary.mean),
+                &left.lookup_backend,
+                right
+                    .stats
+                    .peak_delta_bytes
+                    .as_ref()
+                    .map(|summary| summary.mean),
+                &right.lookup_backend,
+            ),
+        ],
+    })
+}
+
 fn validate_comparable_baselines(
     current: &MultiRunBaselineArtifact,
     baseline: &MultiRunBaselineArtifact,
@@ -2090,6 +2217,150 @@ fn validate_comparable_baselines(
         ));
     }
     Ok(())
+}
+
+fn validate_lookup_backend_comparison_inputs(
+    left: &MultiRunBaselineArtifact,
+    right: &MultiRunBaselineArtifact,
+) -> Result<(), io::Error> {
+    if left.schema_version != MULTI_RUN_SCHEMA_VERSION {
+        return Err(invalid_input(format!(
+            "unsupported left baseline schema {}; expected {MULTI_RUN_SCHEMA_VERSION}",
+            left.schema_version
+        )));
+    }
+    if right.schema_version != MULTI_RUN_SCHEMA_VERSION {
+        return Err(invalid_input(format!(
+            "unsupported right baseline schema {}; expected {MULTI_RUN_SCHEMA_VERSION}",
+            right.schema_version
+        )));
+    }
+    if left.lookup_backend == right.lookup_backend {
+        return Err(invalid_input(
+            "lookup backend comparison requires distinct lookup_backend values".to_string(),
+        ));
+    }
+    for (field, left_value, right_value) in [
+        ("runner", left.runner.as_str(), right.runner.as_str()),
+        (
+            "trace_source",
+            left.trace_source.as_str(),
+            right.trace_source.as_str(),
+        ),
+        (
+            "build_profile",
+            left.build_profile.as_str(),
+            right.build_profile.as_str(),
+        ),
+        (
+            "target_os",
+            left.target_os.as_str(),
+            right.target_os.as_str(),
+        ),
+        (
+            "target_arch",
+            left.target_arch.as_str(),
+            right.target_arch.as_str(),
+        ),
+        (
+            "workload_sha3_256",
+            left.workload_sha3_256.as_str(),
+            right.workload_sha3_256.as_str(),
+        ),
+        (
+            "fixture",
+            left.fixture.as_deref().unwrap_or("none"),
+            right.fixture.as_deref().unwrap_or("none"),
+        ),
+        (
+            "fixture_schema_version",
+            left.fixture_schema_version.as_deref().unwrap_or("none"),
+            right.fixture_schema_version.as_deref().unwrap_or("none"),
+        ),
+    ] {
+        if left_value != right_value {
+            return Err(invalid_input(format!(
+                "lookup backend comparison field {field} does not match: left={left_value}, right={right_value}"
+            )));
+        }
+    }
+    if left.measurement_runs != right.measurement_runs {
+        return Err(invalid_input(format!(
+            "lookup backend comparison field measurement_runs does not match: left={}, right={}",
+            left.measurement_runs, right.measurement_runs
+        )));
+    }
+    if left.warmup_runs != right.warmup_runs {
+        return Err(invalid_input(format!(
+            "lookup backend comparison field warmup_runs does not match: left={}, right={}",
+            left.warmup_runs, right.warmup_runs
+        )));
+    }
+    if left.source_block_count != right.source_block_count {
+        return Err(invalid_input(format!(
+            "lookup backend comparison field source_block_count does not match: left={}, right={}",
+            left.source_block_count, right.source_block_count
+        )));
+    }
+    if left.reported_block_counts != right.reported_block_counts {
+        return Err(invalid_input(
+            "lookup backend comparison field reported_block_counts does not match".to_string(),
+        ));
+    }
+    let left_sample = left.samples.first().ok_or_else(|| {
+        invalid_input("lookup backend comparison requires at least one left sample".to_string())
+    })?;
+    let right_sample = right.samples.first().ok_or_else(|| {
+        invalid_input("lookup backend comparison requires at least one right sample".to_string())
+    })?;
+    if left_sample.processed_block_count != right_sample.processed_block_count {
+        return Err(invalid_input(format!(
+            "lookup backend comparison field processed_block_count does not match: left={}, right={}",
+            left_sample.processed_block_count, right_sample.processed_block_count
+        )));
+    }
+    if left_sample.processed_active_cycles != right_sample.processed_active_cycles {
+        return Err(invalid_input(format!(
+            "lookup backend comparison field processed_active_cycles does not match: left={}, right={}",
+            left_sample.processed_active_cycles, right_sample.processed_active_cycles
+        )));
+    }
+    Ok(())
+}
+
+fn compare_lookup_backend_metric(
+    metric: &str,
+    direction: MetricDirection,
+    left_mean: Option<f64>,
+    left_backend: &str,
+    right_mean: Option<f64>,
+    right_backend: &str,
+) -> LookupBackendMetricComparison {
+    let left_mean = left_mean.unwrap_or(0.0);
+    let right_mean = right_mean.unwrap_or(0.0);
+    let right_vs_left_percent = if left_mean == 0.0 {
+        None
+    } else {
+        Some(((right_mean - left_mean) / left_mean) * 100.0)
+    };
+    let better_lookup_backend = match direction {
+        MetricDirection::LowerIsBetter if left_mean < right_mean => Some(left_backend.to_string()),
+        MetricDirection::LowerIsBetter if right_mean < left_mean => Some(right_backend.to_string()),
+        MetricDirection::HigherIsBetter if left_mean > right_mean => Some(left_backend.to_string()),
+        MetricDirection::HigherIsBetter if right_mean > left_mean => {
+            Some(right_backend.to_string())
+        }
+        _ => None,
+    };
+
+    LookupBackendMetricComparison {
+        metric: metric.to_string(),
+        direction,
+        left_mean,
+        right_mean,
+        right_vs_left_percent,
+        better_lookup_backend,
+    }
 }
 
 fn compare_metric(
@@ -2764,9 +3035,9 @@ mod tests {
         args.measurement_runs = 3;
         args.warmup_runs = 1;
         let samples = vec![
-            sample_performance_artifact(90, 100, 900.0, 100.0, 10),
-            sample_performance_artifact(100, 110, 1_000.0, 90.0, 20),
-            sample_performance_artifact(110, 120, 1_100.0, 80.0, 30),
+            sample_performance_artifact(LookupBackend::Transcript, 90, 100, 900.0, 100.0, 10),
+            sample_performance_artifact(LookupBackend::Transcript, 100, 110, 1_000.0, 90.0, 20),
+            sample_performance_artifact(LookupBackend::Transcript, 110, 120, 1_100.0, 80.0, 30),
         ];
         let baseline = build_multi_run_baseline(&args, samples).unwrap();
         assert_eq!(baseline.schema_version, MULTI_RUN_SCHEMA_VERSION);
@@ -2821,6 +3092,54 @@ mod tests {
         .unwrap_err()
         .to_string()
         .contains("workload identity"));
+    }
+
+    #[test]
+    fn lookup_backend_comparison_tracks_same_workload_across_lasso_and_logup() {
+        let transcript = sample_lookup_backend_baseline(LookupBackend::Transcript);
+        let logup = sample_lookup_backend_baseline(LookupBackend::LogUp);
+
+        let comparison = compare_lookup_backend_baselines(&transcript, &logup).unwrap();
+        assert_eq!(
+            comparison.schema_version,
+            LOOKUP_BACKEND_COMPARISON_SCHEMA_VERSION
+        );
+        assert_eq!(comparison.left_lookup_backend, "transcript");
+        assert_eq!(comparison.right_lookup_backend, "logup");
+        assert!(comparison.audit.distinct_lookup_backends);
+        assert!(comparison.audit.matching_workload_identity);
+        assert!(comparison.audit.matching_block_shape);
+        assert!(comparison.audit.matching_execution_volume);
+        assert!(comparison.audit.passed);
+        assert_eq!(comparison.metrics.len(), 4);
+        assert_eq!(
+            comparison.metrics[0].metric,
+            "nova_fold_and_spartan_report_ms"
+        );
+        assert!(comparison.metrics[0].better_lookup_backend.is_some());
+
+        let encoded = serde_json::to_vec(&comparison).unwrap();
+        let decoded: LookupBackendComparisonArtifact = serde_json::from_slice(&encoded).unwrap();
+        assert_eq!(decoded, comparison);
+    }
+
+    #[test]
+    fn lookup_backend_comparison_rejects_same_backend_or_workload_mismatch() {
+        let transcript = sample_lookup_backend_baseline(LookupBackend::Transcript);
+        let same_backend = sample_lookup_backend_baseline(LookupBackend::Transcript);
+        assert!(compare_lookup_backend_baselines(&transcript, &same_backend)
+            .unwrap_err()
+            .to_string()
+            .contains("distinct lookup_backend"));
+
+        let mut mismatched_workload = sample_lookup_backend_baseline(LookupBackend::LogUp);
+        mismatched_workload.workload_sha3_256 = "cd".repeat(32);
+        assert!(
+            compare_lookup_backend_baselines(&transcript, &mismatched_workload)
+                .unwrap_err()
+                .to_string()
+                .contains("workload_sha3_256")
+        );
     }
 
     #[test]
@@ -3669,6 +3988,7 @@ mod tests {
     }
 
     fn sample_performance_artifact(
+        lookup_backend: LookupBackend,
         prove_ms: u64,
         total_ms: u64,
         end_to_end_throughput: f64,
@@ -3679,7 +3999,7 @@ mod tests {
             schema_version: PERFORMANCE_SCHEMA_VERSION.to_string(),
             runner: RUNNER_NAME.to_string(),
             trace_source: "synthetic".to_string(),
-            lookup_backend: "transcript".to_string(),
+            lookup_backend: lookup_backend.as_str().to_string(),
             build_profile: "debug".to_string(),
             target_os: std::env::consts::OS.to_string(),
             target_arch: std::env::consts::ARCH.to_string(),
@@ -3710,6 +4030,43 @@ mod tests {
             report_path: "benchmark-runs/jolt-nova/report.json".to_string(),
             manifest_path: "benchmark-runs/jolt-nova/report.manifest.json".to_string(),
         }
+    }
+
+    fn sample_lookup_backend_baseline(lookup_backend: LookupBackend) -> MultiRunBaselineArtifact {
+        let mut args = sample_args();
+        args.lookup_backend = lookup_backend;
+        let (prove_ms, total_ms, end_to_end_throughput, proving_throughput, peak_delta_bytes) =
+            match lookup_backend {
+                LookupBackend::Transcript => (100, 120, 1_000.0, 90.0, 20),
+                LookupBackend::LogUp => (125, 145, 830.0, 72.0, 28),
+            };
+        let sample = sample_performance_artifact_for_lookup_backend(
+            lookup_backend,
+            prove_ms,
+            total_ms,
+            end_to_end_throughput,
+            proving_throughput,
+            peak_delta_bytes,
+        );
+        build_multi_run_baseline(&args, vec![sample]).unwrap()
+    }
+
+    fn sample_performance_artifact_for_lookup_backend(
+        lookup_backend: LookupBackend,
+        prove_ms: u64,
+        total_ms: u64,
+        end_to_end_throughput: f64,
+        proving_throughput: f64,
+        peak_delta_bytes: u64,
+    ) -> PerformanceBaselineArtifact {
+        sample_performance_artifact(
+            lookup_backend,
+            prove_ms,
+            total_ms,
+            end_to_end_throughput,
+            proving_throughput,
+            peak_delta_bytes,
+        )
     }
 
     fn sample_benchmark_artifact() -> NovaBlockProofPipelineFinalProofSizeBenchmarkArtifact {
