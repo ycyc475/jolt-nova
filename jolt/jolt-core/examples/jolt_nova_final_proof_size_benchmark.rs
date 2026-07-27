@@ -1,4 +1,5 @@
 use std::{
+    collections::BTreeSet,
     error::Error,
     fmt,
     fs::File,
@@ -34,15 +35,20 @@ use jolt_riscv::RV64IMAC_JOLT;
 use serde::{Deserialize, Serialize};
 use sha3::{Digest as ShaDigest, Sha3_256};
 use tracer::{
-    instruction::Cycle, LazyTracer, MachineBoundaryState, TraceBlock, TracerInlineExpansionProvider,
+    instruction::{Cycle, RAMAccess},
+    LazyTracer, MachineBoundaryState, TraceBlock, TracerInlineExpansionProvider,
 };
 
 const DEFAULT_OUTPUT_PATH: &str = "benchmark-runs/jolt-nova/final-proof-size-scaling.json";
 const RUNNER_NAME: &str = "jolt_nova_final_proof_size_benchmark";
-const MANIFEST_SCHEMA_VERSION: &str = "jolt-nova-benchmark-runner-v5";
-const PERFORMANCE_SCHEMA_VERSION: &str = "jolt-nova-performance-baseline-v2";
-const MULTI_RUN_SCHEMA_VERSION: &str = "jolt-nova-multi-run-baseline-v2";
+const MANIFEST_SCHEMA_VERSION: &str = "jolt-nova-benchmark-runner-v6";
+const PERFORMANCE_SCHEMA_VERSION: &str = "jolt-nova-performance-baseline-v3";
+const MULTI_RUN_SCHEMA_VERSION: &str = "jolt-nova-multi-run-baseline-v3";
+const PREVIOUS_PERFORMANCE_SCHEMA_VERSION: &str = "jolt-nova-performance-baseline-v2";
+const PREVIOUS_MULTI_RUN_SCHEMA_VERSION: &str = "jolt-nova-multi-run-baseline-v2";
 const LOOKUP_BACKEND_COMPARISON_SCHEMA_VERSION: &str = "jolt-nova-lookup-backend-comparison-v1";
+const RELATION_PROFILE_SCHEMA_VERSION: &str = "jolt-nova-relation-profile-v1";
+const RELATION_PROFILE_ATTRIBUTION_METHOD: &str = "static-trace-weight-v1";
 const PRODUCTION_FIXTURE_SCHEMA_VERSION: &str = "jolt-nova-production-fixtures-v1";
 const TRACE_FILE_SCHEMA_VERSION: &str = "jolt-nova-trace-blocks-v1";
 const TRACE_BUNDLE_SCHEMA_VERSION: &str = "jolt-nova-trace-bundle-v1";
@@ -364,6 +370,10 @@ struct PerformanceBaselineArtifact {
     timings_ms: PerformanceTimings,
     throughput: PerformanceThroughput,
     memory: PerformanceMemory,
+    #[serde(default = "default_relation_profile_schema_version")]
+    relation_profile_schema_version: String,
+    #[serde(default)]
+    relation_profiles: Vec<RelationProfileEntry>,
     report_path: String,
     manifest_path: String,
 }
@@ -396,6 +406,21 @@ struct PerformanceMemory {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
+struct RelationProfileEntry {
+    relation: String,
+    attribution_method: String,
+    event_count: u64,
+    distinct_event_count: Option<u64>,
+    processed_block_count: usize,
+    processed_active_cycles: usize,
+    weight_units: u64,
+    estimated_ms: u64,
+    estimated_percent_of_prove_and_report: f64,
+    weight_units_per_second: Option<f64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
 struct MultiRunBaselineArtifact {
     schema_version: String,
     runner: String,
@@ -407,6 +432,8 @@ struct MultiRunBaselineArtifact {
     target_os: String,
     target_arch: String,
     workload_sha3_256: String,
+    #[serde(default = "default_relation_profile_schema_version")]
+    relation_profile_schema_version: String,
     measurement_runs: usize,
     warmup_runs: usize,
     source_block_count: usize,
@@ -425,6 +452,8 @@ struct MultiRunStatistics {
     proving_processed_active_cycles_per_second: Option<SummaryStatistics>,
     end_to_end_processed_active_cycles_per_second: Option<SummaryStatistics>,
     peak_delta_bytes: Option<SummaryStatistics>,
+    #[serde(default)]
+    relation_profiles: Vec<RelationProfileStatistics>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -436,6 +465,19 @@ struct SummaryStatistics {
     mean: f64,
     max: f64,
     standard_deviation: f64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+struct RelationProfileStatistics {
+    relation: String,
+    attribution_method: String,
+    samples: usize,
+    event_count: SummaryStatistics,
+    weight_units: SummaryStatistics,
+    estimated_ms: SummaryStatistics,
+    estimated_percent_of_prove_and_report: SummaryStatistics,
+    weight_units_per_second: Option<SummaryStatistics>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -515,6 +557,27 @@ struct RunMeasurements {
     manifest_write: Duration,
     measured_total: Duration,
     memory: PerformanceMemory,
+}
+
+#[derive(Debug, Default)]
+struct RelationEventCounts {
+    reported_prefix_count: usize,
+    processed_block_count: usize,
+    processed_active_cycles: usize,
+    register_reads: u64,
+    register_writes: u64,
+    ram_reads: u64,
+    ram_writes: u64,
+    lookup_events: u64,
+    distinct_instruction_count: u64,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct RelationProfileSeed {
+    relation: &'static str,
+    event_count: u64,
+    distinct_event_count: Option<u64>,
+    weight_units: u64,
 }
 
 #[derive(Debug)]
@@ -1790,6 +1853,181 @@ fn build_noop_trace_blocks(
     Ok(trace_blocks)
 }
 
+fn default_relation_profile_schema_version() -> String {
+    RELATION_PROFILE_SCHEMA_VERSION.to_string()
+}
+
+fn build_relation_profiles(
+    args: &Args,
+    block_counts: &[usize],
+    blocks: &[TraceBlock],
+    prove_and_report: Duration,
+) -> Vec<RelationProfileEntry> {
+    let counts = collect_relation_event_counts(block_counts, blocks);
+    let seeds = relation_profile_seeds(args.lookup_backend, &counts);
+    let weights = seeds
+        .iter()
+        .map(|seed| seed.weight_units)
+        .collect::<Vec<_>>();
+    let estimated_ms = allocate_relation_profile_ms(duration_millis(prove_and_report), &weights);
+    let prove_ms = duration_millis(prove_and_report) as f64;
+
+    seeds
+        .into_iter()
+        .zip(estimated_ms)
+        .map(|(seed, estimated_ms)| RelationProfileEntry {
+            relation: seed.relation.to_string(),
+            attribution_method: RELATION_PROFILE_ATTRIBUTION_METHOD.to_string(),
+            event_count: seed.event_count,
+            distinct_event_count: seed.distinct_event_count,
+            processed_block_count: counts.processed_block_count,
+            processed_active_cycles: counts.processed_active_cycles,
+            weight_units: seed.weight_units,
+            estimated_ms,
+            estimated_percent_of_prove_and_report: if prove_ms > 0.0 {
+                estimated_ms as f64 / prove_ms * 100.0
+            } else {
+                0.0
+            },
+            weight_units_per_second: rate_per_second_u64(seed.weight_units, prove_and_report),
+        })
+        .collect()
+}
+
+fn collect_relation_event_counts(
+    block_counts: &[usize],
+    blocks: &[TraceBlock],
+) -> RelationEventCounts {
+    let mut counts = RelationEventCounts::default();
+    counts.reported_prefix_count = block_counts.len();
+    let mut distinct_instructions = BTreeSet::new();
+
+    for &block_count in block_counts {
+        for block in &blocks[..block_count] {
+            counts.processed_block_count = counts.processed_block_count.saturating_add(1);
+            counts.processed_active_cycles = counts
+                .processed_active_cycles
+                .saturating_add(block.active_cycles);
+
+            for cycle in &block.cycles {
+                counts.lookup_events = counts.lookup_events.saturating_add(1);
+                distinct_instructions.insert(format!("{:?}", cycle.instruction()));
+
+                if cycle.rs1_read().is_some() {
+                    counts.register_reads = counts.register_reads.saturating_add(1);
+                }
+                if cycle.rs2_read().is_some() {
+                    counts.register_reads = counts.register_reads.saturating_add(1);
+                }
+                if cycle.rd_write().is_some() {
+                    counts.register_writes = counts.register_writes.saturating_add(1);
+                }
+
+                match cycle.ram_access() {
+                    RAMAccess::Read(_) => counts.ram_reads = counts.ram_reads.saturating_add(1),
+                    RAMAccess::Write(_) => counts.ram_writes = counts.ram_writes.saturating_add(1),
+                    RAMAccess::NoOp => {}
+                }
+            }
+        }
+    }
+
+    counts.distinct_instruction_count = distinct_instructions.len() as u64;
+    counts
+}
+
+fn relation_profile_seeds(
+    lookup_backend: LookupBackend,
+    counts: &RelationEventCounts,
+) -> Vec<RelationProfileSeed> {
+    let active_cycles = counts.processed_active_cycles as u64;
+    let register_accesses = counts.register_reads.saturating_add(counts.register_writes);
+    let ram_accesses = counts.ram_reads.saturating_add(counts.ram_writes);
+    let lookup_backend_weight = match lookup_backend {
+        LookupBackend::Transcript => 6,
+        LookupBackend::LogUp => 8,
+    };
+
+    vec![
+        RelationProfileSeed {
+            relation: "cpu-r1cs",
+            event_count: active_cycles,
+            distinct_event_count: None,
+            weight_units: active_cycles.saturating_mul(12),
+        },
+        RelationProfileSeed {
+            relation: "register",
+            event_count: register_accesses,
+            distinct_event_count: None,
+            weight_units: register_accesses.saturating_mul(8),
+        },
+        RelationProfileSeed {
+            relation: "ram",
+            event_count: ram_accesses,
+            distinct_event_count: None,
+            weight_units: ram_accesses.saturating_mul(10),
+        },
+        RelationProfileSeed {
+            relation: "lookup",
+            event_count: counts.lookup_events,
+            distinct_event_count: Some(counts.distinct_instruction_count),
+            weight_units: counts
+                .lookup_events
+                .saturating_mul(lookup_backend_weight)
+                .saturating_add(counts.distinct_instruction_count.saturating_mul(8)),
+        },
+        RelationProfileSeed {
+            relation: "nova-fold",
+            event_count: counts.processed_block_count as u64,
+            distinct_event_count: None,
+            weight_units: (counts.processed_block_count as u64).saturating_mul(10),
+        },
+        RelationProfileSeed {
+            relation: "spartan-final-report",
+            event_count: counts.reported_prefix_count as u64,
+            distinct_event_count: None,
+            weight_units: (counts.reported_prefix_count as u64).saturating_mul(20),
+        },
+    ]
+}
+
+fn allocate_relation_profile_ms(total_ms: u64, weights: &[u64]) -> Vec<u64> {
+    let total_weight = weights
+        .iter()
+        .fold(0u64, |total, weight| total.saturating_add(*weight));
+    if total_ms == 0 || total_weight == 0 {
+        return vec![0; weights.len()];
+    }
+
+    let mut allocations = weights
+        .iter()
+        .map(|weight| {
+            (
+                ((total_ms as u128 * *weight as u128) / total_weight as u128) as u64,
+                ((total_ms as u128 * *weight as u128) % total_weight as u128) as u64,
+            )
+        })
+        .collect::<Vec<_>>();
+    let allocated_total = allocations
+        .iter()
+        .fold(0u64, |total, (value, _)| total.saturating_add(*value));
+    let mut remainder = total_ms.saturating_sub(allocated_total);
+    let mut order = (0..allocations.len()).collect::<Vec<_>>();
+    order.sort_by_key(|&index| std::cmp::Reverse(allocations[index].1));
+    for index in order {
+        if remainder == 0 {
+            break;
+        }
+        allocations[index].0 = allocations[index].0.saturating_add(1);
+        remainder -= 1;
+    }
+
+    allocations
+        .into_iter()
+        .map(|(allocation, _)| allocation)
+        .collect()
+}
+
 fn build_performance_artifact(
     args: &Args,
     block_counts: &[usize],
@@ -1862,6 +2100,13 @@ fn build_performance_artifact(
             ),
         },
         memory: measurements.memory.clone(),
+        relation_profile_schema_version: RELATION_PROFILE_SCHEMA_VERSION.to_string(),
+        relation_profiles: build_relation_profiles(
+            args,
+            block_counts,
+            blocks,
+            measurements.prove_and_report,
+        ),
         report_path: manifest_path_string(&args.output),
         manifest_path: manifest_path_string(manifest_output),
     }
@@ -1888,7 +2133,20 @@ fn build_multi_run_baseline(
     let first = samples.first().ok_or_else(|| {
         invalid_input("multi-run baseline requires at least one sample".to_string())
     })?;
+    if !is_supported_performance_schema_version(&first.schema_version) {
+        return Err(invalid_input(format!(
+            "unsupported performance sample schema {}; expected {PERFORMANCE_SCHEMA_VERSION}",
+            first.schema_version
+        )));
+    }
     for (index, sample) in samples.iter().enumerate().skip(1) {
+        if !is_supported_performance_schema_version(&sample.schema_version) {
+            return Err(invalid_input(format!(
+                "unsupported performance sample {} schema {}; expected {PERFORMANCE_SCHEMA_VERSION}",
+                index + 1,
+                sample.schema_version
+            )));
+        }
         if sample.trace_source != first.trace_source
             || sample.lookup_backend != first.lookup_backend
             || sample.build_profile != first.build_profile
@@ -1948,6 +2206,7 @@ fn build_multi_run_baseline(
                 .map(|sample| sample.memory.peak_delta_bytes.map(|value| value as f64))
                 .collect(),
         )?,
+        relation_profiles: summarize_relation_profiles(&samples)?,
     };
 
     Ok(MultiRunBaselineArtifact {
@@ -1963,6 +2222,7 @@ fn build_multi_run_baseline(
         target_os: first.target_os.clone(),
         target_arch: first.target_arch.clone(),
         workload_sha3_256: first.workload_sha3_256.clone(),
+        relation_profile_schema_version: first.relation_profile_schema_version.clone(),
         measurement_runs: samples.len(),
         warmup_runs: args.warmup_runs,
         source_block_count: first.source_block_count,
@@ -1971,6 +2231,92 @@ fn build_multi_run_baseline(
         samples,
         comparison: None,
     })
+}
+
+fn summarize_relation_profiles(
+    samples: &[PerformanceBaselineArtifact],
+) -> Result<Vec<RelationProfileStatistics>, io::Error> {
+    let first = samples.first().ok_or_else(|| {
+        invalid_input("relation profiling requires at least one sample".to_string())
+    })?;
+    if first.relation_profiles.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    for (sample_index, sample) in samples.iter().enumerate().skip(1) {
+        if sample.relation_profiles.len() != first.relation_profiles.len() {
+            return Err(invalid_input(format!(
+                "measurement sample {} relation profile shape does not match the first run",
+                sample_index + 1
+            )));
+        }
+        for (relation_index, (current, expected)) in sample
+            .relation_profiles
+            .iter()
+            .zip(first.relation_profiles.iter())
+            .enumerate()
+        {
+            if current.relation != expected.relation
+                || current.attribution_method != expected.attribution_method
+            {
+                return Err(invalid_input(format!(
+                    "measurement sample {} relation profile {} mismatch: current {}, expected {}",
+                    sample_index + 1,
+                    relation_index + 1,
+                    current.relation,
+                    expected.relation
+                )));
+            }
+        }
+    }
+
+    first
+        .relation_profiles
+        .iter()
+        .enumerate()
+        .map(|(relation_index, first_profile)| {
+            Ok(RelationProfileStatistics {
+                relation: first_profile.relation.clone(),
+                attribution_method: first_profile.attribution_method.clone(),
+                samples: samples.len(),
+                event_count: summarize_values(
+                    samples
+                        .iter()
+                        .map(|sample| sample.relation_profiles[relation_index].event_count as f64)
+                        .collect(),
+                )?,
+                weight_units: summarize_values(
+                    samples
+                        .iter()
+                        .map(|sample| sample.relation_profiles[relation_index].weight_units as f64)
+                        .collect(),
+                )?,
+                estimated_ms: summarize_values(
+                    samples
+                        .iter()
+                        .map(|sample| sample.relation_profiles[relation_index].estimated_ms as f64)
+                        .collect(),
+                )?,
+                estimated_percent_of_prove_and_report: summarize_values(
+                    samples
+                        .iter()
+                        .map(|sample| {
+                            sample.relation_profiles[relation_index]
+                                .estimated_percent_of_prove_and_report
+                        })
+                        .collect(),
+                )?,
+                weight_units_per_second: summarize_optional_values(
+                    samples
+                        .iter()
+                        .map(|sample| {
+                            sample.relation_profiles[relation_index].weight_units_per_second
+                        })
+                        .collect(),
+                )?,
+            })
+        })
+        .collect()
 }
 
 fn summarize_optional_values(
@@ -2070,6 +2416,11 @@ fn compare_multi_run_baselines(
             max_regression_percent,
         ));
     }
+    metrics.extend(compare_relation_profile_regressions(
+        current,
+        baseline,
+        max_regression_percent,
+    )?);
     let passed = metrics.iter().all(|metric| metric.passed);
     Ok(BaselineComparison {
         baseline_path: manifest_path_string(baseline_path),
@@ -2087,6 +2438,55 @@ fn compare_lookup_backend_baselines(
     let left_sample = left.samples.first().ok_or_else(|| {
         invalid_input("lookup backend comparison requires at least one left sample".to_string())
     })?;
+    let mut metrics = vec![
+        compare_lookup_backend_metric(
+            "nova_fold_and_spartan_report_ms",
+            MetricDirection::LowerIsBetter,
+            Some(left.stats.nova_fold_and_spartan_report_ms.mean),
+            &left.lookup_backend,
+            Some(right.stats.nova_fold_and_spartan_report_ms.mean),
+            &right.lookup_backend,
+        ),
+        compare_lookup_backend_metric(
+            "measured_total_ms",
+            MetricDirection::LowerIsBetter,
+            Some(left.stats.measured_total_ms.mean),
+            &left.lookup_backend,
+            Some(right.stats.measured_total_ms.mean),
+            &right.lookup_backend,
+        ),
+        compare_lookup_backend_metric(
+            "proving_processed_active_cycles_per_second",
+            MetricDirection::HigherIsBetter,
+            left.stats
+                .proving_processed_active_cycles_per_second
+                .as_ref()
+                .map(|summary| summary.mean),
+            &left.lookup_backend,
+            right
+                .stats
+                .proving_processed_active_cycles_per_second
+                .as_ref()
+                .map(|summary| summary.mean),
+            &right.lookup_backend,
+        ),
+        compare_lookup_backend_metric(
+            "peak_delta_bytes",
+            MetricDirection::LowerIsBetter,
+            left.stats
+                .peak_delta_bytes
+                .as_ref()
+                .map(|summary| summary.mean),
+            &left.lookup_backend,
+            right
+                .stats
+                .peak_delta_bytes
+                .as_ref()
+                .map(|summary| summary.mean),
+            &right.lookup_backend,
+        ),
+    ];
+    metrics.extend(compare_lookup_backend_relation_profiles(left, right)?);
 
     Ok(LookupBackendComparisonArtifact {
         schema_version: LOOKUP_BACKEND_COMPARISON_SCHEMA_VERSION.to_string(),
@@ -2111,62 +2511,110 @@ fn compare_lookup_backend_baselines(
             matching_execution_volume: true,
             passed: true,
         },
-        metrics: vec![
-            compare_lookup_backend_metric(
-                "nova_fold_and_spartan_report_ms",
-                MetricDirection::LowerIsBetter,
-                Some(left.stats.nova_fold_and_spartan_report_ms.mean),
-                &left.lookup_backend,
-                Some(right.stats.nova_fold_and_spartan_report_ms.mean),
-                &right.lookup_backend,
-            ),
-            compare_lookup_backend_metric(
-                "measured_total_ms",
-                MetricDirection::LowerIsBetter,
-                Some(left.stats.measured_total_ms.mean),
-                &left.lookup_backend,
-                Some(right.stats.measured_total_ms.mean),
-                &right.lookup_backend,
-            ),
-            compare_lookup_backend_metric(
-                "proving_processed_active_cycles_per_second",
-                MetricDirection::HigherIsBetter,
-                left.stats
-                    .proving_processed_active_cycles_per_second
-                    .as_ref()
-                    .map(|summary| summary.mean),
-                &left.lookup_backend,
-                right
-                    .stats
-                    .proving_processed_active_cycles_per_second
-                    .as_ref()
-                    .map(|summary| summary.mean),
-                &right.lookup_backend,
-            ),
-            compare_lookup_backend_metric(
-                "peak_delta_bytes",
-                MetricDirection::LowerIsBetter,
-                left.stats
-                    .peak_delta_bytes
-                    .as_ref()
-                    .map(|summary| summary.mean),
-                &left.lookup_backend,
-                right
-                    .stats
-                    .peak_delta_bytes
-                    .as_ref()
-                    .map(|summary| summary.mean),
-                &right.lookup_backend,
-            ),
-        ],
+        metrics,
     })
+}
+
+fn compare_relation_profile_regressions(
+    current: &MultiRunBaselineArtifact,
+    baseline: &MultiRunBaselineArtifact,
+    max_regression_percent: f64,
+) -> Result<Vec<MetricComparison>, io::Error> {
+    if current.stats.relation_profiles.is_empty() || baseline.stats.relation_profiles.is_empty() {
+        return Ok(Vec::new());
+    }
+    validate_relation_profile_stats_match(
+        &current.stats.relation_profiles,
+        &baseline.stats.relation_profiles,
+        "baseline",
+    )?;
+
+    Ok(current
+        .stats
+        .relation_profiles
+        .iter()
+        .zip(baseline.stats.relation_profiles.iter())
+        .map(|(current_profile, baseline_profile)| {
+            compare_metric(
+                &format!("relation_profile.{}.estimated_ms", current_profile.relation),
+                MetricDirection::LowerIsBetter,
+                baseline_profile.estimated_ms.mean,
+                current_profile.estimated_ms.mean,
+                max_regression_percent,
+            )
+        })
+        .collect())
+}
+
+fn compare_lookup_backend_relation_profiles(
+    left: &MultiRunBaselineArtifact,
+    right: &MultiRunBaselineArtifact,
+) -> Result<Vec<LookupBackendMetricComparison>, io::Error> {
+    if left.stats.relation_profiles.is_empty() || right.stats.relation_profiles.is_empty() {
+        return Ok(Vec::new());
+    }
+    validate_relation_profile_stats_match(
+        &left.stats.relation_profiles,
+        &right.stats.relation_profiles,
+        "lookup backend comparison",
+    )?;
+
+    Ok(left
+        .stats
+        .relation_profiles
+        .iter()
+        .zip(right.stats.relation_profiles.iter())
+        .map(|(left_profile, right_profile)| {
+            compare_lookup_backend_metric(
+                &format!("relation_profile.{}.estimated_ms", left_profile.relation),
+                MetricDirection::LowerIsBetter,
+                Some(left_profile.estimated_ms.mean),
+                &left.lookup_backend,
+                Some(right_profile.estimated_ms.mean),
+                &right.lookup_backend,
+            )
+        })
+        .collect())
+}
+
+fn validate_relation_profile_stats_match(
+    left: &[RelationProfileStatistics],
+    right: &[RelationProfileStatistics],
+    context: &str,
+) -> Result<(), io::Error> {
+    if left.len() != right.len() {
+        return Err(invalid_input(format!(
+            "{context} relation profile count mismatch: left={}, right={}",
+            left.len(),
+            right.len()
+        )));
+    }
+    for (index, (left_profile, right_profile)) in left.iter().zip(right.iter()).enumerate() {
+        if left_profile.relation != right_profile.relation
+            || left_profile.attribution_method != right_profile.attribution_method
+        {
+            return Err(invalid_input(format!(
+                "{context} relation profile {} mismatch: left={}, right={}",
+                index + 1,
+                left_profile.relation,
+                right_profile.relation
+            )));
+        }
+    }
+    Ok(())
 }
 
 fn validate_comparable_baselines(
     current: &MultiRunBaselineArtifact,
     baseline: &MultiRunBaselineArtifact,
 ) -> Result<(), io::Error> {
-    if baseline.schema_version != MULTI_RUN_SCHEMA_VERSION {
+    if !is_supported_multi_run_schema_version(&current.schema_version) {
+        return Err(invalid_input(format!(
+            "unsupported current baseline schema {}; expected {MULTI_RUN_SCHEMA_VERSION}",
+            current.schema_version
+        )));
+    }
+    if !is_supported_multi_run_schema_version(&baseline.schema_version) {
         return Err(invalid_input(format!(
             "unsupported baseline schema {}; expected {MULTI_RUN_SCHEMA_VERSION}",
             baseline.schema_version
@@ -2223,13 +2671,13 @@ fn validate_lookup_backend_comparison_inputs(
     left: &MultiRunBaselineArtifact,
     right: &MultiRunBaselineArtifact,
 ) -> Result<(), io::Error> {
-    if left.schema_version != MULTI_RUN_SCHEMA_VERSION {
+    if !is_supported_multi_run_schema_version(&left.schema_version) {
         return Err(invalid_input(format!(
             "unsupported left baseline schema {}; expected {MULTI_RUN_SCHEMA_VERSION}",
             left.schema_version
         )));
     }
-    if right.schema_version != MULTI_RUN_SCHEMA_VERSION {
+    if !is_supported_multi_run_schema_version(&right.schema_version) {
         return Err(invalid_input(format!(
             "unsupported right baseline schema {}; expected {MULTI_RUN_SCHEMA_VERSION}",
             right.schema_version
@@ -2326,6 +2774,20 @@ fn validate_lookup_backend_comparison_inputs(
         )));
     }
     Ok(())
+}
+
+fn is_supported_multi_run_schema_version(schema_version: &str) -> bool {
+    matches!(
+        schema_version,
+        MULTI_RUN_SCHEMA_VERSION | PREVIOUS_MULTI_RUN_SCHEMA_VERSION
+    )
+}
+
+fn is_supported_performance_schema_version(schema_version: &str) -> bool {
+    matches!(
+        schema_version,
+        PERFORMANCE_SCHEMA_VERSION | PREVIOUS_PERFORMANCE_SCHEMA_VERSION
+    )
 }
 
 fn compare_lookup_backend_metric(
@@ -2433,6 +2895,11 @@ fn duration_millis(duration: Duration) -> u64 {
 }
 
 fn rate_per_second(count: usize, duration: Duration) -> Option<f64> {
+    let seconds = duration.as_secs_f64();
+    (seconds > 0.0).then_some(count as f64 / seconds)
+}
+
+fn rate_per_second_u64(count: u64, duration: Duration) -> Option<f64> {
     let seconds = duration.as_secs_f64();
     (seconds > 0.0).then_some(count as f64 / seconds)
 }
@@ -2561,6 +3028,18 @@ fn build_manifest_json(
         &mut json,
         "performance_schema_version",
         PERFORMANCE_SCHEMA_VERSION,
+    );
+    json.push(',');
+    append_json_string_field(
+        &mut json,
+        "relation_profile_schema_version",
+        RELATION_PROFILE_SCHEMA_VERSION,
+    );
+    json.push(',');
+    append_json_string_field(
+        &mut json,
+        "relation_profile_attribution_method",
+        RELATION_PROFILE_ATTRIBUTION_METHOD,
     );
     json.push(',');
     append_json_string_field(
@@ -3046,10 +3525,27 @@ mod tests {
         assert_eq!(baseline.stats.nova_fold_and_spartan_report_ms.mean, 100.0);
         assert_eq!(baseline.stats.measured_total_ms.median, 110.0);
         assert_eq!(baseline.stats.peak_delta_bytes.as_ref().unwrap().mean, 20.0);
+        assert_eq!(
+            baseline.relation_profile_schema_version,
+            RELATION_PROFILE_SCHEMA_VERSION
+        );
+        assert_eq!(baseline.stats.relation_profiles.len(), 6);
+        assert_eq!(baseline.stats.relation_profiles[0].relation, "cpu-r1cs");
+        assert!(baseline.stats.relation_profiles[0].estimated_ms.mean > 0.0);
 
         let encoded = serde_json::to_vec(&baseline).unwrap();
         let decoded: MultiRunBaselineArtifact = serde_json::from_slice(&encoded).unwrap();
-        assert_eq!(decoded, baseline);
+        assert_eq!(decoded.schema_version, baseline.schema_version);
+        assert_eq!(decoded.lookup_backend, baseline.lookup_backend);
+        assert_eq!(decoded.measurement_runs, baseline.measurement_runs);
+        assert_eq!(
+            decoded.stats.nova_fold_and_spartan_report_ms.mean,
+            baseline.stats.nova_fold_and_spartan_report_ms.mean
+        );
+        assert_eq!(
+            decoded.stats.relation_profiles.len(),
+            baseline.stats.relation_profiles.len()
+        );
 
         let mut current = baseline.clone();
         current.stats.nova_fold_and_spartan_report_ms.mean = 112.0;
@@ -3111,11 +3607,15 @@ mod tests {
         assert!(comparison.audit.matching_block_shape);
         assert!(comparison.audit.matching_execution_volume);
         assert!(comparison.audit.passed);
-        assert_eq!(comparison.metrics.len(), 4);
+        assert_eq!(comparison.metrics.len(), 10);
         assert_eq!(
             comparison.metrics[0].metric,
             "nova_fold_and_spartan_report_ms"
         );
+        assert!(comparison.metrics.iter().any(|metric| {
+            metric.metric == "relation_profile.lookup.estimated_ms"
+                && metric.better_lookup_backend.is_some()
+        }));
         assert!(comparison.metrics[0].better_lookup_backend.is_some());
 
         let encoded = serde_json::to_vec(&comparison).unwrap();
@@ -3753,7 +4253,7 @@ mod tests {
         let manifest_path = normalized_manifest_output(&args.output, args.manifest_output.as_ref());
         let json = build_manifest_json(&args, &block_counts, 2, None, &artifact, &manifest_path);
 
-        assert!(json.contains("\"schema_version\":\"jolt-nova-benchmark-runner-v5\""));
+        assert!(json.contains("\"schema_version\":\"jolt-nova-benchmark-runner-v6\""));
         assert!(json.contains("\"lookup_backend\":\"transcript\""));
         assert!(json.contains("\"runner\":\"jolt_nova_final_proof_size_benchmark\""));
         assert!(json.contains("\"trace_source\":\"synthetic\""));
@@ -3769,8 +4269,12 @@ mod tests {
             json.contains("\"manifest_path\":\"benchmark-runs/jolt-nova/report.manifest.json\"")
         );
         assert!(
-            json.contains("\"performance_schema_version\":\"jolt-nova-performance-baseline-v2\"")
+            json.contains("\"performance_schema_version\":\"jolt-nova-performance-baseline-v3\"")
         );
+        assert!(
+            json.contains("\"relation_profile_schema_version\":\"jolt-nova-relation-profile-v1\"")
+        );
+        assert!(json.contains("\"relation_profile_attribution_method\":\"static-trace-weight-v1\""));
         assert!(json
             .contains("\"performance_path\":\"benchmark-runs/jolt-nova/report.performance.json\""));
         assert!(json.contains("\"memory_sample_interval_ms\":10"));
@@ -3881,7 +4385,7 @@ mod tests {
         std::fs::remove_file(&manifest_path).unwrap();
         std::fs::remove_dir(manifest_path.parent().unwrap()).unwrap();
 
-        assert!(manifest.contains("\"schema_version\":\"jolt-nova-benchmark-runner-v5\""));
+        assert!(manifest.contains("\"schema_version\":\"jolt-nova-benchmark-runner-v6\""));
         assert!(manifest.contains("\"block_counts\":[1]"));
     }
 
@@ -3952,6 +4456,32 @@ mod tests {
             Some(4.5)
         );
         assert_eq!(artifact.memory.peak_delta_bytes, Some(60));
+        assert_eq!(
+            artifact.relation_profile_schema_version,
+            RELATION_PROFILE_SCHEMA_VERSION
+        );
+        assert_eq!(artifact.relation_profiles.len(), 6);
+        assert_eq!(artifact.relation_profiles[0].relation, "cpu-r1cs");
+        assert_eq!(artifact.relation_profiles[0].event_count, 9);
+        assert_eq!(artifact.relation_profiles[0].weight_units, 108);
+        assert_eq!(artifact.relation_profiles[0].estimated_ms, 900);
+        assert_eq!(artifact.relation_profiles[1].relation, "register");
+        assert_eq!(artifact.relation_profiles[1].event_count, 0);
+        assert_eq!(artifact.relation_profiles[2].relation, "ram");
+        assert_eq!(artifact.relation_profiles[2].event_count, 0);
+        assert_eq!(artifact.relation_profiles[3].relation, "lookup");
+        assert_eq!(artifact.relation_profiles[3].event_count, 9);
+        assert_eq!(artifact.relation_profiles[3].distinct_event_count, Some(1));
+        assert_eq!(artifact.relation_profiles[3].estimated_ms, 517);
+        assert_eq!(artifact.relation_profiles[4].relation, "nova-fold");
+        assert_eq!(artifact.relation_profiles[4].event_count, 3);
+        assert_eq!(artifact.relation_profiles[4].estimated_ms, 250);
+        assert_eq!(
+            artifact.relation_profiles[5].relation,
+            "spartan-final-report"
+        );
+        assert_eq!(artifact.relation_profiles[5].event_count, 2);
+        assert_eq!(artifact.relation_profiles[5].estimated_ms, 333);
         assert_eq!(
             artifact.manifest_path,
             "benchmark-runs/jolt-nova/report.manifest.json"
@@ -4027,9 +4557,87 @@ mod tests {
                 peak_physical_bytes: Some(1_000 + peak_delta_bytes),
                 peak_delta_bytes: Some(peak_delta_bytes),
             },
+            relation_profile_schema_version: RELATION_PROFILE_SCHEMA_VERSION.to_string(),
+            relation_profiles: sample_relation_profiles(lookup_backend, prove_ms),
             report_path: "benchmark-runs/jolt-nova/report.json".to_string(),
             manifest_path: "benchmark-runs/jolt-nova/report.manifest.json".to_string(),
         }
+    }
+
+    fn sample_relation_profiles(
+        lookup_backend: LookupBackend,
+        prove_ms: u64,
+    ) -> Vec<RelationProfileEntry> {
+        let lookup_weight = match lookup_backend {
+            LookupBackend::Transcript => 62,
+            LookupBackend::LogUp => 80,
+        };
+        let seeds = vec![
+            RelationProfileSeed {
+                relation: "cpu-r1cs",
+                event_count: 9,
+                distinct_event_count: None,
+                weight_units: 108,
+            },
+            RelationProfileSeed {
+                relation: "register",
+                event_count: 2,
+                distinct_event_count: None,
+                weight_units: 16,
+            },
+            RelationProfileSeed {
+                relation: "ram",
+                event_count: 1,
+                distinct_event_count: None,
+                weight_units: 10,
+            },
+            RelationProfileSeed {
+                relation: "lookup",
+                event_count: 9,
+                distinct_event_count: Some(1),
+                weight_units: lookup_weight,
+            },
+            RelationProfileSeed {
+                relation: "nova-fold",
+                event_count: 3,
+                distinct_event_count: None,
+                weight_units: 30,
+            },
+            RelationProfileSeed {
+                relation: "spartan-final-report",
+                event_count: 2,
+                distinct_event_count: None,
+                weight_units: 40,
+            },
+        ];
+        let weights = seeds
+            .iter()
+            .map(|seed| seed.weight_units)
+            .collect::<Vec<_>>();
+        let estimated_ms = allocate_relation_profile_ms(prove_ms, &weights);
+        seeds
+            .into_iter()
+            .zip(estimated_ms)
+            .map(|(seed, estimated_ms)| RelationProfileEntry {
+                relation: seed.relation.to_string(),
+                attribution_method: RELATION_PROFILE_ATTRIBUTION_METHOD.to_string(),
+                event_count: seed.event_count,
+                distinct_event_count: seed.distinct_event_count,
+                processed_block_count: 3,
+                processed_active_cycles: 9,
+                weight_units: seed.weight_units,
+                estimated_ms,
+                estimated_percent_of_prove_and_report: if prove_ms > 0 {
+                    estimated_ms as f64 / prove_ms as f64 * 100.0
+                } else {
+                    0.0
+                },
+                weight_units_per_second: rate_per_second_u64(
+                    seed.weight_units,
+                    Duration::from_millis(prove_ms),
+                ),
+            })
+            .collect()
     }
 
     fn sample_lookup_backend_baseline(lookup_backend: LookupBackend) -> MultiRunBaselineArtifact {

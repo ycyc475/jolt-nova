@@ -727,8 +727,6 @@ This stage still does not reconstruct the opening claims in ZK mode. It
 introduces a fixed-width, privacy-preserving receipt capsule that can be bound
 recursively, but the non-ZK opening extraction path remains separate.
 
-## Remaining Stage 9 work
-
 ## Stage 9.16: Lasso/LogUp comparison and audit
 
 Stage 9.16 turns the existing lookup-backend switch into a controlled
@@ -750,8 +748,50 @@ This stage compares two already-verified backends and records their
 performance/audit metadata. It does not yet alter the cryptographic lookup
 argument or internalize more of the Jolt verifier.
 
-After Stage 9.16, the main cryptographic gaps are:
+## Stage 9.17: per-relation profiling
+
+Stage 9.17 adds a stable per-relation profiling surface to the benchmark runner.
+Every single-run performance artifact now records a `relation_profiles` array
+under schema `jolt-nova-relation-profile-v1`, and the multi-run aggregate
+summarizes those profiles across samples. The tracked relations are:
+
+- `cpu-r1cs`;
+- `register`;
+- `ram`;
+- `lookup`;
+- `nova-fold`;
+- `spartan-final-report`.
+
+The profile currently combines real trace-derived event counts with a stable
+static attribution model:
+
+- RAM event counts come from each trace cycle's `ram_access()`;
+- register event counts come from observed `rs1`, `rs2`, and `rd` accesses;
+- lookup event counts and distinct instruction counts come from the processed
+  trace prefixes;
+- CPU, Nova fold, and Spartan final-report costs are attributed from active
+  cycles, processed prefix blocks, and report rows.
+
+The performance baseline schema advances to
+`jolt-nova-performance-baseline-v3`, the aggregate schema advances to
+`jolt-nova-multi-run-baseline-v3`, and the runner manifest advances to
+`jolt-nova-benchmark-runner-v6`. The comparison helpers remain compatible with
+the Stage 9.16 v2 aggregate schema, but when both inputs contain relation
+profiles they also compare `relation_profile.<name>.estimated_ms`.
+
+### Security boundary
+
+This stage does not change the cryptographic proof relation. The per-relation
+times are attribution estimates over the already-measured prove/report duration;
+they are meant to make CPU/RAM/lookup/fold hotspots visible and comparable.
+Later instrumentation can replace the static attribution model with real
+internal prover spans without changing the consumer-facing artifact shape.
+
+## Remaining Stage 9 work
+
+After Stage 9.17, the main cryptographic gaps are:
 
 - replace digest-only recursive verifier capsule transitions with in-circuit
   verifier gadgets;
-- add per-relation profiling and finish streaming trace-to-fold execution.
+- finish streaming trace-to-fold execution and wire real internal profiling
+  spans into the Stage 9.17 relation profile artifact.
