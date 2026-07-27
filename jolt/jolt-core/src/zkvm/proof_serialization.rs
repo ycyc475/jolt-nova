@@ -686,10 +686,7 @@ mod tests {
         let blindfold_receipt = receipt
             .blindfold_receipt()
             .expect("ZK receipts expose a BlindFold receipt capsule");
-        assert_eq!(
-            blindfold_receipt.lookup_receipt_digest(),
-            receipt.digest()
-        );
+        assert_eq!(blindfold_receipt.lookup_receipt_digest(), receipt.digest());
         assert_eq!(
             blindfold_receipt.verifier_stage_relation_digest(),
             receipt.verifier_stage_relation_digest()
