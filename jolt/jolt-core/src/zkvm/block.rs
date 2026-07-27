@@ -5709,6 +5709,63 @@ where
         Ok(NovaBlockProofPipelineFinalProofSizeScalingReport { rows })
     }
 
+    /// Proves increasing block prefixes from a streaming block iterator.
+    ///
+    /// This is the stage-9.18 trace-to-fold surface: callers can feed blocks as
+    /// they are decoded or produced by the tracer, and the pipeline emits each
+    /// requested prefix row once the prefix and its one-block lookahead are
+    /// available. The iterator is consumed only up to the largest requested
+    /// prefix plus one optional lookahead block, so sources that contain more
+    /// blocks than the requested benchmark window do not need to be fully
+    /// materialized before folding begins.
+    pub fn prove_block_prefixes_with_final_proof_size_scaling_report_from_iter(
+        &self,
+        bytecode_preprocessing: &BytecodePreprocessing,
+        blocks: impl IntoIterator<Item = TraceBlock>,
+        block_counts: &[usize],
+    ) -> Result<NovaBlockProofPipelineFinalProofSizeScalingReport, BlockTraceError> {
+        validate_streaming_final_proof_size_scaling_block_counts(block_counts)?;
+
+        let mut block_iter = blocks.into_iter();
+        let mut buffered_blocks = Vec::new();
+        let mut next_block = block_iter.next();
+        let mut rows = Vec::with_capacity(block_counts.len());
+
+        for &block_count in block_counts {
+            while buffered_blocks.len() < block_count {
+                let block = next_block.take().ok_or(
+                    BlockTraceError::NovaFoldingBackendError {
+                        block_index: block_count.saturating_sub(1),
+                        reason: "streaming final proof size scaling source ended before requested block count",
+                    },
+                )?;
+                buffered_blocks.push(block);
+                next_block = block_iter.next();
+            }
+
+            let external_lookahead_cycle = next_block
+                .as_ref()
+                .and_then(|next_block| next_block.cycles.first());
+            let report = self.prove_blocks_with_final_proof_size_report_and_external_lookahead(
+                bytecode_preprocessing,
+                &buffered_blocks[..block_count],
+                external_lookahead_cycle,
+            )?;
+            let accumulator = &report.output.accumulator;
+
+            rows.push(NovaBlockProofPipelineFinalProofSizeScalingRow {
+                block_count,
+                first_block_index: accumulator.metadata.first_block_index,
+                last_block_index: accumulator.metadata.last_block_index,
+                total_active_cycles: accumulator.metadata.total_active_cycles,
+                recursive_snark_bytes_len: accumulator.recursive_snark_bytes.as_ref().map(Vec::len),
+                final_proof_size_comparison: report.final_proof_size_comparison,
+            });
+        }
+
+        Ok(NovaBlockProofPipelineFinalProofSizeScalingReport { rows })
+    }
+
     /// Runs the final proof size scaling benchmark and serializes the result.
     ///
     /// This is a lightweight runner/helper rather than a wall-clock benchmark:
@@ -5723,6 +5780,30 @@ where
         output_format: JoltNovaReportOutputFormat,
     ) -> Result<NovaBlockProofPipelineFinalProofSizeBenchmarkArtifact, BlockTraceError> {
         let report = self.prove_block_prefixes_with_final_proof_size_scaling_report(
+            bytecode_preprocessing,
+            blocks,
+            block_counts,
+        )?;
+        let serialized_report =
+            export_nova_final_proof_size_scaling_report(&report, output_format)?;
+
+        Ok(NovaBlockProofPipelineFinalProofSizeBenchmarkArtifact {
+            output_format,
+            report,
+            serialized_report,
+        })
+    }
+
+    /// Runs the final proof size scaling benchmark from a streaming block
+    /// iterator and serializes the result.
+    pub fn prove_block_prefixes_with_final_proof_size_benchmark_artifact_from_iter(
+        &self,
+        bytecode_preprocessing: &BytecodePreprocessing,
+        blocks: impl IntoIterator<Item = TraceBlock>,
+        block_counts: &[usize],
+        output_format: JoltNovaReportOutputFormat,
+    ) -> Result<NovaBlockProofPipelineFinalProofSizeBenchmarkArtifact, BlockTraceError> {
+        let report = self.prove_block_prefixes_with_final_proof_size_scaling_report_from_iter(
             bytecode_preprocessing,
             blocks,
             block_counts,
@@ -5767,6 +5848,38 @@ where
 
         Ok(artifact)
     }
+
+    /// Runs the streaming final proof size scaling benchmark and writes the
+    /// serialized artifact to disk.
+    pub fn prove_block_prefixes_and_write_final_proof_size_benchmark_artifact_from_iter(
+        &self,
+        bytecode_preprocessing: &BytecodePreprocessing,
+        blocks: impl IntoIterator<Item = TraceBlock>,
+        block_counts: &[usize],
+        output_format: JoltNovaReportOutputFormat,
+        output_path: impl AsRef<std::path::Path>,
+    ) -> Result<
+        NovaBlockProofPipelineFinalProofSizeBenchmarkArtifact,
+        NovaBlockProofPipelineBenchmarkArtifactError,
+    > {
+        let output_path = output_path.as_ref();
+        let artifact = self
+            .prove_block_prefixes_with_final_proof_size_benchmark_artifact_from_iter(
+                bytecode_preprocessing,
+                blocks,
+                block_counts,
+                output_format,
+            )?;
+
+        artifact.write_to_path(output_path).map_err(|error| {
+            NovaBlockProofPipelineBenchmarkArtifactError::ArtifactIo {
+                path: output_path.display().to_string(),
+                reason: error.to_string(),
+            }
+        })?;
+
+        Ok(artifact)
+    }
 }
 
 /// Summarizes the final proof size comparison for an already-produced Nova
@@ -5801,6 +5914,36 @@ fn validate_final_proof_size_scaling_block_counts(
         if block_count == 0 || block_count > blocks_len {
             return Err(BlockTraceError::NovaFoldingBackendError {
                 block_index: block_count.saturating_sub(1),
+                reason: "final proof size scaling block count is out of range",
+            });
+        }
+        if block_count <= previous {
+            return Err(BlockTraceError::NovaFoldingBackendError {
+                block_index: block_count.saturating_sub(1),
+                reason: "final proof size scaling block counts must be strictly increasing",
+            });
+        }
+        previous = block_count;
+    }
+
+    Ok(())
+}
+
+fn validate_streaming_final_proof_size_scaling_block_counts(
+    block_counts: &[usize],
+) -> Result<(), BlockTraceError> {
+    if block_counts.is_empty() {
+        return Err(BlockTraceError::NovaFoldingBackendError {
+            block_index: 0,
+            reason: "final proof size scaling requires at least one block count",
+        });
+    }
+
+    let mut previous = 0;
+    for &block_count in block_counts {
+        if block_count == 0 {
+            return Err(BlockTraceError::NovaFoldingBackendError {
+                block_index: 0,
                 reason: "final proof size scaling block count is out of range",
             });
         }
@@ -10105,6 +10248,7 @@ mod tests {
     use super::*;
     use common::constants::{RAM_START_ADDRESS, REGISTER_COUNT};
     use jolt_riscv::RV64IMAC_JOLT;
+    use std::{cell::Cell, rc::Rc};
     use tracer::instruction::{
         add::ADD,
         format::{
@@ -10125,6 +10269,36 @@ mod tests {
             .map(|cycle| cycle.instruction().try_jolt_instruction_row().unwrap())
             .collect::<Vec<_>>();
         BytecodePreprocessing::preprocess(bytecode, 0, RV64IMAC_JOLT).unwrap()
+    }
+
+    #[derive(Clone)]
+    struct CountingTraceBlockIterator {
+        blocks: Vec<TraceBlock>,
+        next_index: usize,
+        consumed: Rc<Cell<usize>>,
+    }
+
+    impl CountingTraceBlockIterator {
+        fn new(blocks: Vec<TraceBlock>, consumed: Rc<Cell<usize>>) -> Self {
+            Self {
+                blocks,
+                next_index: 0,
+                consumed,
+            }
+        }
+    }
+
+    impl Iterator for CountingTraceBlockIterator {
+        type Item = TraceBlock;
+
+        fn next(&mut self) -> Option<Self::Item> {
+            let block = self.blocks.get(self.next_index).cloned();
+            if block.is_some() {
+                self.next_index += 1;
+                self.consumed.set(self.consumed.get() + 1);
+            }
+            block
+        }
     }
 
     fn boundary(global_cycle: usize, pc: u64) -> MachineBoundaryState {
@@ -14543,6 +14717,108 @@ mod tests {
                         .proof_total_bytes_len
             );
         }
+    }
+
+    #[cfg(feature = "nova")]
+    #[test]
+    fn nova_block_proof_pipeline_streams_final_proof_size_prefixes_from_iter() {
+        let bytecode = BytecodePreprocessing::default();
+        let block0 = trace_block(0, boundary(0, 0), boundary(2, 0));
+        let block1 = trace_block(1, block0.end_state.clone(), boundary(4, 0));
+        let block2 = trace_block(2, block1.end_state.clone(), boundary(6, 0));
+        let block3 = trace_block(3, block2.end_state.clone(), boundary(8, 0));
+        let blocks = vec![block0, block1, block2, block3];
+        let backend = NovaFoldingBackend::default();
+        let pipeline = BlockProofPipeline::<_, ark_bn254::Fr, NovaFoldingBackend>::with_backend(
+            [9u8; 32], backend,
+        );
+        let consumed = Rc::new(Cell::new(0));
+
+        let batch_report = pipeline
+            .prove_block_prefixes_with_final_proof_size_scaling_report(
+                &bytecode,
+                &blocks[..3],
+                &[1, 2],
+            )
+            .unwrap();
+        let streaming_report = pipeline
+            .prove_block_prefixes_with_final_proof_size_scaling_report_from_iter(
+                &bytecode,
+                CountingTraceBlockIterator::new(blocks, consumed.clone()),
+                &[1, 2],
+            )
+            .unwrap();
+
+        assert_eq!(streaming_report.rows.len(), batch_report.rows.len());
+        for (streaming_row, batch_row) in streaming_report.rows.iter().zip(batch_report.rows.iter())
+        {
+            assert_eq!(streaming_row.block_count, batch_row.block_count);
+            assert_eq!(streaming_row.first_block_index, batch_row.first_block_index);
+            assert_eq!(streaming_row.last_block_index, batch_row.last_block_index);
+            assert_eq!(
+                streaming_row.total_active_cycles,
+                batch_row.total_active_cycles
+            );
+            assert_eq!(
+                streaming_row.recursive_snark_bytes_len,
+                batch_row.recursive_snark_bytes_len
+            );
+            assert_eq!(
+                streaming_row
+                    .final_proof_size_comparison
+                    .folded_accumulator_digest,
+                batch_row
+                    .final_proof_size_comparison
+                    .folded_accumulator_digest
+            );
+            assert_eq!(
+                streaming_row
+                    .final_proof_size_comparison
+                    .placeholder
+                    .proof_total_bytes_len,
+                batch_row
+                    .final_proof_size_comparison
+                    .placeholder
+                    .proof_total_bytes_len
+            );
+            assert_eq!(
+                streaming_row
+                    .final_proof_size_comparison
+                    .spartan
+                    .proof_total_bytes_len,
+                batch_row
+                    .final_proof_size_comparison
+                    .spartan
+                    .proof_total_bytes_len
+            );
+        }
+        assert_eq!(consumed.get(), 3);
+    }
+
+    #[cfg(feature = "nova")]
+    #[test]
+    fn nova_block_proof_pipeline_streaming_prefixes_reject_short_sources() {
+        let bytecode = BytecodePreprocessing::default();
+        let block0 = trace_block(0, boundary(0, 0), boundary(2, 0));
+        let backend = NovaFoldingBackend::default();
+        let pipeline = BlockProofPipeline::<_, ark_bn254::Fr, NovaFoldingBackend>::with_backend(
+            [9u8; 32], backend,
+        );
+
+        assert_eq!(
+            pipeline
+                .prove_block_prefixes_with_final_proof_size_scaling_report_from_iter(
+                    &bytecode,
+                    vec![block0].into_iter(),
+                    &[2],
+                )
+                .unwrap_err(),
+            BlockTraceError::NovaFoldingBackendError {
+                block_index: 1,
+                reason:
+                    "streaming final proof size scaling source ended before requested block count",
+            }
+        );
     }
 
     #[cfg(feature = "nova")]

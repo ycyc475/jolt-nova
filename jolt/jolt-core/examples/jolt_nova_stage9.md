@@ -787,11 +787,38 @@ they are meant to make CPU/RAM/lookup/fold hotspots visible and comparable.
 Later instrumentation can replace the static attribution model with real
 internal prover spans without changing the consumer-facing artifact shape.
 
+## Stage 9.18: streaming trace-to-fold surface
+
+Stage 9.18 adds a streaming prefix-fold surface for the final-proof-size
+benchmark path. The block pipeline now accepts `IntoIterator<Item = TraceBlock>`
+inputs for the prefix scaling helpers, so callers can feed blocks as they are
+decoded instead of first materializing the entire trace window. The streaming
+path keeps only the requested prefix plus a one-block lookahead in memory, and
+it preserves the same final-proof-size rows and artifact schema as the
+existing batch API.
+
+The new surface is intended as the first practical trace-to-fold bridge for the
+benchmark/reporting pipeline:
+
+- it validates the requested prefix counts before folding starts;
+- it emits an error if the source ends before a requested prefix is available;
+- it still reuses the existing Nova folding and Spartan final-proof assembly
+  logic for the actual proof work;
+- it keeps the batch helpers intact so the existing non-streaming callers stay
+  compatible.
+
+### Security boundary
+
+This stage changes the dataflow shape, not the cryptographic relation. It is a
+memory-leaner trace ingestion path for final-proof-size reporting, but it does
+not yet replace the remaining verifier internalization work or the later
+profiling refinements.
+
 ## Remaining Stage 9 work
 
-After Stage 9.17, the main cryptographic gaps are:
+After Stage 9.18, the main cryptographic gaps are:
 
 - replace digest-only recursive verifier capsule transitions with in-circuit
   verifier gadgets;
-- finish streaming trace-to-fold execution and wire real internal profiling
-  spans into the Stage 9.17 relation profile artifact.
+- wire real internal profiling spans into the Stage 9.17 relation profile
+  artifact.
