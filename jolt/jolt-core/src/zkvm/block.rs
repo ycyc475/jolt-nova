@@ -10248,6 +10248,7 @@ mod tests {
     use super::*;
     use common::constants::{RAM_START_ADDRESS, REGISTER_COUNT};
     use jolt_riscv::RV64IMAC_JOLT;
+    #[cfg(feature = "nova")]
     use std::{cell::Cell, rc::Rc};
     use tracer::instruction::{
         add::ADD,
@@ -10271,6 +10272,7 @@ mod tests {
         BytecodePreprocessing::preprocess(bytecode, 0, RV64IMAC_JOLT).unwrap()
     }
 
+    #[cfg(feature = "nova")]
     #[derive(Clone)]
     struct CountingTraceBlockIterator {
         blocks: Vec<TraceBlock>,
@@ -10278,6 +10280,7 @@ mod tests {
         consumed: Rc<Cell<usize>>,
     }
 
+    #[cfg(feature = "nova")]
     impl CountingTraceBlockIterator {
         fn new(blocks: Vec<TraceBlock>, consumed: Rc<Cell<usize>>) -> Self {
             Self {
@@ -10288,6 +10291,7 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "nova")]
     impl Iterator for CountingTraceBlockIterator {
         type Item = TraceBlock;
 
