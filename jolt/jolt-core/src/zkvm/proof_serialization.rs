@@ -103,6 +103,7 @@ pub struct VerifiedJoltLookupProofReceipt {
 
 impl VerifiedJoltLookupProofReceipt {
     pub const VERSION: u16 = 2;
+    pub const VERIFIER_STAGE_RELATION_COUNT: usize = 11;
 
     pub fn trace_length(&self) -> usize {
         self.trace_length as usize
@@ -180,6 +181,36 @@ impl VerifiedJoltLookupProofReceipt {
         self.receipt_digest
     }
 
+    pub fn verifier_stage_relation_count(&self) -> usize {
+        Self::VERIFIER_STAGE_RELATION_COUNT
+    }
+
+    pub fn verifier_stage_relation_digest(&self) -> [u8; 32] {
+        let mut hasher = Sha3_256::new();
+        hasher.update(b"jolt-nova/verifier-stage-relation-capsule/v1");
+        hasher.update(self.version.to_le_bytes());
+        hasher.update(self.trace_length.to_le_bytes());
+        hasher.update(self.commitment_count.to_le_bytes());
+        hasher.update(self.preprocessing_digest);
+        hasher.update(self.verifier_setup_digest);
+        hasher.update(self.public_io_digest);
+        hasher.update(self.trusted_advice_commitment_digest);
+        hasher.update(self.commitments_digest);
+        hasher.update((Self::VERIFIER_STAGE_RELATION_COUNT as u64).to_le_bytes());
+        hasher.update(self.stage1_uni_skip_first_round_proof_digest);
+        hasher.update(self.stage1_sumcheck_digest);
+        hasher.update(self.stage2_uni_skip_first_round_proof_digest);
+        hasher.update(self.stage2_sumcheck_digest);
+        hasher.update(self.stage3_sumcheck_digest);
+        hasher.update(self.stage4_sumcheck_digest);
+        hasher.update(self.stage5_sumcheck_digest);
+        hasher.update(self.stage6a_sumcheck_digest);
+        hasher.update(self.stage6b_sumcheck_digest);
+        hasher.update(self.stage7_sumcheck_digest);
+        hasher.update(self.joint_opening_proof_digest);
+        hasher.finalize().into()
+    }
+
     #[cfg(test)]
     pub(crate) fn new_for_test(seed: u8, trace_length: usize) -> Self {
         let digest = |domain: u8| [seed.wrapping_add(domain); 32];
@@ -252,6 +283,11 @@ mod tests {
         assert_ne!(receipt.stage4_sumcheck_digest(), [0; 32]);
         assert_ne!(receipt.stage6a_sumcheck_digest(), [0; 32]);
         assert_ne!(receipt.stage7_sumcheck_digest(), [0; 32]);
+        assert_eq!(
+            receipt.verifier_stage_relation_count(),
+            VerifiedJoltLookupProofReceipt::VERIFIER_STAGE_RELATION_COUNT
+        );
+        assert_ne!(receipt.verifier_stage_relation_digest(), [0; 32]);
         assert_ne!(receipt.digest(), [0; 32]);
     }
 }

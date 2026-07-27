@@ -613,9 +613,49 @@ internalization, but the soundness boundary is still: the host runs the complete
 Jolt verifier, obtains the opaque capsule, and Nova folds a binding to that
 accepted capsule.
 
+## Stage 9.12: explicit verifier-stage relation binding
+
+Stage 9.12 splits the Stage 9.11 capsule into an explicit verifier-stage
+relation digest that the block/Nova pipeline can bind independently from the
+opaque receipt digest. The base receipt now exposes:
+
+- `verifier_stage_relation_count`, currently 11;
+- `verifier_stage_relation_digest`, a domain-separated digest over the verifier
+  preamble, commitments, Stage 1/2 UniSkip proofs, Stage 1–7 sumchecks, and the
+  joint Dory opening proof.
+
+Every receipt-aware foldable block state records that relation digest and
+count. The strict receipt binder populates them from the opaque receipt, the
+strict verifier rejects mismatches, and the per-block receipt binding digest
+now absorbs the verifier-stage relation plus the individual verifier-stage
+digests.
+
+Nova's private step statement and witness now carry the verifier-stage relation
+fields explicitly. The step circuit:
+
+- includes them in the in-circuit statement transcript;
+- includes them in the lookup/verifier fingerprint path, including the LogUp
+  selected backend path;
+- requires them to be zero when the verified Jolt receipt is absent.
+
+This gives later work a stable replacement seam: individual verifier stages can
+be recursively verified or internalized one at a time while preserving the
+fixed-width block-folding interface.
+
+Tests cover receipt relation construction, per-block population, tamper
+rejection, existing authenticated execution-opening regressions, and Nova
+folding through the explicit verifier-stage relation fields.
+
+### Security boundary
+
+This stage still does not prove the BN254/Dory verifier inside the Pallas Nova
+step circuit. It separates and binds the verifier-stage relation as explicit
+Nova-visible metadata, but the relation is still trusted only because the
+complete host-side Jolt verifier emitted the opaque receipt.
+
 ## Remaining Stage 9 work
 
-After Stage 9.11, the main cryptographic gaps are:
+After Stage 9.12, the main cryptographic gaps are:
 
 - compose or internalize the verifier transcript capsule rather than relying
   on an opaque host-verified receipt;
