@@ -571,11 +571,53 @@ This stage authenticates the CPU/R1CS claims already checked by the complete
 host-side Jolt verifier. It still folds an opaque receipt; the Nova circuit does
 not re-execute BN254/Dory verification internally.
 
+## Stage 9.11: full verifier transcript capsule
+
+Stage 9.11 starts the verifier-internalization path by upgrading the base Jolt
+receipt from a lookup-oriented digest into a full verifier transcript capsule.
+`VerifiedJoltLookupProofReceipt` keeps its historical name for API
+compatibility, but receipt version 2 now exposes fixed-size digests for every
+clear verifier stage that the complete host-side Jolt verifier checks:
+
+- Stage 1 UniSkip and Spartan outer sumcheck;
+- Stage 2 UniSkip and lookup claim-reduction sumcheck;
+- Stage 3 instruction/bytecode relation sumcheck;
+- Stage 4 register/RAM relation sumcheck;
+- Stage 5 read/RAF sumcheck;
+- Stage 6a bytecode virtualization sumcheck;
+- Stage 6b Spartan instruction-input virtualization sumcheck;
+- Stage 7 reduction closure;
+- the joint Dory opening proof;
+- the full serialized Jolt proof.
+
+The receipt digest domain advances to
+`jolt-nova/verified-jolt-verifier-transcript-receipt/v2`. All later execution
+opening receipts continue to bind the base receipt digest, so the block/Nova
+pipeline now carries a fixed-width commitment to the whole accepted verifier
+transcript rather than only the lookup-specific transcript slice.
+
+The candidate capsule is still computed before verification and returned only
+after the complete verifier accepts. This preserves the opaque-receipt safety
+boundary while giving the next stage a stable input surface for a recursive
+verifier gadget or proof-carrying verifier composition.
+
+Tests cover the upgraded receipt version and the added per-stage verifier
+digests, plus the existing authenticated lookup/register/RAM/CPU folding
+regressions.
+
+### Security boundary
+
+This stage does not yet execute the BN254/Dory verifier inside Nova. It makes
+the verifier relation more explicit and fixed-width, which is necessary for
+internalization, but the soundness boundary is still: the host runs the complete
+Jolt verifier, obtains the opaque capsule, and Nova folds a binding to that
+accepted capsule.
+
 ## Remaining Stage 9 work
 
-After Stage 9.10, the main cryptographic gaps are:
+After Stage 9.11, the main cryptographic gaps are:
 
-- compose or internalize the relevant Jolt/Dory verifier rather than relying
+- compose or internalize the verifier transcript capsule rather than relying
   on an opaque host-verified receipt;
 - derive a privacy-preserving equivalent receipt from the BlindFold/ZK proof
   path;

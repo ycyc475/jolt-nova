@@ -65,14 +65,17 @@ pub struct JoltProof<
     pub dory_layout: DoryLayout,
 }
 
-/// A compact commitment to the lookup-related portions of a fully verified
-/// Jolt proof.
+/// A compact commitment to the verifier transcript of a fully verified Jolt
+/// proof.
 ///
 /// This receipt is deliberately not constructible by downstream callers. It
 /// is returned by `JoltVerifier::verify_with_lookup_receipt` only after the
 /// complete Jolt verifier has accepted all sumchecks and the joint PCS
-/// opening. Nova can bind this fixed-size receipt into every recursive step
-/// without carrying the variable-size Jolt proof as circuit witness.
+/// opening. Nova can bind this fixed-size capsule into every recursive step
+/// without carrying the variable-size Jolt proof as circuit witness. The
+/// historical lookup-oriented type name is retained for API compatibility,
+/// but version 2 binds the complete clear verifier transcript, not only the
+/// lookup-specific reductions.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct VerifiedJoltLookupProofReceipt {
     version: u16,
@@ -83,8 +86,14 @@ pub struct VerifiedJoltLookupProofReceipt {
     public_io_digest: [u8; 32],
     trusted_advice_commitment_digest: [u8; 32],
     commitments_digest: [u8; 32],
+    stage1_uni_skip_first_round_proof_digest: [u8; 32],
+    stage1_sumcheck_digest: [u8; 32],
+    stage2_uni_skip_first_round_proof_digest: [u8; 32],
     stage2_sumcheck_digest: [u8; 32],
+    stage3_sumcheck_digest: [u8; 32],
+    stage4_sumcheck_digest: [u8; 32],
     stage5_sumcheck_digest: [u8; 32],
+    stage6a_sumcheck_digest: [u8; 32],
     stage6b_sumcheck_digest: [u8; 32],
     stage7_sumcheck_digest: [u8; 32],
     joint_opening_proof_digest: [u8; 32],
@@ -93,7 +102,7 @@ pub struct VerifiedJoltLookupProofReceipt {
 }
 
 impl VerifiedJoltLookupProofReceipt {
-    pub const VERSION: u16 = 1;
+    pub const VERSION: u16 = 2;
 
     pub fn trace_length(&self) -> usize {
         self.trace_length as usize
@@ -119,12 +128,36 @@ impl VerifiedJoltLookupProofReceipt {
         self.commitments_digest
     }
 
+    pub fn stage1_uni_skip_first_round_proof_digest(&self) -> [u8; 32] {
+        self.stage1_uni_skip_first_round_proof_digest
+    }
+
+    pub fn stage1_sumcheck_digest(&self) -> [u8; 32] {
+        self.stage1_sumcheck_digest
+    }
+
+    pub fn stage2_uni_skip_first_round_proof_digest(&self) -> [u8; 32] {
+        self.stage2_uni_skip_first_round_proof_digest
+    }
+
     pub fn stage2_sumcheck_digest(&self) -> [u8; 32] {
         self.stage2_sumcheck_digest
     }
 
+    pub fn stage3_sumcheck_digest(&self) -> [u8; 32] {
+        self.stage3_sumcheck_digest
+    }
+
+    pub fn stage4_sumcheck_digest(&self) -> [u8; 32] {
+        self.stage4_sumcheck_digest
+    }
+
     pub fn stage5_sumcheck_digest(&self) -> [u8; 32] {
         self.stage5_sumcheck_digest
+    }
+
+    pub fn stage6a_sumcheck_digest(&self) -> [u8; 32] {
+        self.stage6a_sumcheck_digest
     }
 
     pub fn stage6b_sumcheck_digest(&self) -> [u8; 32] {
@@ -159,12 +192,18 @@ impl VerifiedJoltLookupProofReceipt {
             public_io_digest: digest(3),
             trusted_advice_commitment_digest: digest(4),
             commitments_digest: digest(5),
-            stage2_sumcheck_digest: digest(6),
-            stage5_sumcheck_digest: digest(7),
-            stage6b_sumcheck_digest: digest(8),
-            stage7_sumcheck_digest: digest(9),
-            joint_opening_proof_digest: digest(10),
-            full_proof_digest: digest(11),
+            stage1_uni_skip_first_round_proof_digest: digest(6),
+            stage1_sumcheck_digest: digest(7),
+            stage2_uni_skip_first_round_proof_digest: digest(8),
+            stage2_sumcheck_digest: digest(9),
+            stage3_sumcheck_digest: digest(10),
+            stage4_sumcheck_digest: digest(11),
+            stage5_sumcheck_digest: digest(12),
+            stage6a_sumcheck_digest: digest(13),
+            stage6b_sumcheck_digest: digest(14),
+            stage7_sumcheck_digest: digest(15),
+            joint_opening_proof_digest: digest(16),
+            full_proof_digest: digest(17),
             receipt_digest: [0; 32],
         };
         receipt.receipt_digest = receipt.compute_digest();
@@ -173,7 +212,7 @@ impl VerifiedJoltLookupProofReceipt {
 
     fn compute_digest(&self) -> [u8; 32] {
         let mut hasher = Sha3_256::new();
-        hasher.update(b"jolt-nova/verified-jolt-lookup-receipt/v1");
+        hasher.update(b"jolt-nova/verified-jolt-verifier-transcript-receipt/v2");
         hasher.update(self.version.to_le_bytes());
         hasher.update(self.trace_length.to_le_bytes());
         hasher.update(self.commitment_count.to_le_bytes());
@@ -182,13 +221,38 @@ impl VerifiedJoltLookupProofReceipt {
         hasher.update(self.public_io_digest);
         hasher.update(self.trusted_advice_commitment_digest);
         hasher.update(self.commitments_digest);
+        hasher.update(self.stage1_uni_skip_first_round_proof_digest);
+        hasher.update(self.stage1_sumcheck_digest);
+        hasher.update(self.stage2_uni_skip_first_round_proof_digest);
         hasher.update(self.stage2_sumcheck_digest);
+        hasher.update(self.stage3_sumcheck_digest);
+        hasher.update(self.stage4_sumcheck_digest);
         hasher.update(self.stage5_sumcheck_digest);
+        hasher.update(self.stage6a_sumcheck_digest);
         hasher.update(self.stage6b_sumcheck_digest);
         hasher.update(self.stage7_sumcheck_digest);
         hasher.update(self.joint_opening_proof_digest);
         hasher.update(self.full_proof_digest);
         hasher.finalize().into()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::VerifiedJoltLookupProofReceipt;
+
+    #[test]
+    fn verified_jolt_lookup_receipt_captures_full_verifier_transcript() {
+        let receipt = VerifiedJoltLookupProofReceipt::new_for_test(7, 16);
+        assert_eq!(receipt.version, VerifiedJoltLookupProofReceipt::VERSION);
+        assert_ne!(receipt.stage1_uni_skip_first_round_proof_digest(), [0; 32]);
+        assert_ne!(receipt.stage1_sumcheck_digest(), [0; 32]);
+        assert_ne!(receipt.stage2_uni_skip_first_round_proof_digest(), [0; 32]);
+        assert_ne!(receipt.stage3_sumcheck_digest(), [0; 32]);
+        assert_ne!(receipt.stage4_sumcheck_digest(), [0; 32]);
+        assert_ne!(receipt.stage6a_sumcheck_digest(), [0; 32]);
+        assert_ne!(receipt.stage7_sumcheck_digest(), [0; 32]);
+        assert_ne!(receipt.digest(), [0; 32]);
     }
 }
 
@@ -651,20 +715,44 @@ impl<F: JoltField, C: JoltCurve<F = F>, PCS: CommitmentScheme<Field = F>, FS: Tr
                 trusted_advice_commitment,
             ),
             commitments_digest: canonical_digest(b"commitments", &self.commitments),
+            stage1_uni_skip_first_round_proof_digest: canonical_digest(
+                b"verifier-stage-1-uni-skip",
+                &self.stage1_uni_skip_first_round_proof,
+            ),
+            stage1_sumcheck_digest: canonical_digest(
+                b"verifier-stage-1-sumcheck",
+                &self.stage1_sumcheck_proof,
+            ),
+            stage2_uni_skip_first_round_proof_digest: canonical_digest(
+                b"verifier-stage-2-uni-skip",
+                &self.stage2_uni_skip_first_round_proof,
+            ),
             stage2_sumcheck_digest: canonical_digest(
-                b"lookup-stage-2-sumcheck",
+                b"verifier-stage-2-sumcheck",
                 &self.stage2_sumcheck_proof,
             ),
+            stage3_sumcheck_digest: canonical_digest(
+                b"verifier-stage-3-sumcheck",
+                &self.stage3_sumcheck_proof,
+            ),
+            stage4_sumcheck_digest: canonical_digest(
+                b"verifier-stage-4-sumcheck",
+                &self.stage4_sumcheck_proof,
+            ),
             stage5_sumcheck_digest: canonical_digest(
-                b"lookup-stage-5-sumcheck",
+                b"verifier-stage-5-sumcheck",
                 &self.stage5_sumcheck_proof,
             ),
+            stage6a_sumcheck_digest: canonical_digest(
+                b"verifier-stage-6a-sumcheck",
+                &self.stage6a_sumcheck_proof,
+            ),
             stage6b_sumcheck_digest: canonical_digest(
-                b"lookup-stage-6b-sumcheck",
+                b"verifier-stage-6b-sumcheck",
                 &self.stage6b_sumcheck_proof,
             ),
             stage7_sumcheck_digest: canonical_digest(
-                b"lookup-stage-7-sumcheck",
+                b"verifier-stage-7-sumcheck",
                 &self.stage7_sumcheck_proof,
             ),
             joint_opening_proof_digest: canonical_digest(

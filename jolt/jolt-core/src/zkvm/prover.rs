@@ -2749,12 +2749,20 @@ mod tests {
                 + 3
                 + opening_receipt.register_opening_count()
                 + opening_receipt.ram_opening_count()
+                + opening_receipt.cpu_opening_count()
         );
         assert_eq!(opening_receipt.register_opening_count(), 7);
         assert!(opening_receipt.ram_opening_count() >= 5);
+        assert!(opening_receipt.cpu_opening_count() > 0);
         assert_ne!(opening_receipt.digest(), [0; 32]);
+        assert_ne!(receipt.stage1_uni_skip_first_round_proof_digest(), [0; 32]);
+        assert_ne!(receipt.stage1_sumcheck_digest(), [0; 32]);
+        assert_ne!(receipt.stage2_uni_skip_first_round_proof_digest(), [0; 32]);
         assert_ne!(receipt.stage2_sumcheck_digest(), [0; 32]);
+        assert_ne!(receipt.stage3_sumcheck_digest(), [0; 32]);
+        assert_ne!(receipt.stage4_sumcheck_digest(), [0; 32]);
         assert_ne!(receipt.stage5_sumcheck_digest(), [0; 32]);
+        assert_ne!(receipt.stage6a_sumcheck_digest(), [0; 32]);
         assert_ne!(receipt.stage6b_sumcheck_digest(), [0; 32]);
         assert_ne!(receipt.stage7_sumcheck_digest(), [0; 32]);
         assert_ne!(receipt.joint_opening_proof_digest(), [0; 32]);
