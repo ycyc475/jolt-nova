@@ -211,6 +211,71 @@ impl VerifiedJoltLookupProofReceipt {
         hasher.finalize().into()
     }
 
+    /// Returns the fixed-width verifier transcript components used by the
+    /// recursive capsule prototype. The first component binds the verifier
+    /// preamble and commitments; the remaining components bind the clear
+    /// verifier stages, the joint opening, and the complete proof encoding.
+    pub fn recursive_transcript_stage_digests(&self) -> [[u8; 32]; 11] {
+        [
+            digest_bytes(
+                b"jolt-nova/verifier-transcript-preamble/v1",
+                &[
+                    self.preprocessing_digest,
+                    self.verifier_setup_digest,
+                    self.public_io_digest,
+                    self.trusted_advice_commitment_digest,
+                    self.commitments_digest,
+                ],
+            ),
+            digest_bytes(
+                b"jolt-nova/verifier-transcript-stage-1/v1",
+                &[
+                    self.stage1_uni_skip_first_round_proof_digest,
+                    self.stage1_sumcheck_digest,
+                ],
+            ),
+            digest_bytes(
+                b"jolt-nova/verifier-transcript-stage-2/v1",
+                &[
+                    self.stage2_uni_skip_first_round_proof_digest,
+                    self.stage2_sumcheck_digest,
+                ],
+            ),
+            self.stage3_sumcheck_digest,
+            self.stage4_sumcheck_digest,
+            self.stage5_sumcheck_digest,
+            self.stage6a_sumcheck_digest,
+            self.stage6b_sumcheck_digest,
+            self.stage7_sumcheck_digest,
+            self.joint_opening_proof_digest,
+            self.full_proof_digest,
+        ]
+    }
+
+    /// Builds the smallest useful verifier-stage claim for the staged
+    /// internalization path. The claim is still produced from the host-side
+    /// accepted receipt; the next stages will replace this digest check with
+    /// an in-circuit verifier relation one stage at a time.
+    pub fn verifier_stage_internalization_claim(
+        &self,
+        stage_index: usize,
+    ) -> Option<VerifierStageInternalizationClaim> {
+        let stage_digests = self.recursive_transcript_stage_digests();
+        let stage_digest = stage_digests.get(stage_index)?;
+        Some(VerifierStageInternalizationClaim::from_parts(
+            stage_index,
+            *stage_digest,
+            self.verifier_stage_relation_digest(),
+            self.verifier_stage_relation_count(),
+        ))
+    }
+
+    /// Converts the accepted receipt into the fixed-width recursive capsule
+    /// used by Stage 9.14.
+    pub fn recursive_transcript_capsule(&self) -> RecursiveVerifierTranscriptCapsule {
+        RecursiveVerifierTranscriptCapsule::from_receipt(self)
+    }
+
     #[cfg(test)]
     pub(crate) fn new_for_test(seed: u8, trace_length: usize) -> Self {
         let digest = |domain: u8| [seed.wrapping_add(domain); 32];
@@ -268,9 +333,195 @@ impl VerifiedJoltLookupProofReceipt {
     }
 }
 
+fn digest_bytes(domain: &'static [u8], values: &[[u8; 32]]) -> [u8; 32] {
+    let mut hasher = Sha3_256::new();
+    hasher.update(domain);
+    hasher.update((values.len() as u64).to_le_bytes());
+    for value in values {
+        hasher.update(value);
+    }
+    hasher.finalize().into()
+}
+
+/// A fixed-width claim for one verifier stage.
+///
+/// This is the Stage 9.13 seam: a Nova step can carry one selected verifier
+/// stage as an explicit relation claim without carrying the variable-size Jolt
+/// proof. It deliberately does not claim to re-run BN254/Dory verification.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct VerifierStageInternalizationClaim {
+    version: u16,
+    stage_index: u16,
+    stage_digest: [u8; 32],
+    verifier_stage_relation_digest: [u8; 32],
+    verifier_stage_relation_count: u16,
+    claim_digest: [u8; 32],
+}
+
+impl VerifierStageInternalizationClaim {
+    pub const VERSION: u16 = 1;
+
+    fn from_parts(
+        stage_index: usize,
+        stage_digest: [u8; 32],
+        verifier_stage_relation_digest: [u8; 32],
+        verifier_stage_relation_count: usize,
+    ) -> Self {
+        let mut claim = Self {
+            version: Self::VERSION,
+            stage_index: stage_index as u16,
+            stage_digest,
+            verifier_stage_relation_digest,
+            verifier_stage_relation_count: verifier_stage_relation_count as u16,
+            claim_digest: [0; 32],
+        };
+        claim.claim_digest = claim.compute_digest();
+        claim
+    }
+
+    pub fn stage_index(&self) -> usize {
+        self.stage_index as usize
+    }
+
+    pub fn stage_digest(&self) -> [u8; 32] {
+        self.stage_digest
+    }
+
+    pub fn verifier_stage_relation_digest(&self) -> [u8; 32] {
+        self.verifier_stage_relation_digest
+    }
+
+    pub fn verifier_stage_relation_count(&self) -> usize {
+        self.verifier_stage_relation_count as usize
+    }
+
+    pub fn digest(&self) -> [u8; 32] {
+        self.claim_digest
+    }
+
+    /// Checks the fixed-width claim against the accepted receipt and its
+    /// deterministic claim digest.
+    pub fn verify_against(&self, receipt: &VerifiedJoltLookupProofReceipt) -> bool {
+        receipt
+            .verifier_stage_internalization_claim(self.stage_index())
+            .map(|expected| expected == *self)
+            .unwrap_or(false)
+    }
+
+    fn compute_digest(&self) -> [u8; 32] {
+        let mut hasher = Sha3_256::new();
+        hasher.update(b"jolt-nova/verifier-stage-internalization-claim/v1");
+        hasher.update(self.version.to_le_bytes());
+        hasher.update(self.stage_index.to_le_bytes());
+        hasher.update(self.stage_digest);
+        hasher.update(self.verifier_stage_relation_digest);
+        hasher.update(self.verifier_stage_relation_count.to_le_bytes());
+        hasher.finalize().into()
+    }
+}
+
+/// A fixed-width, append-only transcript accumulator suitable for recursive
+/// folding. Each `absorb_stage` transition hashes the previous root together
+/// with the next stage index and digest. A complete capsule can be checked
+/// against a host-verified receipt, while an incomplete capsule can be passed
+/// through intermediate recursive steps.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RecursiveVerifierTranscriptCapsule {
+    version: u16,
+    relation_digest: [u8; 32],
+    stage_count: u16,
+    absorbed_stage_count: u16,
+    transcript_root: [u8; 32],
+}
+
+impl RecursiveVerifierTranscriptCapsule {
+    pub const VERSION: u16 = 1;
+
+    pub fn new(relation_digest: [u8; 32], stage_count: usize) -> Self {
+        let mut hasher = Sha3_256::new();
+        hasher.update(b"jolt-nova/recursive-verifier-transcript/v1");
+        hasher.update(Self::VERSION.to_le_bytes());
+        hasher.update(relation_digest);
+        hasher.update((stage_count as u16).to_le_bytes());
+        hasher.update(0u16.to_le_bytes());
+        Self {
+            version: Self::VERSION,
+            relation_digest,
+            stage_count: stage_count as u16,
+            absorbed_stage_count: 0,
+            transcript_root: hasher.finalize().into(),
+        }
+    }
+
+    pub fn from_receipt(receipt: &VerifiedJoltLookupProofReceipt) -> Self {
+        let mut capsule = Self::new(
+            receipt.verifier_stage_relation_digest(),
+            receipt.verifier_stage_relation_count(),
+        );
+        for (stage_index, stage_digest) in receipt
+            .recursive_transcript_stage_digests()
+            .into_iter()
+            .enumerate()
+        {
+            capsule = capsule
+                .absorb_stage(stage_index, stage_digest)
+                .expect("receipt transcript stages must match the fixed capsule width");
+        }
+        capsule
+    }
+
+    pub fn relation_digest(&self) -> [u8; 32] {
+        self.relation_digest
+    }
+
+    pub fn stage_count(&self) -> usize {
+        self.stage_count as usize
+    }
+
+    pub fn absorbed_stage_count(&self) -> usize {
+        self.absorbed_stage_count as usize
+    }
+
+    pub fn transcript_root(&self) -> [u8; 32] {
+        self.transcript_root
+    }
+
+    pub fn is_complete(&self) -> bool {
+        self.absorbed_stage_count == self.stage_count
+    }
+
+    pub fn absorb_stage(
+        mut self,
+        stage_index: usize,
+        stage_digest: [u8; 32],
+    ) -> Result<Self, &'static str> {
+        if stage_index != self.absorbed_stage_count as usize {
+            return Err("recursive verifier stages must be absorbed in order");
+        }
+        if self.is_complete() {
+            return Err("recursive verifier transcript capsule is already complete");
+        }
+
+        let mut hasher = Sha3_256::new();
+        hasher.update(b"jolt-nova/recursive-verifier-transcript/step/v1");
+        hasher.update(self.version.to_le_bytes());
+        hasher.update(self.relation_digest);
+        hasher.update(self.transcript_root);
+        hasher.update((stage_index as u16).to_le_bytes());
+        hasher.update(stage_digest);
+        self.transcript_root = hasher.finalize().into();
+        self.absorbed_stage_count += 1;
+        Ok(self)
+    }
+
+    pub fn verify_against(&self, receipt: &VerifiedJoltLookupProofReceipt) -> bool {
+        self.is_complete() && *self == Self::from_receipt(receipt)
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::VerifiedJoltLookupProofReceipt;
+    use super::{RecursiveVerifierTranscriptCapsule, VerifiedJoltLookupProofReceipt};
 
     #[test]
     fn verified_jolt_lookup_receipt_captures_full_verifier_transcript() {
@@ -289,6 +540,44 @@ mod tests {
         );
         assert_ne!(receipt.verifier_stage_relation_digest(), [0; 32]);
         assert_ne!(receipt.digest(), [0; 32]);
+    }
+
+    #[test]
+    fn verifier_stage_internalization_claim_is_bound_to_receipt() {
+        let receipt = VerifiedJoltLookupProofReceipt::new_for_test(31, 32);
+        let claim = receipt
+            .verifier_stage_internalization_claim(8)
+            .expect("stage 8 is inside the fixed transcript capsule");
+
+        assert_eq!(claim.stage_index(), 8);
+        assert!(claim.verify_against(&receipt));
+        assert_ne!(claim.digest(), [0; 32]);
+
+        let mut tampered = claim;
+        tampered.stage_digest[0] ^= 1;
+        assert!(!tampered.verify_against(&receipt));
+    }
+
+    #[test]
+    fn recursive_verifier_transcript_capsule_absorbs_stages_in_order() {
+        let receipt = VerifiedJoltLookupProofReceipt::new_for_test(47, 64);
+        let capsule = receipt.recursive_transcript_capsule();
+
+        assert_eq!(capsule.stage_count(), 11);
+        assert_eq!(capsule.absorbed_stage_count(), 11);
+        assert!(capsule.is_complete());
+        assert!(capsule.verify_against(&receipt));
+
+        let mut partial = RecursiveVerifierTranscriptCapsule::new(
+            receipt.verifier_stage_relation_digest(),
+            receipt.verifier_stage_relation_count(),
+        );
+        let digests = receipt.recursive_transcript_stage_digests();
+        assert!(partial.absorb_stage(1, digests[0]).is_err());
+        for (stage_index, stage_digest) in digests.into_iter().enumerate() {
+            partial = partial.absorb_stage(stage_index, stage_digest).unwrap();
+        }
+        assert_eq!(partial, capsule);
     }
 }
 

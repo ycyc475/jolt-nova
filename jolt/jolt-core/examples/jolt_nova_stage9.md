@@ -653,12 +653,36 @@ step circuit. It separates and binds the verifier-stage relation as explicit
 Nova-visible metadata, but the relation is still trusted only because the
 complete host-side Jolt verifier emitted the opaque receipt.
 
+## Stage 9.13: minimal verifier-stage internalization prototype
+
+Stage 9.13 introduces the first explicit verifier-stage object instead of
+carrying only one opaque receipt digest. An accepted receipt now exposes eleven
+fixed-width transcript components: the verifier preamble, Stages 1--7, the
+joint opening, and the complete proof binding.
+
+`VerifierStageInternalizationClaim` selects one component and binds its index,
+stage digest, parent verifier-relation digest, and relation width into a
+domain-separated claim digest. `verify_against` reconstructs that claim from
+the accepted receipt and rejects a changed stage, relation, count, or digest.
+
+The same component list feeds an append-only
+`RecursiveVerifierTranscriptCapsule`. Its transition requires stages to be
+absorbed in order and hashes the previous root, stage index, and stage digest.
+This is the fixed-width transition primitive needed by Stage 9.14.
+
+### Security boundary
+
+The prototype internalizes the *shape and consistency* of one verifier-stage
+claim. It does not yet execute the BN254 sumcheck or Dory equations inside the
+Pallas Nova circuit. The complete Jolt verifier must still accept before these
+objects are created.
+
 ## Remaining Stage 9 work
 
-After Stage 9.12, the main cryptographic gaps are:
+After Stage 9.13, the main cryptographic gaps are:
 
-- compose or internalize the verifier transcript capsule rather than relying
-  on an opaque host-verified receipt;
+- carry the recursive verifier transcript object through the block and Nova
+  relations, then replace digest-only stage transitions with verifier gadgets;
 - derive a privacy-preserving equivalent receipt from the BlindFold/ZK proof
   path;
 - build controlled Lasso/LogUp comparisons and perform adversarial soundness
