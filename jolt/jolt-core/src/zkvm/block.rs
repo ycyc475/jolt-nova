@@ -960,6 +960,9 @@ pub const NOVA_LOGUP_SUBCLAIM_BACKEND_NAME: &str = "logup-subclaim-v1";
 pub const JOLT_NOVA_STEP_RELATION_VERSION: &str = "jolt-nova-step-relation-v1";
 pub const NOVA_CPU_R1CS_RELATION_NAME: &str = "jolt-nova-cpu-r1cs-v1";
 pub const JOLT_NOVA_CPU_R1CS_RELATION_VERSION: &str = "jolt-nova-cpu-r1cs-relation-v1";
+pub const NOVA_EXECUTION_SUBCLAIM_RELATION_NAME: &str = "jolt-nova-execution-subclaims-v1";
+pub const JOLT_NOVA_EXECUTION_SUBCLAIM_RELATION_VERSION: &str =
+    "jolt-nova-execution-subclaim-relation-v1";
 
 impl Default for NovaFoldConfig {
     fn default() -> Self {
@@ -1090,6 +1093,70 @@ pub struct JoltCpuR1csRelationBoundary {
     pub witness_cpu_claim_fingerprint: [u8; 32],
 }
 
+/// Storage-level snapshot of the register, RAM, and lookup subclaim inputs.
+#[cfg(feature = "nova")]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct JoltExecutionSubclaimPublicState {
+    pub start_register_digest: [u8; 32],
+    pub end_register_digest: [u8; 32],
+    pub register_reads_digest: [u8; 32],
+    pub register_writes_digest: [u8; 32],
+    pub register_read_count: [u8; 32],
+    pub register_write_count: [u8; 32],
+    pub ram_accesses_digest: [u8; 32],
+    pub ram_touched_addresses_digest: [u8; 32],
+    pub ram_access_count: [u8; 32],
+    pub ram_touched_address_count: [u8; 32],
+    pub lookup_claims_digest: [u8; 32],
+    pub lookup_entry_summaries_digest: [u8; 32],
+    pub lookup_count: [u8; 32],
+    pub lookup_distinct_entry_count: [u8; 32],
+    pub lookup_logup_proof_digest: [u8; 32],
+    pub lookup_logup_tuple_challenge: [u8; 32],
+    pub lookup_logup_denominator_challenge: [u8; 32],
+    pub lookup_logup_denominator_retry_count: [u8; 32],
+    pub lookup_logup_query_sum: [u8; 32],
+    pub lookup_logup_table_sum: [u8; 32],
+    pub verified_jolt_lookup_receipt_present: [u8; 32],
+    pub verified_jolt_lookup_receipt_digest: [u8; 32],
+    pub verified_jolt_lookup_receipt_trace_length: [u8; 32],
+    pub verified_jolt_lookup_receipt_commitment_count: [u8; 32],
+    pub verified_jolt_lookup_receipt_zk_mode: [u8; 32],
+    pub verified_jolt_blindfold_receipt_digest: [u8; 32],
+    pub verified_jolt_verifier_stage_relation_digest: [u8; 32],
+    pub verified_jolt_verifier_stage_relation_count: [u8; 32],
+    pub verified_jolt_recursive_transcript_root: [u8; 32],
+    pub verified_jolt_recursive_transcript_stage_count: [u8; 32],
+    pub verified_jolt_lookup_block_binding_digest: [u8; 32],
+    pub verified_jolt_lookup_opening_present: [u8; 32],
+    pub verified_jolt_lookup_opening_receipt_digest: [u8; 32],
+    pub verified_jolt_lookup_opening_count: [u8; 32],
+    pub verified_jolt_lookup_opening_block_digest: [u8; 32],
+    pub lookup_backend_selector: [u8; 32],
+}
+
+/// Explicit witness fingerprints for the execution subclaim bundle.
+#[cfg(feature = "nova")]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct JoltExecutionSubclaimFingerprints {
+    pub register: [u8; 32],
+    pub ram: [u8; 32],
+    pub lookup: [u8; 32],
+    pub lookup_logup: [u8; 32],
+}
+
+/// Auditable register/RAM/lookup boundary extracted from one fold input.
+#[cfg(feature = "nova")]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct JoltExecutionSubclaimRelationBoundary {
+    pub version: &'static str,
+    pub relation_name: &'static str,
+    pub block_index: usize,
+    pub public_state: JoltExecutionSubclaimPublicState,
+    pub witness_statement_digest: [u8; 32],
+    pub witness_subclaim_fingerprints: JoltExecutionSubclaimFingerprints,
+}
+
 #[cfg(feature = "nova")]
 impl JoltCpuR1csPublicState {
     fn from_statement(statement: &BlockFoldStatement) -> Self {
@@ -1099,6 +1166,107 @@ impl JoltCpuR1csPublicState {
             r1cs_vk_digest: nova_scalar_to_storage(statement.r1cs_vk_digest),
             used_lookahead_cycle: nova_scalar_to_storage(statement.used_lookahead_cycle),
             lookahead_cycle_digest: nova_scalar_to_storage(statement.lookahead_cycle_digest),
+        }
+    }
+}
+
+#[cfg(feature = "nova")]
+impl JoltExecutionSubclaimPublicState {
+    fn from_statement(statement: &BlockFoldStatement, lookup_backend_selector: NovaScalar) -> Self {
+        Self {
+            start_register_digest: nova_scalar_to_storage(statement.start_register_digest),
+            end_register_digest: nova_scalar_to_storage(statement.end_register_digest),
+            register_reads_digest: nova_scalar_to_storage(statement.register_reads_digest),
+            register_writes_digest: nova_scalar_to_storage(statement.register_writes_digest),
+            register_read_count: nova_scalar_to_storage(statement.register_read_count),
+            register_write_count: nova_scalar_to_storage(statement.register_write_count),
+            ram_accesses_digest: nova_scalar_to_storage(statement.ram_accesses_digest),
+            ram_touched_addresses_digest: nova_scalar_to_storage(
+                statement.ram_touched_addresses_digest,
+            ),
+            ram_access_count: nova_scalar_to_storage(statement.ram_access_count),
+            ram_touched_address_count: nova_scalar_to_storage(statement.ram_touched_address_count),
+            lookup_claims_digest: nova_scalar_to_storage(statement.lookup_claims_digest),
+            lookup_entry_summaries_digest: nova_scalar_to_storage(
+                statement.lookup_entry_summaries_digest,
+            ),
+            lookup_count: nova_scalar_to_storage(statement.lookup_count),
+            lookup_distinct_entry_count: nova_scalar_to_storage(
+                statement.lookup_distinct_entry_count,
+            ),
+            lookup_logup_proof_digest: nova_scalar_to_storage(statement.lookup_logup_proof_digest),
+            lookup_logup_tuple_challenge: nova_scalar_to_storage(
+                statement.lookup_logup_tuple_challenge,
+            ),
+            lookup_logup_denominator_challenge: nova_scalar_to_storage(
+                statement.lookup_logup_denominator_challenge,
+            ),
+            lookup_logup_denominator_retry_count: nova_scalar_to_storage(
+                statement.lookup_logup_denominator_retry_count,
+            ),
+            lookup_logup_query_sum: nova_scalar_to_storage(statement.lookup_logup_query_sum),
+            lookup_logup_table_sum: nova_scalar_to_storage(statement.lookup_logup_table_sum),
+            verified_jolt_lookup_receipt_present: nova_scalar_to_storage(
+                statement.verified_jolt_lookup_receipt_present,
+            ),
+            verified_jolt_lookup_receipt_digest: nova_scalar_to_storage(
+                statement.verified_jolt_lookup_receipt_digest,
+            ),
+            verified_jolt_lookup_receipt_trace_length: nova_scalar_to_storage(
+                statement.verified_jolt_lookup_receipt_trace_length,
+            ),
+            verified_jolt_lookup_receipt_commitment_count: nova_scalar_to_storage(
+                statement.verified_jolt_lookup_receipt_commitment_count,
+            ),
+            verified_jolt_lookup_receipt_zk_mode: nova_scalar_to_storage(
+                statement.verified_jolt_lookup_receipt_zk_mode,
+            ),
+            verified_jolt_blindfold_receipt_digest: nova_scalar_to_storage(
+                statement.verified_jolt_blindfold_receipt_digest,
+            ),
+            verified_jolt_verifier_stage_relation_digest: nova_scalar_to_storage(
+                statement.verified_jolt_verifier_stage_relation_digest,
+            ),
+            verified_jolt_verifier_stage_relation_count: nova_scalar_to_storage(
+                statement.verified_jolt_verifier_stage_relation_count,
+            ),
+            verified_jolt_recursive_transcript_root: nova_scalar_to_storage(
+                statement.verified_jolt_recursive_transcript_root,
+            ),
+            verified_jolt_recursive_transcript_stage_count: nova_scalar_to_storage(
+                statement.verified_jolt_recursive_transcript_stage_count,
+            ),
+            verified_jolt_lookup_block_binding_digest: nova_scalar_to_storage(
+                statement.verified_jolt_lookup_block_binding_digest,
+            ),
+            verified_jolt_lookup_opening_present: nova_scalar_to_storage(
+                statement.verified_jolt_lookup_opening_present,
+            ),
+            verified_jolt_lookup_opening_receipt_digest: nova_scalar_to_storage(
+                statement.verified_jolt_lookup_opening_receipt_digest,
+            ),
+            verified_jolt_lookup_opening_count: nova_scalar_to_storage(
+                statement.verified_jolt_lookup_opening_count,
+            ),
+            verified_jolt_lookup_opening_block_digest: nova_scalar_to_storage(
+                statement.verified_jolt_lookup_opening_block_digest,
+            ),
+            lookup_backend_selector: nova_scalar_to_storage(lookup_backend_selector),
+        }
+    }
+}
+
+#[cfg(feature = "nova")]
+impl JoltExecutionSubclaimFingerprints {
+    fn from_statement_with_subclaims(
+        statement: &BlockFoldStatement,
+        subclaims: BlockFoldSubclaimFingerprints,
+    ) -> Self {
+        Self {
+            register: nova_scalar_to_storage(subclaims.register),
+            ram: nova_scalar_to_storage(subclaims.ram),
+            lookup: nova_scalar_to_storage(subclaims.lookup),
+            lookup_logup: nova_scalar_to_storage(statement.lookup_logup_fingerprint()),
         }
     }
 }
@@ -5298,6 +5466,36 @@ where
         public_state: JoltCpuR1csPublicState::from_statement(&statement),
         witness_statement_digest: statement.digest(),
         witness_cpu_claim_fingerprint: nova_scalar_to_storage(statement.cpu_fingerprint()),
+    })
+}
+
+#[cfg(feature = "nova")]
+pub fn build_jolt_execution_subclaim_relation_boundary<Digest, F>(
+    config: &NovaFoldConfig,
+    fold_input: &BlockFoldInput<Digest, F>,
+) -> Result<JoltExecutionSubclaimRelationBoundary, BlockTraceError>
+where
+    Digest: AsRef<[u8]>,
+    F: JoltField,
+{
+    let block_index = fold_input.state.block_index;
+    ensure_supported_nova_config(config, block_index)?;
+    let subclaim_backend = nova_subclaim_backend_from_config(config, block_index)?;
+    let statement = BlockFoldStatement::from_fold_input(fold_input);
+    let lookup_backend_selector = subclaim_backend.lookup_backend_selector();
+    let subclaims = subclaim_backend.subclaim_fingerprints(&statement);
+
+    Ok(JoltExecutionSubclaimRelationBoundary {
+        version: JOLT_NOVA_EXECUTION_SUBCLAIM_RELATION_VERSION,
+        relation_name: NOVA_EXECUTION_SUBCLAIM_RELATION_NAME,
+        block_index,
+        public_state: JoltExecutionSubclaimPublicState::from_statement(
+            &statement,
+            lookup_backend_selector,
+        ),
+        witness_statement_digest: statement.digest(),
+        witness_subclaim_fingerprints:
+            JoltExecutionSubclaimFingerprints::from_statement_with_subclaims(&statement, subclaims),
     })
 }
 
@@ -12942,6 +13140,109 @@ mod tests {
                 actual_used_lookahead: false,
             }
         ));
+    }
+
+    #[cfg(feature = "nova")]
+    #[test]
+    fn nova_execution_subclaim_relation_boundary_tracks_transcript_backend() {
+        let bytecode = BytecodePreprocessing::default();
+        let block = trace_block(0, boundary(0, 0), boundary(4, 0));
+        let prover = BlockProofBundleProver::<_, ark_bn254::Fr>::new([9u8; 32]);
+        let bundle = prover.prove_block(&bytecode, &block, None).unwrap();
+        let fold_input = build_block_fold_input(&bundle);
+        let statement = BlockFoldStatement::from_fold_input(&fold_input);
+        let boundary = build_jolt_execution_subclaim_relation_boundary(
+            &NovaFoldConfig::default(),
+            &fold_input,
+        )
+        .unwrap();
+
+        assert_eq!(
+            boundary.version,
+            JOLT_NOVA_EXECUTION_SUBCLAIM_RELATION_VERSION
+        );
+        assert_eq!(
+            boundary.relation_name,
+            NOVA_EXECUTION_SUBCLAIM_RELATION_NAME
+        );
+        assert_eq!(boundary.block_index, 0);
+        assert_eq!(
+            boundary.public_state.start_register_digest,
+            nova_scalar_to_storage(statement.start_register_digest)
+        );
+        assert_eq!(
+            boundary.public_state.end_register_digest,
+            nova_scalar_to_storage(statement.end_register_digest)
+        );
+        assert_eq!(
+            boundary.public_state.register_read_count,
+            nova_scalar_to_storage(statement.register_read_count)
+        );
+        assert_eq!(
+            boundary.public_state.ram_access_count,
+            nova_scalar_to_storage(statement.ram_access_count)
+        );
+        assert_eq!(
+            boundary.public_state.lookup_count,
+            nova_scalar_to_storage(statement.lookup_count)
+        );
+        assert_eq!(
+            boundary.public_state.lookup_backend_selector,
+            nova_scalar_to_storage(NovaScalar::zero())
+        );
+        assert_eq!(boundary.witness_statement_digest, statement.digest());
+        assert_eq!(
+            boundary.witness_subclaim_fingerprints.register,
+            nova_scalar_to_storage(statement.register_delta())
+        );
+        assert_eq!(
+            boundary.witness_subclaim_fingerprints.ram,
+            nova_scalar_to_storage(statement.ram_delta())
+        );
+        assert_eq!(
+            boundary.witness_subclaim_fingerprints.lookup,
+            nova_scalar_to_storage(statement.lookup_delta())
+        );
+        assert_eq!(
+            boundary.witness_subclaim_fingerprints.lookup_logup,
+            nova_scalar_to_storage(statement.lookup_logup_fingerprint())
+        );
+    }
+
+    #[cfg(feature = "nova")]
+    #[test]
+    fn nova_execution_subclaim_relation_boundary_tracks_logup_backend() {
+        let bytecode = BytecodePreprocessing::default();
+        let block = trace_block(0, boundary(0, 0), boundary(4, 0));
+        let prover = BlockProofBundleProver::<_, ark_bn254::Fr>::new([9u8; 32]);
+        let bundle = prover.prove_block(&bytecode, &block, None).unwrap();
+        let fold_input = build_block_fold_input(&bundle);
+        let statement = BlockFoldStatement::from_fold_input(&fold_input);
+        let mut config = NovaFoldConfig::default();
+        config.subclaim_backend_name = NOVA_LOGUP_SUBCLAIM_BACKEND_NAME;
+        let boundary =
+            build_jolt_execution_subclaim_relation_boundary(&config, &fold_input).unwrap();
+
+        assert_eq!(
+            boundary.version,
+            JOLT_NOVA_EXECUTION_SUBCLAIM_RELATION_VERSION
+        );
+        assert_eq!(
+            boundary.relation_name,
+            NOVA_EXECUTION_SUBCLAIM_RELATION_NAME
+        );
+        assert_eq!(
+            boundary.public_state.lookup_backend_selector,
+            nova_scalar_to_storage(NovaScalar::from(1))
+        );
+        assert_eq!(
+            boundary.witness_subclaim_fingerprints.lookup,
+            nova_scalar_to_storage(statement.lookup_logup_fingerprint())
+        );
+        assert_ne!(
+            boundary.witness_subclaim_fingerprints.lookup,
+            nova_scalar_to_storage(statement.lookup_delta())
+        );
     }
 
     #[cfg(feature = "nova")]

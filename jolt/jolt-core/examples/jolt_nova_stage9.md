@@ -881,3 +881,25 @@ Stage 10.2 still relies on host-side validation for the lookahead-cycle shape
 and does not yet internalize the full CPU verifier gadget. What it does add is
 a stable, inspectable CPU/R1CS boundary that later verifier internalization
 work can reuse without changing the recursive state layout again.
+
+## Stage 10.3: explicit register/RAM/lookup subclaim boundary
+
+Stage 10.3 pulls the remaining execution subclaims out of the opaque step
+statement and makes them first-class recursive boundary objects. The new
+`JoltExecutionSubclaimRelationBoundary` exposes the register, RAM, and lookup
+inputs that feed Nova's subclaim fingerprints, together with the selected
+lookup backend and the resulting witness fingerprints.
+
+This makes the execution-side folding surface auditable in two dimensions:
+
+- the raw register / RAM / lookup fields that define each subclaim;
+- the selected transcript-vs-LogUp lookup backend used to compress them.
+
+The boundary is now stable enough for the next verifier-internalization
+milestone to reuse without reshaping the execution subclaim inputs again.
+
+### Security boundary
+
+Stage 10.3 still does not internalize the register, RAM, or lookup verifier
+equations inside Nova. It only makes the already-validated execution subclaim
+surface explicit and backend-aware.
