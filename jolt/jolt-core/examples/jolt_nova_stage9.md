@@ -903,3 +903,28 @@ milestone to reuse without reshaping the execution subclaim inputs again.
 Stage 10.3 still does not internalize the register, RAM, or lookup verifier
 equations inside Nova. It only makes the already-validated execution subclaim
 surface explicit and backend-aware.
+
+## Stage 10.4: unified recursive verifier boundary
+
+Stage 10.4 combines the Stage 10.1 Nova step boundary, the Stage 10.2 CPU/R1CS
+boundary, and the Stage 10.3 register/RAM/lookup execution-subclaim boundary
+into one `JoltRecursiveVerifierRelationBoundary`.
+
+The unified boundary records:
+
+- the public input/output state for one Nova folding step;
+- the CPU/R1CS public state and CPU fingerprint;
+- the register, RAM, and lookup subclaim inputs and fingerprints;
+- the selected lookup backend, including the LogUp path.
+
+It then derives a single `boundary_digest` over all three component boundaries.
+This digest is the stable object that future recursive verifier gadgets can
+consume when replacing host-side receipt trust with in-circuit verifier
+equations.
+
+### Security boundary
+
+Stage 10.4 is still digest-level verifier internalization. It checks and binds
+the shape and consistency of the recursive verifier boundary, but it does not
+yet execute Dory, Spartan, RAM, register, lookup, or CPU verifier equations
+inside the Nova circuit.

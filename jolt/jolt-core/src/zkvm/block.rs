@@ -963,6 +963,9 @@ pub const JOLT_NOVA_CPU_R1CS_RELATION_VERSION: &str = "jolt-nova-cpu-r1cs-relati
 pub const NOVA_EXECUTION_SUBCLAIM_RELATION_NAME: &str = "jolt-nova-execution-subclaims-v1";
 pub const JOLT_NOVA_EXECUTION_SUBCLAIM_RELATION_VERSION: &str =
     "jolt-nova-execution-subclaim-relation-v1";
+pub const NOVA_RECURSIVE_VERIFIER_RELATION_NAME: &str = "jolt-nova-recursive-verifier-v1";
+pub const JOLT_NOVA_RECURSIVE_VERIFIER_RELATION_VERSION: &str =
+    "jolt-nova-recursive-verifier-relation-v1";
 
 impl Default for NovaFoldConfig {
     fn default() -> Self {
@@ -1157,6 +1160,23 @@ pub struct JoltExecutionSubclaimRelationBoundary {
     pub witness_subclaim_fingerprints: JoltExecutionSubclaimFingerprints,
 }
 
+/// Unified recursive-verifier boundary for one block.
+///
+/// This does not yet execute the verifier gadgets inside Nova. Instead, it
+/// fixes the digest-level object that later in-circuit verifier gadgets can
+/// consume without reshaping the boundary surface again.
+#[cfg(feature = "nova")]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct JoltRecursiveVerifierRelationBoundary {
+    pub version: &'static str,
+    pub relation_name: &'static str,
+    pub block_index: usize,
+    pub step_boundary: JoltNovaStepRelationBoundary,
+    pub cpu_r1cs_boundary: JoltCpuR1csRelationBoundary,
+    pub execution_subclaim_boundary: JoltExecutionSubclaimRelationBoundary,
+    pub boundary_digest: [u8; 32],
+}
+
 #[cfg(feature = "nova")]
 impl JoltCpuR1csPublicState {
     fn from_statement(statement: &BlockFoldStatement) -> Self {
@@ -1254,6 +1274,47 @@ impl JoltExecutionSubclaimPublicState {
             lookup_backend_selector: nova_scalar_to_storage(lookup_backend_selector),
         }
     }
+
+    fn storage_words(&self) -> [[u8; 32]; 36] {
+        [
+            self.start_register_digest,
+            self.end_register_digest,
+            self.register_reads_digest,
+            self.register_writes_digest,
+            self.register_read_count,
+            self.register_write_count,
+            self.ram_accesses_digest,
+            self.ram_touched_addresses_digest,
+            self.ram_access_count,
+            self.ram_touched_address_count,
+            self.lookup_claims_digest,
+            self.lookup_entry_summaries_digest,
+            self.lookup_count,
+            self.lookup_distinct_entry_count,
+            self.lookup_logup_proof_digest,
+            self.lookup_logup_tuple_challenge,
+            self.lookup_logup_denominator_challenge,
+            self.lookup_logup_denominator_retry_count,
+            self.lookup_logup_query_sum,
+            self.lookup_logup_table_sum,
+            self.verified_jolt_lookup_receipt_present,
+            self.verified_jolt_lookup_receipt_digest,
+            self.verified_jolt_lookup_receipt_trace_length,
+            self.verified_jolt_lookup_receipt_commitment_count,
+            self.verified_jolt_lookup_receipt_zk_mode,
+            self.verified_jolt_blindfold_receipt_digest,
+            self.verified_jolt_verifier_stage_relation_digest,
+            self.verified_jolt_verifier_stage_relation_count,
+            self.verified_jolt_recursive_transcript_root,
+            self.verified_jolt_recursive_transcript_stage_count,
+            self.verified_jolt_lookup_block_binding_digest,
+            self.verified_jolt_lookup_opening_present,
+            self.verified_jolt_lookup_opening_receipt_digest,
+            self.verified_jolt_lookup_opening_count,
+            self.verified_jolt_lookup_opening_block_digest,
+            self.lookup_backend_selector,
+        ]
+    }
 }
 
 #[cfg(feature = "nova")]
@@ -1268,6 +1329,34 @@ impl JoltExecutionSubclaimFingerprints {
             lookup: nova_scalar_to_storage(subclaims.lookup),
             lookup_logup: nova_scalar_to_storage(statement.lookup_logup_fingerprint()),
         }
+    }
+
+    fn storage_words(&self) -> [[u8; 32]; 4] {
+        [self.register, self.ram, self.lookup, self.lookup_logup]
+    }
+}
+
+#[cfg(feature = "nova")]
+impl JoltCpuR1csPublicState {
+    fn storage_words(&self) -> [[u8; 32]; 5] {
+        [
+            self.r1cs_rows_checked,
+            self.r1cs_num_steps,
+            self.r1cs_vk_digest,
+            self.used_lookahead_cycle,
+            self.lookahead_cycle_digest,
+        ]
+    }
+}
+
+#[cfg(feature = "nova")]
+impl JoltRecursiveVerifierRelationBoundary {
+    pub fn digest(&self) -> [u8; 32] {
+        digest_jolt_recursive_verifier_relation_boundary(self)
+    }
+
+    pub fn verify_digest(&self) -> bool {
+        self.boundary_digest == self.digest()
     }
 }
 
@@ -5496,6 +5585,58 @@ where
         witness_statement_digest: statement.digest(),
         witness_subclaim_fingerprints:
             JoltExecutionSubclaimFingerprints::from_statement_with_subclaims(&statement, subclaims),
+    })
+}
+
+#[cfg(feature = "nova")]
+pub fn build_jolt_recursive_verifier_relation_boundary<Digest, F>(
+    config: &NovaFoldConfig,
+    previous_output: Option<&NovaFoldZState>,
+    fold_input: &BlockFoldInput<Digest, F>,
+) -> Result<JoltRecursiveVerifierRelationBoundary, BlockTraceError>
+where
+    Digest: AsRef<[u8]>,
+    F: JoltField,
+{
+    let step_boundary =
+        build_jolt_nova_step_relation_boundary(config, previous_output, fold_input)?;
+    let cpu_r1cs_boundary = build_jolt_cpu_r1cs_relation_boundary(fold_input)?;
+    let execution_subclaim_boundary =
+        build_jolt_execution_subclaim_relation_boundary(config, fold_input)?;
+
+    if step_boundary.block_index != cpu_r1cs_boundary.block_index
+        || step_boundary.block_index != execution_subclaim_boundary.block_index
+        || cpu_r1cs_boundary.block_index != execution_subclaim_boundary.block_index
+    {
+        return Err(BlockTraceError::NovaFoldingBackendError {
+            block_index: fold_input.state.block_index,
+            reason: "recursive verifier boundary block index mismatch",
+        });
+    }
+
+    if step_boundary.witness_statement_digest != cpu_r1cs_boundary.witness_statement_digest
+        || step_boundary.witness_statement_digest
+            != execution_subclaim_boundary.witness_statement_digest
+    {
+        return Err(BlockTraceError::NovaFoldingBackendError {
+            block_index: fold_input.state.block_index,
+            reason: "recursive verifier boundary statement digest mismatch",
+        });
+    }
+
+    let boundary = JoltRecursiveVerifierRelationBoundary {
+        version: JOLT_NOVA_RECURSIVE_VERIFIER_RELATION_VERSION,
+        relation_name: NOVA_RECURSIVE_VERIFIER_RELATION_NAME,
+        block_index: fold_input.state.block_index,
+        step_boundary,
+        cpu_r1cs_boundary,
+        execution_subclaim_boundary,
+        boundary_digest: [0u8; 32],
+    };
+
+    Ok(JoltRecursiveVerifierRelationBoundary {
+        boundary_digest: boundary.digest(),
+        ..boundary
     })
 }
 
@@ -9900,6 +10041,12 @@ where
     }
 }
 
+#[cfg(feature = "nova")]
+fn update_static_str(hasher: &mut Sha3_256, value: &'static str) {
+    update_usize(hasher, value.len());
+    hasher.update(value.as_bytes());
+}
+
 fn update_nova_fold_config(hasher: &mut Sha3_256, config: &NovaFoldConfig) {
     hasher.update(config.backend_name.as_bytes());
     hasher.update(config.relation_name.as_bytes());
@@ -9931,6 +10078,96 @@ fn update_block_fold_metadata<Digest>(
     update_usize(hasher, metadata.total_ram_accesses);
     update_usize(hasher, metadata.total_lookup_claims);
     hasher.update(metadata.accumulator_digest);
+}
+
+#[cfg(feature = "nova")]
+fn update_storage_words<const N: usize>(hasher: &mut Sha3_256, words: &[[u8; 32]; N]) {
+    for word in words {
+        hasher.update(word);
+    }
+}
+
+#[cfg(feature = "nova")]
+fn update_jolt_nova_step_public_state(hasher: &mut Sha3_256, state: &JoltNovaStepPublicState) {
+    update_storage_words(hasher, &state.to_storage());
+}
+
+#[cfg(feature = "nova")]
+fn update_jolt_cpu_r1cs_public_state(hasher: &mut Sha3_256, state: &JoltCpuR1csPublicState) {
+    update_storage_words(hasher, &state.storage_words());
+}
+
+#[cfg(feature = "nova")]
+fn update_jolt_execution_subclaim_public_state(
+    hasher: &mut Sha3_256,
+    state: &JoltExecutionSubclaimPublicState,
+) {
+    update_storage_words(hasher, &state.storage_words());
+}
+
+#[cfg(feature = "nova")]
+fn update_jolt_execution_subclaim_fingerprints(
+    hasher: &mut Sha3_256,
+    fingerprints: &JoltExecutionSubclaimFingerprints,
+) {
+    update_storage_words(hasher, &fingerprints.storage_words());
+}
+
+#[cfg(feature = "nova")]
+fn update_jolt_nova_step_relation_boundary(
+    hasher: &mut Sha3_256,
+    boundary: &JoltNovaStepRelationBoundary,
+) {
+    update_static_str(hasher, boundary.version);
+    update_static_str(hasher, boundary.relation_name);
+    update_usize(hasher, boundary.block_index);
+    update_jolt_nova_step_public_state(hasher, &boundary.public_input);
+    hasher.update(boundary.witness_statement_digest);
+    update_jolt_nova_step_public_state(hasher, &boundary.public_output);
+}
+
+#[cfg(feature = "nova")]
+fn update_jolt_cpu_r1cs_relation_boundary(
+    hasher: &mut Sha3_256,
+    boundary: &JoltCpuR1csRelationBoundary,
+) {
+    update_static_str(hasher, boundary.version);
+    update_static_str(hasher, boundary.relation_name);
+    update_usize(hasher, boundary.block_index);
+    update_jolt_cpu_r1cs_public_state(hasher, &boundary.public_state);
+    hasher.update(boundary.witness_statement_digest);
+    hasher.update(boundary.witness_cpu_claim_fingerprint);
+}
+
+#[cfg(feature = "nova")]
+fn update_jolt_execution_subclaim_relation_boundary(
+    hasher: &mut Sha3_256,
+    boundary: &JoltExecutionSubclaimRelationBoundary,
+) {
+    update_static_str(hasher, boundary.version);
+    update_static_str(hasher, boundary.relation_name);
+    update_usize(hasher, boundary.block_index);
+    update_jolt_execution_subclaim_public_state(hasher, &boundary.public_state);
+    hasher.update(boundary.witness_statement_digest);
+    update_jolt_execution_subclaim_fingerprints(hasher, &boundary.witness_subclaim_fingerprints);
+}
+
+#[cfg(feature = "nova")]
+fn digest_jolt_recursive_verifier_relation_boundary(
+    boundary: &JoltRecursiveVerifierRelationBoundary,
+) -> [u8; 32] {
+    let mut hasher = Sha3_256::new();
+    hasher.update(b"JOLT_NOVA_RECURSIVE_VERIFIER_RELATION_BOUNDARY_V1");
+    update_static_str(&mut hasher, boundary.version);
+    update_static_str(&mut hasher, boundary.relation_name);
+    update_usize(&mut hasher, boundary.block_index);
+    update_jolt_nova_step_relation_boundary(&mut hasher, &boundary.step_boundary);
+    update_jolt_cpu_r1cs_relation_boundary(&mut hasher, &boundary.cpu_r1cs_boundary);
+    update_jolt_execution_subclaim_relation_boundary(
+        &mut hasher,
+        &boundary.execution_subclaim_boundary,
+    );
+    finalize_digest(hasher)
 }
 
 fn update_field<F>(hasher: &mut Sha3_256, value: F)
@@ -13242,6 +13479,127 @@ mod tests {
         assert_ne!(
             boundary.witness_subclaim_fingerprints.lookup,
             nova_scalar_to_storage(statement.lookup_delta())
+        );
+    }
+
+    #[cfg(feature = "nova")]
+    #[test]
+    fn nova_recursive_verifier_relation_boundary_binds_step_cpu_and_execution_boundaries() {
+        let bytecode = BytecodePreprocessing::default();
+        let block0 = trace_block(0, boundary(0, 0), boundary(2, 0));
+        let block1 = trace_block(1, block0.end_state.clone(), boundary(4, 0));
+        let prover = BlockProofBundleProver::<_, ark_bn254::Fr>::new([9u8; 32]);
+        let bundles = prover.prove_blocks(&bytecode, &[block0, block1]).unwrap();
+        let fold_inputs = build_block_fold_inputs(&bundles);
+        let config = NovaFoldConfig::default();
+
+        let first_boundary =
+            build_jolt_recursive_verifier_relation_boundary(&config, None, &fold_inputs[0])
+                .unwrap();
+        let expected_step =
+            build_jolt_nova_step_relation_boundary(&config, None, &fold_inputs[0]).unwrap();
+        let expected_cpu = build_jolt_cpu_r1cs_relation_boundary(&fold_inputs[0]).unwrap();
+        let expected_execution =
+            build_jolt_execution_subclaim_relation_boundary(&config, &fold_inputs[0]).unwrap();
+
+        assert_eq!(
+            first_boundary.version,
+            JOLT_NOVA_RECURSIVE_VERIFIER_RELATION_VERSION
+        );
+        assert_eq!(
+            first_boundary.relation_name,
+            NOVA_RECURSIVE_VERIFIER_RELATION_NAME
+        );
+        assert_eq!(first_boundary.block_index, 0);
+        assert_eq!(first_boundary.step_boundary, expected_step);
+        assert_eq!(first_boundary.cpu_r1cs_boundary, expected_cpu);
+        assert_eq!(
+            first_boundary.execution_subclaim_boundary,
+            expected_execution
+        );
+        assert!(first_boundary.verify_digest());
+
+        let digest = first_boundary.boundary_digest;
+        let mut tampered_step = first_boundary.clone();
+        tampered_step
+            .step_boundary
+            .public_output
+            .machine_state_digest[0] ^= 1;
+        assert_ne!(digest, tampered_step.digest());
+        assert!(!tampered_step.verify_digest());
+
+        let mut tampered_cpu = first_boundary.clone();
+        tampered_cpu
+            .cpu_r1cs_boundary
+            .public_state
+            .r1cs_rows_checked[0] ^= 1;
+        assert_ne!(digest, tampered_cpu.digest());
+
+        let mut tampered_execution = first_boundary.clone();
+        tampered_execution
+            .execution_subclaim_boundary
+            .public_state
+            .lookup_backend_selector[0] ^= 1;
+        assert_ne!(digest, tampered_execution.digest());
+
+        let mut tampered_fingerprint = first_boundary.clone();
+        tampered_fingerprint
+            .execution_subclaim_boundary
+            .witness_subclaim_fingerprints
+            .lookup[0] ^= 1;
+        assert_ne!(digest, tampered_fingerprint.digest());
+
+        let second_boundary = build_jolt_recursive_verifier_relation_boundary(
+            &config,
+            Some(&first_boundary.step_boundary.public_output.to_storage()),
+            &fold_inputs[1],
+        )
+        .unwrap();
+        assert_eq!(
+            second_boundary.step_boundary.public_input,
+            first_boundary.step_boundary.public_output
+        );
+    }
+
+    #[cfg(feature = "nova")]
+    #[test]
+    fn nova_recursive_verifier_relation_boundary_tracks_logup_backend() {
+        let bytecode = BytecodePreprocessing::default();
+        let block = trace_block(0, boundary(0, 0), boundary(4, 0));
+        let prover = BlockProofBundleProver::<_, ark_bn254::Fr>::new([9u8; 32]);
+        let bundle = prover.prove_block(&bytecode, &block, None).unwrap();
+        let fold_input = build_block_fold_input(&bundle);
+        let statement = BlockFoldStatement::from_fold_input(&fold_input);
+        let default_boundary = build_jolt_recursive_verifier_relation_boundary(
+            &NovaFoldConfig::default(),
+            None,
+            &fold_input,
+        )
+        .unwrap();
+        let mut logup_config = NovaFoldConfig::default();
+        logup_config.subclaim_backend_name = NOVA_LOGUP_SUBCLAIM_BACKEND_NAME;
+        let logup_boundary =
+            build_jolt_recursive_verifier_relation_boundary(&logup_config, None, &fold_input)
+                .unwrap();
+
+        assert!(logup_boundary.verify_digest());
+        assert_ne!(
+            default_boundary.boundary_digest,
+            logup_boundary.boundary_digest
+        );
+        assert_eq!(
+            logup_boundary
+                .execution_subclaim_boundary
+                .public_state
+                .lookup_backend_selector,
+            nova_scalar_to_storage(NovaScalar::from(1))
+        );
+        assert_eq!(
+            logup_boundary
+                .execution_subclaim_boundary
+                .witness_subclaim_fingerprints
+                .lookup,
+            nova_scalar_to_storage(statement.lookup_logup_fingerprint())
         );
     }
 
