@@ -928,3 +928,35 @@ Stage 10.4 is still digest-level verifier internalization. It checks and binds
 the shape and consistency of the recursive verifier boundary, but it does not
 yet execute Dory, Spartan, RAM, register, lookup, or CPU verifier equations
 inside the Nova circuit.
+
+## Stage 10.5: recursive verifier boundary enters the Nova step circuit
+
+Stage 10.5 connects the unified Stage 10.4 boundary to the actual recursive
+step path. Before each real Nova `prove_step`, the backend now constructs the
+`JoltRecursiveVerifierRelationBoundary` against the current recursive `z`
+state. This makes the host-side unified boundary check part of the proving
+lifecycle rather than a standalone inspection helper.
+
+The Nova step witness also carries a new circuit-friendly
+`recursive_verifier_boundary_fingerprint`. This scalar is not the native SHA3
+`boundary_digest` from Stage 10.4. Directly placing that SHA3 digest inside the
+statement would make the boundary self-referential, because the boundary digest
+already commits to the step statement digest and the step output state.
+
+Instead, the circuit fingerprint is a domain-separated transcript scalar over:
+
+- the in-circuit statement digest;
+- the register, RAM, lookup, and CPU subclaim fingerprints;
+- the selected lookup backend selector.
+
+The step circuit enforces this fingerprint and absorbs it into the semantic
+fold accumulator. As a result, the recursive folded state now depends on the
+same verifier-boundary surface that Stage 10.4 exposed, while preserving the
+existing 11-word Nova `z` layout.
+
+### Security boundary
+
+Stage 10.5 still does not implement SHA3, Dory, Spartan, RAM, register,
+lookup, or CPU verifier equations as native Nova gadgets. It upgrades the
+boundary from host-only metadata to an enforced, folded circuit fingerprint;
+the full cryptographic verifier gadgets remain future Stage 10 work.

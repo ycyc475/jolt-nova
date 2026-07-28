@@ -2323,6 +2323,8 @@ const NOVA_TRANSCRIPT_DOMAIN_LOOKUP_LOGUP: &str = "lookup-logup";
 #[cfg(feature = "nova")]
 const NOVA_TRANSCRIPT_DOMAIN_CPU: &str = "cpu";
 #[cfg(feature = "nova")]
+const NOVA_TRANSCRIPT_DOMAIN_RECURSIVE_VERIFIER_BOUNDARY: &str = "recursive-verifier-boundary";
+#[cfg(feature = "nova")]
 const NOVA_TRANSCRIPT_DOMAIN_STATEMENT: &str = "statement";
 
 #[cfg(feature = "nova")]
@@ -2886,9 +2888,28 @@ impl BlockFoldStatement {
         )
     }
 
-    fn semantic_delta_with_subclaims(
+    fn recursive_verifier_boundary_fingerprint_with_subclaims_and_selector(
         &self,
         subclaims: BlockFoldSubclaimFingerprints,
+        lookup_backend_selector: NovaScalar,
+    ) -> NovaScalar {
+        nova_transcript_delta(
+            NOVA_TRANSCRIPT_DOMAIN_RECURSIVE_VERIFIER_BOUNDARY,
+            [
+                ("statement_digest", self.statement_digest_scalar()),
+                ("register_claim_fingerprint", subclaims.register),
+                ("ram_claim_fingerprint", subclaims.ram),
+                ("lookup_claim_fingerprint", subclaims.lookup),
+                ("cpu_claim_fingerprint", subclaims.cpu),
+                ("lookup_backend_selector", lookup_backend_selector),
+            ],
+        )
+    }
+
+    fn semantic_delta_with_subclaims_and_boundary_fingerprint(
+        &self,
+        subclaims: BlockFoldSubclaimFingerprints,
+        recursive_verifier_boundary_fingerprint: NovaScalar,
     ) -> NovaScalar {
         nova_transcript_delta(
             NOVA_TRANSCRIPT_DOMAIN_SEMANTIC,
@@ -2906,8 +2927,35 @@ impl BlockFoldStatement {
                 ("ram_claim_fingerprint", subclaims.ram),
                 ("lookup_claim_fingerprint", subclaims.lookup),
                 ("cpu_claim_fingerprint", subclaims.cpu),
+                (
+                    "recursive_verifier_boundary_fingerprint",
+                    recursive_verifier_boundary_fingerprint,
+                ),
             ],
         )
+    }
+
+    fn semantic_delta_with_subclaims_and_selector(
+        &self,
+        subclaims: BlockFoldSubclaimFingerprints,
+        lookup_backend_selector: NovaScalar,
+    ) -> NovaScalar {
+        let recursive_verifier_boundary_fingerprint = self
+            .recursive_verifier_boundary_fingerprint_with_subclaims_and_selector(
+                subclaims,
+                lookup_backend_selector,
+            );
+        self.semantic_delta_with_subclaims_and_boundary_fingerprint(
+            subclaims,
+            recursive_verifier_boundary_fingerprint,
+        )
+    }
+
+    fn semantic_delta_with_subclaims(
+        &self,
+        subclaims: BlockFoldSubclaimFingerprints,
+    ) -> NovaScalar {
+        self.semantic_delta_with_subclaims_and_selector(subclaims, NovaScalar::zero())
     }
 
     fn semantic_delta(&self) -> NovaScalar {
@@ -3319,6 +3367,7 @@ struct JoltNovaStepWitness {
     lookahead_cycle_digest: NovaScalar,
     used_lookahead_cycle: NovaScalar,
     cpu_claim_fingerprint: NovaScalar,
+    recursive_verifier_boundary_fingerprint: NovaScalar,
 }
 
 #[cfg(feature = "nova")]
@@ -3351,7 +3400,13 @@ impl JoltNovaStepWitness {
     where
         Backend: NovaSubclaimFoldingBackend,
     {
+        let lookup_backend_selector = subclaim_backend.lookup_backend_selector();
         let subclaims = subclaim_backend.subclaim_fingerprints(&statement);
+        let recursive_verifier_boundary_fingerprint = statement
+            .recursive_verifier_boundary_fingerprint_with_subclaims_and_selector(
+                subclaims,
+                lookup_backend_selector,
+            );
         Self {
             statement_digest: statement.statement_digest_scalar(),
             program_digest: statement.program_digest,
@@ -3409,7 +3464,7 @@ impl JoltNovaStepWitness {
             verified_jolt_lookup_opening_count: statement.verified_jolt_lookup_opening_count,
             verified_jolt_lookup_opening_block_digest: statement
                 .verified_jolt_lookup_opening_block_digest,
-            lookup_backend_selector: subclaim_backend.lookup_backend_selector(),
+            lookup_backend_selector,
             lookup_claim_fingerprint: subclaims.lookup,
             r1cs_rows_checked: statement.r1cs_rows_checked,
             r1cs_num_steps: statement.r1cs_num_steps,
@@ -3417,6 +3472,7 @@ impl JoltNovaStepWitness {
             lookahead_cycle_digest: statement.lookahead_cycle_digest,
             used_lookahead_cycle: statement.used_lookahead_cycle,
             cpu_claim_fingerprint: subclaims.cpu,
+            recursive_verifier_boundary_fingerprint,
         }
     }
 
@@ -3482,8 +3538,10 @@ impl JoltNovaStepWitness {
     }
 
     fn semantic_delta(&self) -> NovaScalar {
-        self.statement()
-            .semantic_delta_with_subclaims(self.subclaim_fingerprints())
+        self.statement().semantic_delta_with_subclaims_and_selector(
+            self.subclaim_fingerprints(),
+            self.lookup_backend_selector,
+        )
     }
 
     fn semantic_delta_scalar(&self) -> NovaScalar {
@@ -3520,6 +3578,14 @@ impl JoltNovaStepWitness {
 
     fn cpu_delta_scalar(&self) -> NovaScalar {
         self.cpu_delta()
+    }
+
+    fn recursive_verifier_boundary_fingerprint_scalar(&self) -> NovaScalar {
+        self.statement()
+            .recursive_verifier_boundary_fingerprint_with_subclaims_and_selector(
+                self.subclaim_fingerprints(),
+                self.lookup_backend_selector,
+            )
     }
 
     fn subclaim_fingerprints(&self) -> BlockFoldSubclaimFingerprints {
@@ -3810,6 +3876,11 @@ impl nova_snark::traits::circuit::StepCircuit<NovaScalar> for JoltNovaStepCircui
             cs,
             "CPU R1CS claim fingerprint",
             self.witness.cpu_claim_fingerprint,
+        )?;
+        let recursive_verifier_boundary_fingerprint = alloc_nova_witness(
+            cs,
+            "recursive verifier boundary fingerprint",
+            self.witness.recursive_verifier_boundary_fingerprint,
         )?;
 
         let output_accumulator = nova_snark::frontend::num::AllocatedNum::alloc(
@@ -4247,6 +4318,11 @@ impl nova_snark::traits::circuit::StepCircuit<NovaScalar> for JoltNovaStepCircui
             |lc| lc + statement_digest.get_variable(),
         );
 
+        let recursive_boundary_semantic_challenge = nova_transcript_challenge_scalar(
+            NOVA_TRANSCRIPT_DOMAIN_SEMANTIC,
+            "recursive_verifier_boundary_fingerprint",
+        );
+
         cs.enforce(
             || "semantic fold accumulator transition",
             |lc| {
@@ -4341,6 +4417,54 @@ impl nova_snark::traits::circuit::StepCircuit<NovaScalar> for JoltNovaStepCircui
                             "cpu_claim_fingerprint",
                         ),
                         cpu_claim_fingerprint.get_variable(),
+                    )
+                    + (
+                        recursive_boundary_semantic_challenge
+                            * nova_transcript_challenge_scalar(
+                                NOVA_TRANSCRIPT_DOMAIN_RECURSIVE_VERIFIER_BOUNDARY,
+                                "statement_digest",
+                            ),
+                        statement_digest.get_variable(),
+                    )
+                    + (
+                        recursive_boundary_semantic_challenge
+                            * nova_transcript_challenge_scalar(
+                                NOVA_TRANSCRIPT_DOMAIN_RECURSIVE_VERIFIER_BOUNDARY,
+                                "register_claim_fingerprint",
+                            ),
+                        register_claim_fingerprint.get_variable(),
+                    )
+                    + (
+                        recursive_boundary_semantic_challenge
+                            * nova_transcript_challenge_scalar(
+                                NOVA_TRANSCRIPT_DOMAIN_RECURSIVE_VERIFIER_BOUNDARY,
+                                "ram_claim_fingerprint",
+                            ),
+                        ram_claim_fingerprint.get_variable(),
+                    )
+                    + (
+                        recursive_boundary_semantic_challenge
+                            * nova_transcript_challenge_scalar(
+                                NOVA_TRANSCRIPT_DOMAIN_RECURSIVE_VERIFIER_BOUNDARY,
+                                "lookup_claim_fingerprint",
+                            ),
+                        lookup_claim_fingerprint.get_variable(),
+                    )
+                    + (
+                        recursive_boundary_semantic_challenge
+                            * nova_transcript_challenge_scalar(
+                                NOVA_TRANSCRIPT_DOMAIN_RECURSIVE_VERIFIER_BOUNDARY,
+                                "cpu_claim_fingerprint",
+                            ),
+                        cpu_claim_fingerprint.get_variable(),
+                    )
+                    + (
+                        recursive_boundary_semantic_challenge
+                            * nova_transcript_challenge_scalar(
+                                NOVA_TRANSCRIPT_DOMAIN_RECURSIVE_VERIFIER_BOUNDARY,
+                                "lookup_backend_selector",
+                            ),
+                        lookup_backend_selector.get_variable(),
                     )
             },
             |lc| lc + CS::one(),
@@ -5101,6 +5225,51 @@ impl nova_snark::traits::circuit::StepCircuit<NovaScalar> for JoltNovaStepCircui
             |lc| lc + output_cpu_claim_accumulator.get_variable(),
         );
 
+        cs.enforce(
+            || "recursive verifier boundary fingerprint binds step witness",
+            |lc| {
+                lc + (
+                    nova_transcript_challenge_scalar(
+                        NOVA_TRANSCRIPT_DOMAIN_RECURSIVE_VERIFIER_BOUNDARY,
+                        "statement_digest",
+                    ),
+                    statement_digest.get_variable(),
+                ) + (
+                    nova_transcript_challenge_scalar(
+                        NOVA_TRANSCRIPT_DOMAIN_RECURSIVE_VERIFIER_BOUNDARY,
+                        "register_claim_fingerprint",
+                    ),
+                    register_claim_fingerprint.get_variable(),
+                ) + (
+                    nova_transcript_challenge_scalar(
+                        NOVA_TRANSCRIPT_DOMAIN_RECURSIVE_VERIFIER_BOUNDARY,
+                        "ram_claim_fingerprint",
+                    ),
+                    ram_claim_fingerprint.get_variable(),
+                ) + (
+                    nova_transcript_challenge_scalar(
+                        NOVA_TRANSCRIPT_DOMAIN_RECURSIVE_VERIFIER_BOUNDARY,
+                        "lookup_claim_fingerprint",
+                    ),
+                    lookup_claim_fingerprint.get_variable(),
+                ) + (
+                    nova_transcript_challenge_scalar(
+                        NOVA_TRANSCRIPT_DOMAIN_RECURSIVE_VERIFIER_BOUNDARY,
+                        "cpu_claim_fingerprint",
+                    ),
+                    cpu_claim_fingerprint.get_variable(),
+                ) + (
+                    nova_transcript_challenge_scalar(
+                        NOVA_TRANSCRIPT_DOMAIN_RECURSIVE_VERIFIER_BOUNDARY,
+                        "lookup_backend_selector",
+                    ),
+                    lookup_backend_selector.get_variable(),
+                )
+            },
+            |lc| lc + CS::one(),
+            |lc| lc + recursive_verifier_boundary_fingerprint.get_variable(),
+        );
+
         Ok(vec![
             output_accumulator,
             output_next_block_index,
@@ -5839,6 +6008,12 @@ where
 {
     let pp = nova_public_params(block_index)?;
     let subclaim_backend = nova_subclaim_backend_from_config(config, block_index)?;
+    let current_z_state_storage = nova_z_state_to_storage(current_z_state);
+    let _recursive_boundary = build_jolt_recursive_verifier_relation_boundary(
+        config,
+        Some(&current_z_state_storage),
+        fold_input,
+    )?;
     let circuit =
         nova_step_circuit_for_fold_input_with_subclaim_backend(fold_input, &subclaim_backend);
     let z0 = initial_z_state;
@@ -13647,6 +13822,17 @@ mod tests {
         assert_eq!(statement_subclaims.cpu, statement.cpu_delta());
         assert_eq!(witness.subclaim_fingerprints(), statement_subclaims);
         assert_eq!(
+            witness.recursive_verifier_boundary_fingerprint,
+            statement.recursive_verifier_boundary_fingerprint_with_subclaims_and_selector(
+                statement_subclaims,
+                NovaScalar::zero()
+            )
+        );
+        assert_eq!(
+            witness.recursive_verifier_boundary_fingerprint,
+            witness.recursive_verifier_boundary_fingerprint_scalar()
+        );
+        assert_eq!(
             witness.semantic_delta(),
             statement.semantic_delta_with_subclaims(statement_subclaims)
         );
@@ -13696,8 +13882,56 @@ mod tests {
         );
         assert_eq!(witness.subclaim_fingerprints(), expected_subclaims);
         assert_eq!(
+            witness.recursive_verifier_boundary_fingerprint,
+            statement.recursive_verifier_boundary_fingerprint_with_subclaims_and_selector(
+                expected_subclaims,
+                NovaScalar::zero()
+            )
+        );
+        assert_eq!(
             witness.semantic_delta(),
             statement.semantic_delta_with_subclaims(expected_subclaims)
+        );
+    }
+
+    #[cfg(feature = "nova")]
+    #[test]
+    fn nova_logup_backend_updates_recursive_verifier_boundary_fingerprint() {
+        let bytecode = BytecodePreprocessing::default();
+        let block = trace_block(0, boundary(0, 0), boundary(4, 0));
+        let prover = BlockProofBundleProver::<_, ark_bn254::Fr>::new([9u8; 32]);
+        let bundle = prover.prove_block(&bytecode, &block, None).unwrap();
+        let fold_input = build_block_fold_input(&bundle);
+        let statement = BlockFoldStatement::from_fold_input(&fold_input);
+        let transcript_witness = JoltNovaStepWitness::from_fold_input(&fold_input);
+        let mut config = NovaFoldConfig::default();
+        config.subclaim_backend_name = NOVA_LOGUP_SUBCLAIM_BACKEND_NAME;
+        let logup_backend =
+            nova_subclaim_backend_from_config(&config, fold_input.state.block_index).unwrap();
+        let logup_subclaims = logup_backend.subclaim_fingerprints(&statement);
+        let logup_witness = JoltNovaStepWitness::from_statement_with_subclaim_backend(
+            statement.clone(),
+            &logup_backend,
+        );
+
+        assert_eq!(logup_backend.lookup_backend_selector(), NovaScalar::from(1));
+        assert_eq!(
+            logup_witness.recursive_verifier_boundary_fingerprint,
+            statement.recursive_verifier_boundary_fingerprint_with_subclaims_and_selector(
+                logup_subclaims,
+                NovaScalar::from(1)
+            )
+        );
+        assert_ne!(
+            transcript_witness.recursive_verifier_boundary_fingerprint,
+            logup_witness.recursive_verifier_boundary_fingerprint
+        );
+        assert_eq!(
+            logup_witness.semantic_delta(),
+            statement.semantic_delta_with_subclaims_and_boundary_fingerprint(
+                logup_subclaims,
+                logup_witness.recursive_verifier_boundary_fingerprint
+            )
         );
     }
 
@@ -13743,6 +13977,10 @@ mod tests {
         assert_ne!(
             custom_witness.lookup_delta(),
             default_witness.lookup_delta()
+        );
+        assert_ne!(
+            custom_witness.recursive_verifier_boundary_fingerprint,
+            default_witness.recursive_verifier_boundary_fingerprint
         );
         assert_ne!(
             custom_witness.semantic_delta(),
@@ -14964,6 +15202,26 @@ mod tests {
         assert_eq!(
             cs.which_is_unsatisfied(),
             Some("CPU R1CS claim fingerprint binds CPU fields")
+        );
+    }
+
+    #[cfg(feature = "nova")]
+    #[test]
+    fn nova_step_circuit_rejects_tampered_recursive_verifier_boundary_fingerprint_witness() {
+        let bytecode = BytecodePreprocessing::default();
+        let block = trace_block(0, boundary(0, 0), boundary(4, 0));
+        let prover = BlockProofBundleProver::<_, ark_bn254::Fr>::new([9u8; 32]);
+        let bundle = prover.prove_block(&bytecode, &block, None).unwrap();
+        let fold_input = build_block_fold_input(&bundle);
+        let mut circuit = nova_step_circuit_for_fold_input(&fold_input);
+        circuit.witness.recursive_verifier_boundary_fingerprint =
+            circuit.witness.recursive_verifier_boundary_fingerprint + NovaScalar::from(1);
+
+        let cs = synthesize_nova_step_circuit_for_test(&circuit);
+
+        assert_eq!(
+            cs.which_is_unsatisfied(),
+            Some("recursive verifier boundary fingerprint binds step witness")
         );
     }
 
