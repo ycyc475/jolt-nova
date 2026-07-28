@@ -727,6 +727,8 @@ pub struct BlockFoldAccumulator<Digest = [u8; 32]> {
     pub last_block_index: Option<usize>,
     pub global_cycle_start: Option<usize>,
     pub global_cycle_end: Option<usize>,
+    pub initial_machine_state_digest: Option<[u8; 32]>,
+    pub initial_register_digest: Option<[u8; 32]>,
     pub latest_state_digest: Option<[u8; 32]>,
     pub latest_machine_state_digest: Option<[u8; 32]>,
     pub latest_register_digest: Option<[u8; 32]>,
@@ -747,6 +749,8 @@ impl<Digest> Default for BlockFoldAccumulator<Digest> {
             last_block_index: None,
             global_cycle_start: None,
             global_cycle_end: None,
+            initial_machine_state_digest: None,
+            initial_register_digest: None,
             latest_state_digest: None,
             latest_machine_state_digest: None,
             latest_register_digest: None,
@@ -833,6 +837,8 @@ where
             self.program_digest = Some(fold_input.program_digest.clone());
             self.first_block_index = Some(state.block_index);
             self.global_cycle_start = Some(state.global_cycle_start);
+            self.initial_machine_state_digest = Some(state.start_state_digest);
+            self.initial_register_digest = Some(state.start_register_digest);
         }
 
         self.accumulator_digest = digest_fold_accumulator_step(self.accumulator_digest, fold_input);
@@ -948,9 +954,10 @@ pub struct NovaFoldConfig {
     pub use_zero_knowledge: bool,
 }
 
-pub const NOVA_BLOCK_FOLD_RELATION_NAME: &str = "jolt-nova-block-fold-v1";
+pub const NOVA_BLOCK_FOLD_RELATION_NAME: &str = "jolt-nova-block-fold-v2";
 pub const NOVA_TRANSCRIPT_SUBCLAIM_BACKEND_NAME: &str = "transcript-subclaim-fingerprints";
 pub const NOVA_LOGUP_SUBCLAIM_BACKEND_NAME: &str = "logup-subclaim-v1";
+pub const JOLT_NOVA_STEP_RELATION_VERSION: &str = "jolt-nova-step-relation-v1";
 
 impl Default for NovaFoldConfig {
     fn default() -> Self {
@@ -973,7 +980,12 @@ impl Default for NovaFoldConfig {
     }
 }
 
-pub const NOVA_Z_ARITY: usize = 7;
+/// Public state layout for the final Jolt-Nova step relation.
+///
+/// The first seven entries retain the Stage 9 accumulators. Entries 7--10
+/// make the program and cross-block execution boundaries part of Nova's public
+/// recursive state instead of relying only on host-side metadata checks.
+pub const NOVA_Z_ARITY: usize = 11;
 pub const NOVA_SEMANTIC_ACCUMULATOR_INDEX: usize = 0;
 pub const NOVA_NEXT_BLOCK_INDEX_INDEX: usize = 1;
 pub const NOVA_TOTAL_ACTIVE_CYCLES_INDEX: usize = 2;
@@ -981,7 +993,76 @@ pub const NOVA_REGISTER_ACCUMULATOR_INDEX: usize = 3;
 pub const NOVA_RAM_ACCUMULATOR_INDEX: usize = 4;
 pub const NOVA_LOOKUP_ACCUMULATOR_INDEX: usize = 5;
 pub const NOVA_CPU_ACCUMULATOR_INDEX: usize = 6;
+pub const NOVA_PROGRAM_DIGEST_INDEX: usize = 7;
+pub const NOVA_NEXT_GLOBAL_CYCLE_INDEX: usize = 8;
+pub const NOVA_MACHINE_STATE_INDEX: usize = 9;
+pub const NOVA_REGISTER_STATE_INDEX: usize = 10;
 pub type NovaFoldZState = [[u8; 32]; NOVA_Z_ARITY];
+
+/// Named, storage-level view of Nova's public input/output state.
+///
+/// Each word is the canonical byte encoding of one Pallas scalar. Keeping this
+/// type independent of Nova internals gives callers and later relation
+/// backends a stable boundary to inspect and serialize.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct JoltNovaStepPublicState {
+    pub semantic_accumulator: [u8; 32],
+    pub next_block_index: [u8; 32],
+    pub total_active_cycles: [u8; 32],
+    pub register_claim_accumulator: [u8; 32],
+    pub ram_claim_accumulator: [u8; 32],
+    pub lookup_claim_accumulator: [u8; 32],
+    pub cpu_claim_accumulator: [u8; 32],
+    pub program_digest: [u8; 32],
+    pub next_global_cycle: [u8; 32],
+    pub machine_state_digest: [u8; 32],
+    pub register_state_digest: [u8; 32],
+}
+
+impl JoltNovaStepPublicState {
+    pub fn from_storage(state: NovaFoldZState) -> Self {
+        Self {
+            semantic_accumulator: state[NOVA_SEMANTIC_ACCUMULATOR_INDEX],
+            next_block_index: state[NOVA_NEXT_BLOCK_INDEX_INDEX],
+            total_active_cycles: state[NOVA_TOTAL_ACTIVE_CYCLES_INDEX],
+            register_claim_accumulator: state[NOVA_REGISTER_ACCUMULATOR_INDEX],
+            ram_claim_accumulator: state[NOVA_RAM_ACCUMULATOR_INDEX],
+            lookup_claim_accumulator: state[NOVA_LOOKUP_ACCUMULATOR_INDEX],
+            cpu_claim_accumulator: state[NOVA_CPU_ACCUMULATOR_INDEX],
+            program_digest: state[NOVA_PROGRAM_DIGEST_INDEX],
+            next_global_cycle: state[NOVA_NEXT_GLOBAL_CYCLE_INDEX],
+            machine_state_digest: state[NOVA_MACHINE_STATE_INDEX],
+            register_state_digest: state[NOVA_REGISTER_STATE_INDEX],
+        }
+    }
+
+    pub fn to_storage(&self) -> NovaFoldZState {
+        [
+            self.semantic_accumulator,
+            self.next_block_index,
+            self.total_active_cycles,
+            self.register_claim_accumulator,
+            self.ram_claim_accumulator,
+            self.lookup_claim_accumulator,
+            self.cpu_claim_accumulator,
+            self.program_digest,
+            self.next_global_cycle,
+            self.machine_state_digest,
+            self.register_state_digest,
+        ]
+    }
+}
+
+/// Auditable input/witness/output boundary for one Nova folding step.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct JoltNovaStepRelationBoundary {
+    pub version: &'static str,
+    pub relation_name: &'static str,
+    pub block_index: usize,
+    pub public_input: JoltNovaStepPublicState,
+    pub witness_statement_digest: [u8; 32],
+    pub public_output: JoltNovaStepPublicState,
+}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct NovaFoldAccumulator<Digest = [u8; 32]> {
@@ -1121,9 +1202,9 @@ pub const JOLT_NOVA_REPORT_CANONICAL_OUTPUT_FORMAT: JoltNovaReportOutputFormat =
     JoltNovaReportOutputFormat::Json;
 pub const JOLT_NOVA_FINAL_PROOF_SIZE_SCALING_REPORT_KIND: &str = "final-proof-size-scaling";
 
-pub const FINAL_FOLDED_INSTANCE_VERSION: &str = "jolt-nova-final-folded-instance-v1";
+pub const FINAL_FOLDED_INSTANCE_VERSION: &str = "jolt-nova-final-folded-instance-v2";
 pub const SPARTAN_FINAL_INSTANCE_ENCODING_VERSION: &str =
-    "jolt-nova-spartan-final-instance-encoding-v1";
+    "jolt-nova-spartan-final-instance-encoding-v2";
 pub const SPARTAN_PLACEHOLDER_PROOF_SYSTEM_NAME: &str = "spartan-placeholder";
 pub const SPARTAN_FINAL_PROOF_SYSTEM_NAME: &str = "spartan-final-proof";
 
@@ -1814,8 +1895,20 @@ where
 
         #[cfg(feature = "nova")]
         {
+            let relation_boundary = build_jolt_nova_step_relation_boundary(
+                &self.config,
+                accumulator.recursive_z_state.as_ref(),
+                fold_input,
+            )?;
             let mut next_metadata = accumulator.metadata.clone();
             next_metadata.absorb(fold_input)?;
+            let initial_z_state =
+                nova_initial_z_state_from_metadata(&next_metadata, fold_input.state.block_index)?;
+            let current_z_state = nova_z_state_from_storage(
+                &relation_boundary.public_input.to_storage(),
+                fold_input.state.block_index,
+            )?;
+            let expected_output = relation_boundary.public_output.to_storage();
 
             let (recursive_snark_bytes, recursive_snark_output_digest, recursive_z_state) =
                 prove_nova_recursive_snark_step(
@@ -1823,14 +1916,16 @@ where
                     next_metadata.absorbed_blocks,
                     fold_input.state.block_index,
                     &self.config,
-                    match accumulator.recursive_z_state.as_ref() {
-                        Some(stored_z_state) => {
-                            nova_z_state_from_storage(stored_z_state, fold_input.state.block_index)?
-                        }
-                        None => nova_initial_z_state(),
-                    },
+                    initial_z_state,
+                    current_z_state,
                     fold_input,
                 )?;
+            if recursive_z_state != expected_output {
+                return Err(BlockTraceError::NovaFoldingBackendError {
+                    block_index: fold_input.state.block_index,
+                    reason: "Nova step relation output mismatch",
+                });
+            }
 
             accumulator.metadata = next_metadata;
             accumulator.recursive_snark_bytes = Some(recursive_snark_bytes);
@@ -2096,7 +2191,8 @@ impl BlockFoldStatement {
     /// `BlockFoldStatement_i` derived from the verified Jolt block bundle and
     /// transforms public recursive state `z_i` into `z_{i+1}`:
     ///
-    /// `z = [semantic, next_block_index, total_cycles, register, ram, lookup, cpu]`
+    /// `z = [semantic, next_block_index, total_cycles, register, ram, lookup,
+    /// cpu, program, next_global_cycle, machine_state, register_state]`
     ///
     /// The transition enforced in-circuit is:
     ///
@@ -2132,7 +2228,7 @@ impl BlockFoldStatement {
             ),
             end_state_digest: nova_hash_bytes_to_scalar(
                 "statement-field",
-                "end_state_digest",
+                "start_state_digest",
                 &state.end_state_digest,
             ),
             start_register_digest: nova_hash_bytes_to_scalar(
@@ -2142,7 +2238,7 @@ impl BlockFoldStatement {
             ),
             end_register_digest: nova_hash_bytes_to_scalar(
                 "statement-field",
-                "end_register_digest",
+                "start_register_digest",
                 &state.end_register_digest,
             ),
             register_reads_digest: nova_hash_bytes_to_scalar(
@@ -3189,6 +3285,10 @@ impl nova_snark::traits::circuit::StepCircuit<NovaScalar> for JoltNovaStepCircui
         let ram_claim_accumulator = &z[4];
         let lookup_claim_accumulator = &z[5];
         let cpu_claim_accumulator = &z[6];
+        let program_digest_binding = &z[NOVA_PROGRAM_DIGEST_INDEX];
+        let next_global_cycle = &z[NOVA_NEXT_GLOBAL_CYCLE_INDEX];
+        let machine_state_digest = &z[NOVA_MACHINE_STATE_INDEX];
+        let register_state_digest = &z[NOVA_REGISTER_STATE_INDEX];
 
         let statement_digest =
             alloc_nova_witness(cs, "statement digest", self.witness.statement_digest)?;
@@ -3461,12 +3561,79 @@ impl nova_snark::traits::circuit::StepCircuit<NovaScalar> for JoltNovaStepCircui
                     .ok_or(nova_snark::frontend::SynthesisError::AssignmentMissing)
             },
         )?;
+        let output_program_digest = nova_snark::frontend::num::AllocatedNum::alloc(
+            cs.namespace(|| "next program digest binding"),
+            || {
+                program_digest_binding
+                    .get_value()
+                    .ok_or(nova_snark::frontend::SynthesisError::AssignmentMissing)
+            },
+        )?;
+        let output_next_global_cycle = nova_snark::frontend::num::AllocatedNum::alloc(
+            cs.namespace(|| "next global cycle"),
+            || {
+                global_cycle_end
+                    .get_value()
+                    .ok_or(nova_snark::frontend::SynthesisError::AssignmentMissing)
+            },
+        )?;
+        let output_machine_state_digest = nova_snark::frontend::num::AllocatedNum::alloc(
+            cs.namespace(|| "next machine state digest"),
+            || {
+                end_state_digest
+                    .get_value()
+                    .ok_or(nova_snark::frontend::SynthesisError::AssignmentMissing)
+            },
+        )?;
+        let output_register_state_digest = nova_snark::frontend::num::AllocatedNum::alloc(
+            cs.namespace(|| "next register state digest"),
+            || {
+                end_register_digest
+                    .get_value()
+                    .ok_or(nova_snark::frontend::SynthesisError::AssignmentMissing)
+            },
+        )?;
 
         cs.enforce(
             || "block index matches running state",
             |lc| lc + block_index.get_variable(),
             |lc| lc + CS::one(),
             |lc| lc + next_block_index.get_variable(),
+        );
+
+        cs.enforce(
+            || "program digest matches running state",
+            |lc| lc + program_digest.get_variable(),
+            |lc| lc + CS::one(),
+            |lc| lc + program_digest_binding.get_variable(),
+        );
+
+        cs.enforce(
+            || "global cycle start matches running state",
+            |lc| lc + global_cycle_start.get_variable(),
+            |lc| lc + CS::one(),
+            |lc| lc + next_global_cycle.get_variable(),
+        );
+
+        cs.enforce(
+            || "machine state start matches running state",
+            |lc| lc + start_state_digest.get_variable(),
+            |lc| lc + CS::one(),
+            |lc| lc + machine_state_digest.get_variable(),
+        );
+
+        cs.enforce(
+            || "register state start matches running state",
+            |lc| lc + start_register_digest.get_variable(),
+            |lc| lc + CS::one(),
+            |lc| lc + register_state_digest.get_variable(),
+        );
+
+        cs.enforce(
+            || "global cycle end follows active cycles",
+            |lc| lc + global_cycle_start.get_variable() + active_cycles.get_variable(),
+            |lc| lc + CS::one(),
+            |lc| lc + global_cycle_end.get_variable(),
         );
 
         cs.enforce(
@@ -3872,6 +4039,34 @@ impl nova_snark::traits::circuit::StepCircuit<NovaScalar> for JoltNovaStepCircui
             |lc| lc + total_active_cycles.get_variable() + active_cycles.get_variable(),
             |lc| lc + CS::one(),
             |lc| lc + output_total_active_cycles.get_variable(),
+        );
+
+        cs.enforce(
+            || "program digest binding is carried forward",
+            |lc| lc + program_digest_binding.get_variable(),
+            |lc| lc + CS::one(),
+            |lc| lc + output_program_digest.get_variable(),
+        );
+
+        cs.enforce(
+            || "global cycle boundary is carried forward",
+            |lc| lc + global_cycle_end.get_variable(),
+            |lc| lc + CS::one(),
+            |lc| lc + output_next_global_cycle.get_variable(),
+        );
+
+        cs.enforce(
+            || "machine state boundary is carried forward",
+            |lc| lc + end_state_digest.get_variable(),
+            |lc| lc + CS::one(),
+            |lc| lc + output_machine_state_digest.get_variable(),
+        );
+
+        cs.enforce(
+            || "register state boundary is carried forward",
+            |lc| lc + end_register_digest.get_variable(),
+            |lc| lc + CS::one(),
+            |lc| lc + output_register_state_digest.get_variable(),
         );
 
         cs.enforce(
@@ -4574,6 +4769,10 @@ impl nova_snark::traits::circuit::StepCircuit<NovaScalar> for JoltNovaStepCircui
             output_ram_claim_accumulator,
             output_lookup_claim_accumulator,
             output_cpu_claim_accumulator,
+            output_program_digest,
+            output_next_global_cycle,
+            output_machine_state_digest,
+            output_register_state_digest,
         ])
     }
 }
@@ -4674,8 +4873,89 @@ fn nova_initial_z_state() -> NovaZState {
 }
 
 #[cfg(feature = "nova")]
-fn nova_initial_input() -> NovaZState {
-    nova_initial_z_state()
+fn nova_initial_z_state_for_witness(witness: &JoltNovaStepWitness) -> NovaZState {
+    let mut state = nova_initial_z_state();
+    state[NOVA_NEXT_BLOCK_INDEX_INDEX] = witness.block_index;
+    state[NOVA_PROGRAM_DIGEST_INDEX] = witness.program_digest;
+    state[NOVA_NEXT_GLOBAL_CYCLE_INDEX] = witness.global_cycle_start;
+    state[NOVA_MACHINE_STATE_INDEX] = witness.start_state_digest;
+    state[NOVA_REGISTER_STATE_INDEX] = witness.start_register_digest;
+    state
+}
+
+#[cfg(feature = "nova")]
+fn nova_initial_z_state_for_fold_input<Digest, F>(
+    fold_input: &BlockFoldInput<Digest, F>,
+) -> NovaZState
+where
+    Digest: AsRef<[u8]>,
+    F: JoltField,
+{
+    let witness = JoltNovaStepWitness::from_fold_input(fold_input);
+    nova_initial_z_state_for_witness(&witness)
+}
+
+#[cfg(feature = "nova")]
+fn nova_initial_z_state_from_metadata<Digest>(
+    metadata: &BlockFoldAccumulator<Digest>,
+    block_index: usize,
+) -> Result<NovaZState, BlockTraceError>
+where
+    Digest: AsRef<[u8]>,
+{
+    let program_digest =
+        metadata
+            .program_digest
+            .as_ref()
+            .ok_or(BlockTraceError::NovaFoldingBackendError {
+                block_index,
+                reason: "Nova initial state is missing program digest",
+            })?;
+    let first_block_index =
+        metadata
+            .first_block_index
+            .ok_or(BlockTraceError::NovaFoldingBackendError {
+                block_index,
+                reason: "Nova initial state is missing first block index",
+            })?;
+    let global_cycle_start =
+        metadata
+            .global_cycle_start
+            .ok_or(BlockTraceError::NovaFoldingBackendError {
+                block_index,
+                reason: "Nova initial state is missing global cycle start",
+            })?;
+    let initial_machine_state_digest =
+        metadata
+            .initial_machine_state_digest
+            .ok_or(BlockTraceError::NovaFoldingBackendError {
+                block_index,
+                reason: "Nova initial state is missing machine state digest",
+            })?;
+    let initial_register_digest =
+        metadata
+            .initial_register_digest
+            .ok_or(BlockTraceError::NovaFoldingBackendError {
+                block_index,
+                reason: "Nova initial state is missing register state digest",
+            })?;
+
+    let mut state = nova_initial_z_state();
+    state[NOVA_NEXT_BLOCK_INDEX_INDEX] = NovaScalar::from(first_block_index as u64);
+    state[NOVA_PROGRAM_DIGEST_INDEX] =
+        nova_hash_bytes_to_scalar("statement-field", "program_digest", program_digest.as_ref());
+    state[NOVA_NEXT_GLOBAL_CYCLE_INDEX] = NovaScalar::from(global_cycle_start as u64);
+    state[NOVA_MACHINE_STATE_INDEX] = nova_hash_bytes_to_scalar(
+        "statement-field",
+        "start_state_digest",
+        &initial_machine_state_digest,
+    );
+    state[NOVA_REGISTER_STATE_INDEX] = nova_hash_bytes_to_scalar(
+        "statement-field",
+        "start_register_digest",
+        &initial_register_digest,
+    );
+    Ok(state)
 }
 
 #[cfg(feature = "nova")]
@@ -4714,6 +4994,10 @@ fn nova_z_state_from_storage(
         nova_scalar_from_storage(&storage[4], block_index)?,
         nova_scalar_from_storage(&storage[5], block_index)?,
         nova_scalar_from_storage(&storage[6], block_index)?,
+        nova_scalar_from_storage(&storage[7], block_index)?,
+        nova_scalar_from_storage(&storage[8], block_index)?,
+        nova_scalar_from_storage(&storage[9], block_index)?,
+        nova_scalar_from_storage(&storage[10], block_index)?,
     ])
 }
 
@@ -4760,6 +5044,10 @@ where
         current_z_state[NOVA_RAM_ACCUMULATOR_INDEX] + delta[4],
         current_z_state[NOVA_LOOKUP_ACCUMULATOR_INDEX] + delta[5],
         current_z_state[NOVA_CPU_ACCUMULATOR_INDEX] + delta[6],
+        current_z_state[NOVA_PROGRAM_DIGEST_INDEX],
+        witness.global_cycle_end,
+        witness.end_state_digest,
+        witness.end_register_digest,
     ]
 }
 
@@ -4773,6 +5061,10 @@ fn nova_step_delta_vector(witness: &JoltNovaStepWitness) -> NovaZState {
         witness.ram_delta(),
         witness.lookup_delta(),
         witness.cpu_delta(),
+        NovaScalar::zero(),
+        witness.active_cycles,
+        witness.end_state_digest - witness.start_state_digest,
+        witness.end_register_digest - witness.start_register_digest,
     ]
 }
 
@@ -4795,11 +5087,94 @@ where
     F: JoltField,
     Backend: NovaSubclaimFoldingBackend,
 {
+    let initial_z_state = fold_inputs
+        .first()
+        .map(nova_initial_z_state_for_fold_input)
+        .unwrap_or_else(nova_initial_z_state);
     fold_inputs
         .iter()
-        .fold(nova_initial_z_state(), |z_state, fold_input| {
+        .fold(initial_z_state, |z_state, fold_input| {
             nova_next_z_state_with_subclaim_backend(z_state, fold_input, subclaim_backend)
         })
+}
+
+#[cfg(feature = "nova")]
+fn validate_nova_step_relation_input(
+    public_input: &NovaZState,
+    witness: &JoltNovaStepWitness,
+    block_index: usize,
+) -> Result<(), BlockTraceError> {
+    let checks = [
+        (
+            public_input[NOVA_NEXT_BLOCK_INDEX_INDEX] == witness.block_index,
+            "Nova step block index continuity mismatch",
+        ),
+        (
+            public_input[NOVA_PROGRAM_DIGEST_INDEX] == witness.program_digest,
+            "Nova step program digest continuity mismatch",
+        ),
+        (
+            public_input[NOVA_NEXT_GLOBAL_CYCLE_INDEX] == witness.global_cycle_start,
+            "Nova step global cycle continuity mismatch",
+        ),
+        (
+            public_input[NOVA_MACHINE_STATE_INDEX] == witness.start_state_digest,
+            "Nova step machine state continuity mismatch",
+        ),
+        (
+            public_input[NOVA_REGISTER_STATE_INDEX] == witness.start_register_digest,
+            "Nova step register state continuity mismatch",
+        ),
+        (
+            witness.global_cycle_start + witness.active_cycles == witness.global_cycle_end,
+            "Nova step active-cycle range mismatch",
+        ),
+    ];
+
+    for (valid, reason) in checks {
+        if !valid {
+            return Err(BlockTraceError::NovaFoldingBackendError {
+                block_index,
+                reason,
+            });
+        }
+    }
+    Ok(())
+}
+
+#[cfg(feature = "nova")]
+pub fn build_jolt_nova_step_relation_boundary<Digest, F>(
+    config: &NovaFoldConfig,
+    previous_output: Option<&NovaFoldZState>,
+    fold_input: &BlockFoldInput<Digest, F>,
+) -> Result<JoltNovaStepRelationBoundary, BlockTraceError>
+where
+    Digest: AsRef<[u8]>,
+    F: JoltField,
+{
+    let block_index = fold_input.state.block_index;
+    ensure_supported_nova_config(config, block_index)?;
+    let subclaim_backend = nova_subclaim_backend_from_config(config, block_index)?;
+    let witness =
+        JoltNovaStepWitness::from_fold_input_with_subclaim_backend(fold_input, &subclaim_backend);
+    let public_input = match previous_output {
+        Some(previous_output) => nova_z_state_from_storage(previous_output, block_index)?,
+        None => nova_initial_z_state_for_witness(&witness),
+    };
+    validate_nova_step_relation_input(&public_input, &witness, block_index)?;
+    let public_output =
+        nova_next_z_state_with_subclaim_backend(public_input, fold_input, &subclaim_backend);
+
+    Ok(JoltNovaStepRelationBoundary {
+        version: JOLT_NOVA_STEP_RELATION_VERSION,
+        relation_name: config.relation_name,
+        block_index,
+        public_input: JoltNovaStepPublicState::from_storage(nova_z_state_to_storage(public_input)),
+        witness_statement_digest: witness.statement().digest(),
+        public_output: JoltNovaStepPublicState::from_storage(nova_z_state_to_storage(
+            public_output,
+        )),
+    })
 }
 
 #[cfg(feature = "nova")]
@@ -4903,7 +5278,7 @@ where
         }
     })?;
 
-    let z0 = nova_initial_input();
+    let z0 = nova_initial_z_state_from_metadata(&instance.metadata, block_index)?;
     let output = compressed_snark
         .verify(vk, accumulator.metadata.absorbed_blocks, &z0)
         .map_err(|_| BlockTraceError::NovaFoldingBackendError {
@@ -4964,7 +5339,7 @@ where
         })?;
 
     let (_, vk) = nova_compressed_keys(block_index)?;
-    let z0 = nova_initial_input();
+    let z0 = nova_initial_z_state_from_metadata(&proof.instance.metadata, block_index)?;
     let output = compressed_snark
         .verify(vk, proof.instance.metadata.absorbed_blocks, &z0)
         .map_err(|_| BlockTraceError::NovaFoldingBackendError {
@@ -4991,6 +5366,7 @@ fn prove_nova_recursive_snark_step<Digest, F>(
     next_num_steps: usize,
     block_index: usize,
     config: &NovaFoldConfig,
+    initial_z_state: NovaZState,
     current_z_state: NovaZState,
     fold_input: &BlockFoldInput<Digest, F>,
 ) -> Result<(Vec<u8>, [u8; 32], NovaFoldZState), BlockTraceError>
@@ -5002,7 +5378,7 @@ where
     let subclaim_backend = nova_subclaim_backend_from_config(config, block_index)?;
     let circuit =
         nova_step_circuit_for_fold_input_with_subclaim_backend(fold_input, &subclaim_backend);
-    let z0 = nova_initial_input();
+    let z0 = initial_z_state;
     let next_z_state =
         nova_next_z_state_with_subclaim_backend(current_z_state, fold_input, &subclaim_backend);
 
@@ -5077,6 +5453,16 @@ where
     }
 
     let subclaim_backend = nova_subclaim_backend_from_config(&accumulator.config, block_index)?;
+    let initial_z_state = nova_initial_z_state_from_metadata(&accumulator.metadata, block_index)?;
+    if let Some(first_fold_input) = fold_inputs.first() {
+        let expected_initial_z_state = nova_initial_z_state_for_fold_input(first_fold_input);
+        if initial_z_state != expected_initial_z_state {
+            return Err(BlockTraceError::NovaFoldingBackendError {
+                block_index,
+                reason: "Nova recursive initial state mismatch",
+            });
+        }
+    }
     let expected_z_state =
         nova_expected_z_state_with_subclaim_backend(fold_inputs, &subclaim_backend);
     let expected_z_state_storage = nova_z_state_to_storage(expected_z_state);
@@ -5101,9 +5487,8 @@ where
         })?;
 
     let pp = nova_public_params(block_index)?;
-    let z0 = nova_initial_input();
     let output = recursive_snark
-        .verify(pp, accumulator.metadata.absorbed_blocks, &z0)
+        .verify(pp, accumulator.metadata.absorbed_blocks, &initial_z_state)
         .map_err(|_| BlockTraceError::NovaFoldingBackendError {
             block_index,
             reason: "Nova recursive SNARK verification failed",
@@ -8564,7 +8949,7 @@ where
 
 fn digest_nova_z_state(state: &NovaFoldZState) -> [u8; 32] {
     let mut hasher = Sha3_256::new();
-    hasher.update(b"JOLT_NOVA_Z_STATE_V1");
+    hasher.update(b"JOLT_NOVA_Z_STATE_V2");
     update_usize(&mut hasher, NOVA_Z_ARITY);
     for (index, scalar_bytes) in state.iter().enumerate() {
         update_usize(&mut hasher, index);
@@ -9141,6 +9526,8 @@ where
     append_optional_usize(output, metadata.last_block_index);
     append_optional_usize(output, metadata.global_cycle_start);
     append_optional_usize(output, metadata.global_cycle_end);
+    append_optional_digest(output, metadata.initial_machine_state_digest);
+    append_optional_digest(output, metadata.initial_register_digest);
     append_optional_digest(output, metadata.latest_state_digest);
     append_optional_digest(output, metadata.latest_machine_state_digest);
     append_optional_digest(output, metadata.latest_register_digest);
@@ -9211,6 +9598,8 @@ fn update_block_fold_metadata<Digest>(
     update_optional_usize(hasher, metadata.last_block_index);
     update_optional_usize(hasher, metadata.global_cycle_start);
     update_optional_usize(hasher, metadata.global_cycle_end);
+    update_optional_digest(hasher, metadata.initial_machine_state_digest);
+    update_optional_digest(hasher, metadata.initial_register_digest);
     update_optional_digest(hasher, metadata.latest_state_digest);
     update_optional_digest(hasher, metadata.latest_machine_state_digest);
     update_optional_digest(hasher, metadata.latest_register_digest);
@@ -13254,8 +13643,9 @@ mod tests {
     }
 
     #[cfg(feature = "nova")]
-    fn synthesize_nova_step_circuit_for_test(
+    fn synthesize_nova_step_circuit_with_input_for_test(
         circuit: &JoltNovaStepCircuit,
+        z_values: NovaZState,
     ) -> nova_snark::frontend::test_cs::TestConstraintSystem<NovaScalar> {
         use nova_snark::frontend::{
             num::AllocatedNum, test_cs::TestConstraintSystem, ConstraintSystem,
@@ -13263,7 +13653,6 @@ mod tests {
         use nova_snark::traits::circuit::StepCircuit;
 
         let mut cs = TestConstraintSystem::<NovaScalar>::new();
-        let z_values = nova_initial_input();
         let z = z_values
             .iter()
             .enumerate()
@@ -13275,6 +13664,151 @@ mod tests {
         let output = circuit.synthesize(&mut cs, &z).unwrap();
         assert_eq!(output.len(), NOVA_Z_ARITY);
         cs
+    }
+
+    #[cfg(feature = "nova")]
+    fn synthesize_nova_step_circuit_for_test(
+        circuit: &JoltNovaStepCircuit,
+    ) -> nova_snark::frontend::test_cs::TestConstraintSystem<NovaScalar> {
+        synthesize_nova_step_circuit_with_input_for_test(
+            circuit,
+            nova_initial_z_state_for_witness(&circuit.witness),
+        )
+    }
+
+    #[cfg(feature = "nova")]
+    #[test]
+    fn nova_step_relation_boundary_exposes_named_state_and_previous_output() {
+        let bytecode = BytecodePreprocessing::default();
+        let block0 = trace_block(0, boundary(0, 0), boundary(2, 0));
+        let block1 = trace_block(1, block0.end_state.clone(), boundary(4, 0));
+        let prover = BlockProofBundleProver::<_, ark_bn254::Fr>::new([9u8; 32]);
+        let bundles = prover.prove_blocks(&bytecode, &[block0, block1]).unwrap();
+        let fold_inputs = build_block_fold_inputs(&bundles);
+        let config = NovaFoldConfig::default();
+
+        let first_boundary =
+            build_jolt_nova_step_relation_boundary(&config, None, &fold_inputs[0]).unwrap();
+        let first_witness = JoltNovaStepWitness::from_fold_input(&fold_inputs[0]);
+        let first_input_z_state = nova_initial_z_state_for_fold_input(&fold_inputs[0]);
+        let expected_first_input =
+            JoltNovaStepPublicState::from_storage(nova_z_state_to_storage(first_input_z_state));
+        let expected_first_output = JoltNovaStepPublicState::from_storage(nova_z_state_to_storage(
+            nova_next_z_state(first_input_z_state, &fold_inputs[0]),
+        ));
+
+        assert_eq!(first_boundary.version, JOLT_NOVA_STEP_RELATION_VERSION);
+        assert_eq!(first_boundary.relation_name, config.relation_name);
+        assert_eq!(first_boundary.block_index, 0);
+        assert_eq!(
+            first_boundary.witness_statement_digest,
+            first_witness.statement().digest()
+        );
+        assert_eq!(first_boundary.public_input, expected_first_input);
+        assert_eq!(first_boundary.public_output, expected_first_output);
+        assert_eq!(
+            first_boundary.public_input.program_digest,
+            nova_scalar_to_storage(first_witness.program_digest)
+        );
+        assert_eq!(
+            first_boundary.public_input.next_global_cycle,
+            nova_scalar_to_storage(first_witness.global_cycle_start)
+        );
+        assert_eq!(
+            first_boundary.public_output.next_global_cycle,
+            nova_scalar_to_storage(first_witness.global_cycle_end)
+        );
+        assert_eq!(
+            first_boundary.public_output.machine_state_digest,
+            nova_scalar_to_storage(first_witness.end_state_digest)
+        );
+        assert_eq!(
+            first_boundary.public_output.register_state_digest,
+            nova_scalar_to_storage(first_witness.end_register_digest)
+        );
+
+        let second_boundary = build_jolt_nova_step_relation_boundary(
+            &config,
+            Some(&first_boundary.public_output.to_storage()),
+            &fold_inputs[1],
+        )
+        .unwrap();
+        assert_eq!(second_boundary.public_input, first_boundary.public_output);
+
+        let mut tampered_previous_z_state =
+            nova_z_state_from_storage(&first_boundary.public_output.to_storage(), 1).unwrap();
+        tampered_previous_z_state[NOVA_MACHINE_STATE_INDEX] =
+            tampered_previous_z_state[NOVA_MACHINE_STATE_INDEX] + NovaScalar::from(1);
+        let tampered_previous_output = nova_z_state_to_storage(tampered_previous_z_state);
+
+        assert!(matches!(
+            build_jolt_nova_step_relation_boundary(
+                &config,
+                Some(&tampered_previous_output),
+                &fold_inputs[1],
+            )
+            .unwrap_err(),
+            BlockTraceError::NovaFoldingBackendError {
+                block_index: 1,
+                reason: "Nova step machine state continuity mismatch",
+            }
+        ));
+    }
+
+    #[cfg(feature = "nova")]
+    #[test]
+    fn nova_step_circuit_rejects_tampered_public_state_boundaries() {
+        let bytecode = BytecodePreprocessing::default();
+        let block = trace_block(0, boundary(0, 0), boundary(4, 0));
+        let prover = BlockProofBundleProver::<_, ark_bn254::Fr>::new([9u8; 32]);
+        let bundle = prover.prove_block(&bytecode, &block, None).unwrap();
+        let fold_input = build_block_fold_input(&bundle);
+        let circuit = nova_step_circuit_for_fold_input(&fold_input);
+        let base_z_state = nova_initial_z_state_for_witness(&circuit.witness);
+
+        let assert_tampered_public_input = |index: usize, expected_constraint: &'static str| {
+            let mut z_state = base_z_state;
+            z_state[index] = z_state[index] + NovaScalar::from(1);
+            let cs = synthesize_nova_step_circuit_with_input_for_test(&circuit, z_state);
+            assert_eq!(cs.which_is_unsatisfied(), Some(expected_constraint));
+        };
+
+        assert_tampered_public_input(
+            NOVA_PROGRAM_DIGEST_INDEX,
+            "program digest matches running state",
+        );
+        assert_tampered_public_input(
+            NOVA_NEXT_GLOBAL_CYCLE_INDEX,
+            "global cycle start matches running state",
+        );
+        assert_tampered_public_input(
+            NOVA_MACHINE_STATE_INDEX,
+            "machine state start matches running state",
+        );
+        assert_tampered_public_input(
+            NOVA_REGISTER_STATE_INDEX,
+            "register state start matches running state",
+        );
+    }
+
+    #[cfg(feature = "nova")]
+    #[test]
+    fn nova_step_circuit_rejects_inconsistent_cycle_range() {
+        let bytecode = BytecodePreprocessing::default();
+        let block = trace_block(0, boundary(0, 0), boundary(4, 0));
+        let prover = BlockProofBundleProver::<_, ark_bn254::Fr>::new([9u8; 32]);
+        let bundle = prover.prove_block(&bytecode, &block, None).unwrap();
+        let fold_input = build_block_fold_input(&bundle);
+        let mut circuit = nova_step_circuit_for_fold_input(&fold_input);
+        circuit.witness.global_cycle_end = circuit.witness.global_cycle_end + NovaScalar::from(1);
+        circuit.witness.statement_digest = circuit.witness.statement().statement_digest_scalar();
+
+        let cs = synthesize_nova_step_circuit_for_test(&circuit);
+
+        assert_eq!(
+            cs.which_is_unsatisfied(),
+            Some("global cycle end follows active cycles")
+        );
     }
 
     #[cfg(feature = "nova")]
@@ -13635,6 +14169,16 @@ mod tests {
         assert_eq!(delta[NOVA_RAM_ACCUMULATOR_INDEX], witness.ram_delta());
         assert_eq!(delta[NOVA_LOOKUP_ACCUMULATOR_INDEX], witness.lookup_delta());
         assert_eq!(delta[NOVA_CPU_ACCUMULATOR_INDEX], witness.cpu_delta());
+        assert_eq!(delta[NOVA_PROGRAM_DIGEST_INDEX], NovaScalar::zero());
+        assert_eq!(delta[NOVA_NEXT_GLOBAL_CYCLE_INDEX], witness.active_cycles);
+        assert_eq!(
+            delta[NOVA_MACHINE_STATE_INDEX],
+            witness.end_state_digest - witness.start_state_digest
+        );
+        assert_eq!(
+            delta[NOVA_REGISTER_STATE_INDEX],
+            witness.end_register_digest - witness.start_register_digest
+        );
     }
 
     #[cfg(not(feature = "nova"))]
@@ -13740,7 +14284,7 @@ mod tests {
             .verify(
                 nova_public_params(0).unwrap(),
                 accumulator.metadata.absorbed_blocks,
-                &nova_initial_input(),
+                &nova_initial_z_state_for_fold_input(&fold_inputs[0]),
             )
             .unwrap();
         assert_eq!(output.as_slice(), expected_z_state.as_slice());

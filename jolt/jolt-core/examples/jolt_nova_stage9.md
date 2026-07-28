@@ -822,3 +822,39 @@ After Stage 9.18, the main cryptographic gaps are:
   verifier gadgets;
 - wire real internal profiling spans into the Stage 9.17 relation profile
   artifact.
+
+## Stage 10.1: explicit Nova step relation boundary
+
+Stage 10 starts turning the block-to-Nova handoff from host-side bookkeeping
+into an auditable recursive relation surface. Stage 10.1 fixes the public
+input/output shape for one Nova step and binds the first set of continuity
+fields inside the Nova step circuit.
+
+The recursive `z` state now has 11 scalar words:
+
+- semantic accumulator;
+- next block index;
+- total active cycles;
+- register, RAM, lookup, and CPU claim accumulators;
+- program digest;
+- next global cycle;
+- machine-state digest;
+- register-state digest.
+
+`JoltNovaStepRelationBoundary` exposes this as named storage-level input and
+output states. The Nova backend builds this boundary before proving each step,
+validates that the previous output matches the next witness, and then proves
+the same transition in-circuit. The circuit now enforces program continuity,
+block-index continuity, global-cycle continuity, machine-state continuity,
+register-state continuity, and the relation
+`global_cycle_end = global_cycle_start + active_cycles`.
+
+The final compressed Spartan path also derives its initial Nova input from the
+fold metadata instead of using an all-zero state, so the final proof is tied to
+the same first-block program/state/cycle boundary as the recursive fold.
+
+### Security boundary
+
+Stage 10.1 still folds authenticated Jolt receipts and digest/fingerprint
+claims. It does not yet execute the full CPU, RAM, register, or lookup verifier
+equations inside Nova. Those remain the next Stage 10 milestones.
