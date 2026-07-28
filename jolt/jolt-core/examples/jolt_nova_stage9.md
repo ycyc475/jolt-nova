@@ -960,3 +960,37 @@ Stage 10.5 still does not implement SHA3, Dory, Spartan, RAM, register,
 lookup, or CPU verifier equations as native Nova gadgets. It upgrades the
 boundary from host-only metadata to an enforced, folded circuit fingerprint;
 the full cryptographic verifier gadgets remain future Stage 10 work.
+
+## Stage 10.6: recursive verifier capsule root
+
+Stage 10.6 turns the Stage 10.5 scalar boundary into the first structured
+recursive-verifier capsule inside the Nova step circuit.
+
+The step witness now carries three additional circuit-friendly roots:
+
+- `recursive_verifier_subclaim_bundle_root`, computed from the register, RAM,
+  lookup, and CPU subclaim fingerprints;
+- `recursive_verifier_backend_selector_root`, computed from the selected lookup
+  backend selector;
+- `recursive_verifier_capsule_root`, computed from the statement digest, the
+  subclaim bundle root, the backend selector root, and the Stage 10.5 recursive
+  verifier boundary fingerprint.
+
+The Nova circuit enforces all three roots. The semantic fold accumulator also
+absorbs the capsule root, but the accumulator transition expands the capsule
+formula back into the underlying statement, subclaim, and backend-selector
+variables. This keeps the accumulator from depending on an unconstrained
+witness field while still folding the same capsule object that future verifier
+gadgets will consume.
+
+This stage preserves the existing 11-word Nova `z` layout. The capsule roots
+are private step witnesses constrained inside the recursive proof, not new
+public `z` words.
+
+### Security boundary
+
+Stage 10.6 is still a circuit-friendly verifier-capsule skeleton. It binds the
+shape of the recursive verifier object more tightly and gives future verifier
+gadgets a stable replacement surface, but it still does not implement native
+SHA3, Dory, Spartan, register, RAM, lookup, or CPU verifier equations inside
+Nova.
