@@ -858,3 +858,26 @@ the same first-block program/state/cycle boundary as the recursive fold.
 Stage 10.1 still folds authenticated Jolt receipts and digest/fingerprint
 claims. It does not yet execute the full CPU, RAM, register, or lookup verifier
 equations inside Nova. Those remain the next Stage 10 milestones.
+
+## Stage 10.2: explicit CPU/R1CS relation boundary
+
+Stage 10.2 turns the CPU-side proof metadata into its own auditable recursive
+boundary. The new `JoltCpuR1csRelationBoundary` exposes a storage-level
+snapshot of the CPU/R1CS claim, including the optional lookahead-cycle digest
+that binds the proof to the exact next-cycle commitment when one is present.
+
+This stage wires the same CPU fields into three places:
+
+- the fold statement digest;
+- the CPU claim fingerprint used by Nova folding;
+- the step-circuit witness and its boolean/zero-digest consistency checks.
+
+That makes the CPU/R1CS claim an explicit recursive object instead of a host-
+only side condition.
+
+### Security boundary
+
+Stage 10.2 still relies on host-side validation for the lookahead-cycle shape
+and does not yet internalize the full CPU verifier gadget. What it does add is
+a stable, inspectable CPU/R1CS boundary that later verifier internalization
+work can reuse without changing the recursive state layout again.

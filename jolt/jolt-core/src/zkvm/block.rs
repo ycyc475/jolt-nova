@@ -958,6 +958,8 @@ pub const NOVA_BLOCK_FOLD_RELATION_NAME: &str = "jolt-nova-block-fold-v2";
 pub const NOVA_TRANSCRIPT_SUBCLAIM_BACKEND_NAME: &str = "transcript-subclaim-fingerprints";
 pub const NOVA_LOGUP_SUBCLAIM_BACKEND_NAME: &str = "logup-subclaim-v1";
 pub const JOLT_NOVA_STEP_RELATION_VERSION: &str = "jolt-nova-step-relation-v1";
+pub const NOVA_CPU_R1CS_RELATION_NAME: &str = "jolt-nova-cpu-r1cs-v1";
+pub const JOLT_NOVA_CPU_R1CS_RELATION_VERSION: &str = "jolt-nova-cpu-r1cs-relation-v1";
 
 impl Default for NovaFoldConfig {
     fn default() -> Self {
@@ -1062,6 +1064,43 @@ pub struct JoltNovaStepRelationBoundary {
     pub public_input: JoltNovaStepPublicState,
     pub witness_statement_digest: [u8; 32],
     pub public_output: JoltNovaStepPublicState,
+}
+
+/// Named storage-level view of the CPU/R1CS claim that feeds the recursive
+/// fold.
+#[cfg(feature = "nova")]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct JoltCpuR1csPublicState {
+    pub r1cs_rows_checked: [u8; 32],
+    pub r1cs_num_steps: [u8; 32],
+    pub r1cs_vk_digest: [u8; 32],
+    pub used_lookahead_cycle: [u8; 32],
+    pub lookahead_cycle_digest: [u8; 32],
+}
+
+/// Auditable CPU/R1CS boundary extracted from one fold input.
+#[cfg(feature = "nova")]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct JoltCpuR1csRelationBoundary {
+    pub version: &'static str,
+    pub relation_name: &'static str,
+    pub block_index: usize,
+    pub public_state: JoltCpuR1csPublicState,
+    pub witness_statement_digest: [u8; 32],
+    pub witness_cpu_claim_fingerprint: [u8; 32],
+}
+
+#[cfg(feature = "nova")]
+impl JoltCpuR1csPublicState {
+    fn from_statement(statement: &BlockFoldStatement) -> Self {
+        Self {
+            r1cs_rows_checked: nova_scalar_to_storage(statement.r1cs_rows_checked),
+            r1cs_num_steps: nova_scalar_to_storage(statement.r1cs_num_steps),
+            r1cs_vk_digest: nova_scalar_to_storage(statement.r1cs_vk_digest),
+            used_lookahead_cycle: nova_scalar_to_storage(statement.used_lookahead_cycle),
+            lookahead_cycle_digest: nova_scalar_to_storage(statement.lookahead_cycle_digest),
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -2081,6 +2120,7 @@ struct BlockFoldStatement {
     r1cs_rows_checked: NovaScalar,
     r1cs_num_steps: NovaScalar,
     r1cs_vk_digest: NovaScalar,
+    lookahead_cycle_digest: NovaScalar,
     used_lookahead_cycle: NovaScalar,
 }
 
@@ -2402,13 +2442,19 @@ impl BlockFoldStatement {
             r1cs_rows_checked: NovaScalar::from(state.r1cs_rows_checked as u64),
             r1cs_num_steps: NovaScalar::from(state.r1cs_num_steps as u64),
             r1cs_vk_digest: nova_jolt_field_to_scalar("r1cs_vk_digest", state.r1cs_vk_digest),
+            lookahead_cycle_digest: match state.lookahead_cycle_digest {
+                Some(digest) => {
+                    nova_hash_bytes_to_scalar("statement-field", "lookahead_cycle_digest", &digest)
+                }
+                None => NovaScalar::zero(),
+            },
             used_lookahead_cycle: NovaScalar::from(u64::from(state.used_lookahead_cycle)),
         }
     }
 
     fn digest(&self) -> [u8; 32] {
         let mut hasher = Sha3_256::new();
-        hasher.update(b"JOLT_NOVA_BLOCK_FOLD_STATEMENT_V4");
+        hasher.update(b"JOLT_NOVA_BLOCK_FOLD_STATEMENT_V5");
         for value in [
             self.program_digest,
             self.block_index,
@@ -2456,6 +2502,7 @@ impl BlockFoldStatement {
             self.r1cs_rows_checked,
             self.r1cs_num_steps,
             self.r1cs_vk_digest,
+            self.lookahead_cycle_digest,
             self.used_lookahead_cycle,
         ] {
             update_nova_scalar(&mut hasher, value);
@@ -2576,6 +2623,7 @@ impl BlockFoldStatement {
                 ("r1cs_rows_checked", self.r1cs_rows_checked),
                 ("r1cs_num_steps", self.r1cs_num_steps),
                 ("r1cs_vk_digest", self.r1cs_vk_digest),
+                ("lookahead_cycle_digest", self.lookahead_cycle_digest),
                 ("used_lookahead_cycle", self.used_lookahead_cycle),
             ],
         )
@@ -2860,6 +2908,7 @@ impl BlockFoldStatement {
                 ("r1cs_rows_checked", self.r1cs_rows_checked),
                 ("r1cs_num_steps", self.r1cs_num_steps),
                 ("r1cs_vk_digest", self.r1cs_vk_digest),
+                ("lookahead_cycle_digest", self.lookahead_cycle_digest),
                 ("used_lookahead_cycle", self.used_lookahead_cycle),
                 (
                     "verified_jolt_lookup_opening_present",
@@ -3010,6 +3059,7 @@ struct JoltNovaStepWitness {
     r1cs_rows_checked: NovaScalar,
     r1cs_num_steps: NovaScalar,
     r1cs_vk_digest: NovaScalar,
+    lookahead_cycle_digest: NovaScalar,
     used_lookahead_cycle: NovaScalar,
     cpu_claim_fingerprint: NovaScalar,
 }
@@ -3107,6 +3157,7 @@ impl JoltNovaStepWitness {
             r1cs_rows_checked: statement.r1cs_rows_checked,
             r1cs_num_steps: statement.r1cs_num_steps,
             r1cs_vk_digest: statement.r1cs_vk_digest,
+            lookahead_cycle_digest: statement.lookahead_cycle_digest,
             used_lookahead_cycle: statement.used_lookahead_cycle,
             cpu_claim_fingerprint: subclaims.cpu,
         }
@@ -3168,6 +3219,7 @@ impl JoltNovaStepWitness {
             r1cs_rows_checked: self.r1cs_rows_checked,
             r1cs_num_steps: self.r1cs_num_steps,
             r1cs_vk_digest: self.r1cs_vk_digest,
+            lookahead_cycle_digest: self.lookahead_cycle_digest,
             used_lookahead_cycle: self.used_lookahead_cycle,
         }
     }
@@ -3487,6 +3539,11 @@ impl nova_snark::traits::circuit::StepCircuit<NovaScalar> for JoltNovaStepCircui
             alloc_nova_witness(cs, "r1cs rows checked", self.witness.r1cs_rows_checked)?;
         let r1cs_num_steps = alloc_nova_witness(cs, "r1cs num steps", self.witness.r1cs_num_steps)?;
         let r1cs_vk_digest = alloc_nova_witness(cs, "r1cs vk digest", self.witness.r1cs_vk_digest)?;
+        let lookahead_cycle_digest = alloc_nova_witness(
+            cs,
+            "lookahead cycle digest",
+            self.witness.lookahead_cycle_digest,
+        )?;
         let used_lookahead_cycle = alloc_nova_witness(
             cs,
             "used lookahead cycle",
@@ -3918,6 +3975,12 @@ impl nova_snark::traits::circuit::StepCircuit<NovaScalar> for JoltNovaStepCircui
                 ) + (
                     nova_transcript_challenge_scalar(
                         NOVA_TRANSCRIPT_DOMAIN_STATEMENT,
+                        "lookahead_cycle_digest",
+                    ),
+                    lookahead_cycle_digest.get_variable(),
+                ) + (
+                    nova_transcript_challenge_scalar(
+                        NOVA_TRANSCRIPT_DOMAIN_STATEMENT,
                         "used_lookahead_cycle",
                     ),
                     used_lookahead_cycle.get_variable(),
@@ -4216,6 +4279,20 @@ impl nova_snark::traits::circuit::StepCircuit<NovaScalar> for JoltNovaStepCircui
             || "lookup backend selector is boolean",
             |lc| lc + lookup_backend_selector.get_variable(),
             |lc| lc + lookup_backend_selector.get_variable() - (NovaScalar::from(1), CS::one()),
+            |lc| lc,
+        );
+
+        cs.enforce(
+            || "used lookahead cycle is boolean",
+            |lc| lc + used_lookahead_cycle.get_variable(),
+            |lc| lc + used_lookahead_cycle.get_variable() - (NovaScalar::from(1), CS::one()),
+            |lc| lc,
+        );
+
+        cs.enforce(
+            || "unused lookahead cycle has zero digest",
+            |lc| lc + CS::one() - used_lookahead_cycle.get_variable(),
+            |lc| lc + lookahead_cycle_digest.get_variable(),
             |lc| lc,
         );
 
@@ -4721,6 +4798,12 @@ impl nova_snark::traits::circuit::StepCircuit<NovaScalar> for JoltNovaStepCircui
                 ) + (
                     nova_transcript_challenge_scalar(
                         NOVA_TRANSCRIPT_DOMAIN_CPU,
+                        "lookahead_cycle_digest",
+                    ),
+                    lookahead_cycle_digest.get_variable(),
+                ) + (
+                    nova_transcript_challenge_scalar(
+                        NOVA_TRANSCRIPT_DOMAIN_CPU,
                         "used_lookahead_cycle",
                     ),
                     used_lookahead_cycle.get_variable(),
@@ -5174,6 +5257,47 @@ where
         public_output: JoltNovaStepPublicState::from_storage(nova_z_state_to_storage(
             public_output,
         )),
+    })
+}
+
+#[cfg(feature = "nova")]
+fn validate_cpu_r1cs_relation_input<Digest, F>(
+    fold_input: &BlockFoldInput<Digest, F>,
+) -> Result<(), BlockTraceError>
+where
+    Digest: AsRef<[u8]>,
+    F: JoltField,
+{
+    let state = &fold_input.state;
+    if state.used_lookahead_cycle != state.lookahead_cycle_digest.is_some() {
+        return Err(BlockTraceError::CpuLookaheadMismatch {
+            block_index: state.block_index,
+            proof_used_lookahead: state.used_lookahead_cycle,
+            actual_used_lookahead: state.lookahead_cycle_digest.is_some(),
+        });
+    }
+
+    Ok(())
+}
+
+#[cfg(feature = "nova")]
+pub fn build_jolt_cpu_r1cs_relation_boundary<Digest, F>(
+    fold_input: &BlockFoldInput<Digest, F>,
+) -> Result<JoltCpuR1csRelationBoundary, BlockTraceError>
+where
+    Digest: AsRef<[u8]>,
+    F: JoltField,
+{
+    validate_cpu_r1cs_relation_input(fold_input)?;
+    let statement = BlockFoldStatement::from_fold_input(fold_input);
+
+    Ok(JoltCpuR1csRelationBoundary {
+        version: JOLT_NOVA_CPU_R1CS_RELATION_VERSION,
+        relation_name: NOVA_CPU_R1CS_RELATION_NAME,
+        block_index: fold_input.state.block_index,
+        public_state: JoltCpuR1csPublicState::from_statement(&statement),
+        witness_statement_digest: statement.digest(),
+        witness_cpu_claim_fingerprint: nova_scalar_to_storage(statement.cpu_fingerprint()),
     })
 }
 
@@ -12762,6 +12886,88 @@ mod tests {
 
         assert_ne!(cpu_fingerprint, tampered_statement.cpu_fingerprint());
         assert_ne!(statement.cpu_delta(), tampered_statement.cpu_delta());
+    }
+
+    #[cfg(feature = "nova")]
+    #[test]
+    fn nova_cpu_r1cs_relation_boundary_exposes_lookahead_digest_and_fingerprint() {
+        let bytecode = BytecodePreprocessing::default();
+        let block0 = trace_block(0, boundary(0, 0), boundary(2, 0));
+        let block1 = trace_block(1, block0.end_state.clone(), boundary(4, 0));
+        let prover = BlockProofBundleProver::<_, ark_bn254::Fr>::new([9u8; 32]);
+        let lookahead = block1.cycles.first().unwrap();
+        let bundle = prover
+            .prove_block(&bytecode, &block0, Some(lookahead))
+            .unwrap();
+        let fold_input = build_block_fold_input(&bundle);
+        let statement = BlockFoldStatement::from_fold_input(&fold_input);
+        let boundary = build_jolt_cpu_r1cs_relation_boundary(&fold_input).unwrap();
+
+        assert_eq!(boundary.version, JOLT_NOVA_CPU_R1CS_RELATION_VERSION);
+        assert_eq!(boundary.relation_name, NOVA_CPU_R1CS_RELATION_NAME);
+        assert_eq!(boundary.block_index, 0);
+        assert_eq!(
+            boundary.public_state.r1cs_rows_checked,
+            nova_scalar_to_storage(statement.r1cs_rows_checked)
+        );
+        assert_eq!(
+            boundary.public_state.r1cs_num_steps,
+            nova_scalar_to_storage(statement.r1cs_num_steps)
+        );
+        assert_eq!(
+            boundary.public_state.r1cs_vk_digest,
+            nova_scalar_to_storage(statement.r1cs_vk_digest)
+        );
+        assert_eq!(
+            boundary.public_state.used_lookahead_cycle,
+            nova_scalar_to_storage(statement.used_lookahead_cycle)
+        );
+        assert_eq!(
+            boundary.public_state.lookahead_cycle_digest,
+            nova_scalar_to_storage(statement.lookahead_cycle_digest)
+        );
+        assert_eq!(boundary.witness_statement_digest, statement.digest());
+        assert_eq!(
+            boundary.witness_cpu_claim_fingerprint,
+            nova_scalar_to_storage(statement.cpu_fingerprint())
+        );
+
+        let mut tampered_fold_input = fold_input.clone();
+        tampered_fold_input.state.lookahead_cycle_digest = None;
+        assert!(matches!(
+            build_jolt_cpu_r1cs_relation_boundary(&tampered_fold_input).unwrap_err(),
+            BlockTraceError::CpuLookaheadMismatch {
+                block_index: 0,
+                proof_used_lookahead: true,
+                actual_used_lookahead: false,
+            }
+        ));
+    }
+
+    #[cfg(feature = "nova")]
+    #[test]
+    fn nova_step_circuit_rejects_unused_lookahead_with_digest() {
+        let bytecode = BytecodePreprocessing::default();
+        let block0 = trace_block(0, boundary(0, 0), boundary(2, 0));
+        let block1 = trace_block(1, block0.end_state.clone(), boundary(4, 0));
+        let prover = BlockProofBundleProver::<_, ark_bn254::Fr>::new([9u8; 32]);
+        let lookahead = block1.cycles.first().unwrap();
+        let bundle = prover
+            .prove_block(&bytecode, &block0, Some(lookahead))
+            .unwrap();
+        let fold_input = build_block_fold_input(&bundle);
+        let mut circuit = nova_step_circuit_for_fold_input(&fold_input);
+        circuit.witness.used_lookahead_cycle = NovaScalar::zero();
+        circuit.witness.lookahead_cycle_digest =
+            circuit.witness.lookahead_cycle_digest + NovaScalar::from(1);
+        circuit.witness.statement_digest = circuit.witness.statement().statement_digest_scalar();
+
+        let cs = synthesize_nova_step_circuit_for_test(&circuit);
+
+        assert_eq!(
+            cs.which_is_unsatisfied(),
+            Some("unused lookahead cycle has zero digest")
+        );
     }
 
     #[cfg(feature = "nova")]
