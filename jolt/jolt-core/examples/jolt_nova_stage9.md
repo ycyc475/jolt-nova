@@ -994,3 +994,64 @@ shape of the recursive verifier object more tightly and gives future verifier
 gadgets a stable replacement surface, but it still does not implement native
 SHA3, Dory, Spartan, register, RAM, lookup, or CPU verifier equations inside
 Nova.
+
+## Stage 10.7: lookup/LogUp verifier gadget root
+
+Stage 10.7 adds the first concrete recursive-verifier gadget root prototype to
+the Nova step circuit. The new `recursive_verifier_lookup_gadget_root` is a
+domain-separated transcript root over the lookup verifier inputs that are
+already present in the block statement:
+
+- the selected lookup backend selector;
+- the folded lookup claim fingerprint;
+- the LogUp proof digest;
+- the LogUp tuple and denominator challenges;
+- the denominator retry count;
+- the LogUp query/table fractional sums and their balance delta.
+
+The circuit now enforces this root directly. For the LogUp backend, it also
+keeps the existing balance relation `query_sum == table_sum`, so a prover
+cannot independently change the lookup verifier root or the LogUp fractional
+sum witness without violating the Nova step constraints.
+
+The semantic fold accumulator absorbs the lookup gadget through the expanded
+underlying fields rather than trusting an unconstrained root witness. This
+keeps the folded state bound to the same lookup-verifier surface that future
+native LogUp verifier gadgets will replace.
+
+### Security boundary
+
+Stage 10.7 is a verifier-gadget root binding, not a complete in-circuit LogUp
+verifier. It binds the currently extracted LogUp verifier inputs and enforces
+the internal sum-balance relation, but it still does not verify a native table
+commitment opening, Dory proof, or full Fiat-Shamir transcript inside Nova.
+
+## Stage 10.8: recursive verifier capsule object
+
+Stage 10.8 turns the recursive verifier capsule into an explicit object shared
+by the circuit and the public recursive-verifier boundary. The capsule now has
+the following component layout:
+
+- `statement_digest`;
+- `subclaim_bundle_root`;
+- `backend_selector_root`;
+- `lookup_verifier_gadget_root`;
+- `boundary_fingerprint`;
+- `capsule_root`.
+
+The Nova circuit enforces `capsule_root` from these component roots, and the
+unified `JoltRecursiveVerifierRelationBoundary` stores the same component
+object. The boundary digest now commits to this verifier capsule in addition to
+the step boundary, CPU/R1CS boundary, and execution-subclaim boundary.
+
+This gives the next recursive-verifier-internalization work a stable object to
+consume: later stages can replace individual component roots with real verifier
+gadgets without reshaping the public boundary again.
+
+### Security boundary
+
+Stage 10.8 still preserves the existing 11-word Nova `z` layout and does not
+make the capsule components public Nova state. The capsule is bound inside the
+step circuit and recorded in the external recursive-verifier boundary digest,
+but native SHA3, Dory, Spartan, register, RAM, lookup, and CPU verifier gadgets
+remain future work.
