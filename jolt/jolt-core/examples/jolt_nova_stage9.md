@@ -1087,3 +1087,39 @@ Stage 10.9 is still structural verifier internalization. It creates and
 constrains a recursively consumable lookup verifier transcript object, but it
 does not yet implement native Fiat-Shamir hashing, Dory commitment opening
 verification, or the full LogUp verifier equations inside Nova.
+
+## Stage 10.10: LogUp sum-balance verifier subrelation
+
+Stage 10.10 turns the `sum_balance_root` from Stage 10.9 into an explicit
+lookup verifier subrelation object. The public lookup transcript capsule now
+stores a nested `JoltLookupSumBalanceRelation` containing:
+
+- `lookup_backend_selector`;
+- `lookup_logup_query_sum`;
+- `lookup_logup_table_sum`;
+- `lookup_logup_balance_delta`;
+- `lookup_logup_selector_balance_product`;
+- `relation_root`.
+
+The Nova step circuit now enforces the selector-gated LogUp balance through two
+constraints:
+
+1. `selector_balance_product = lookup_backend_selector * (query_sum - table_sum)`;
+2. `selector_balance_product == 0`.
+
+The relation root binds the selector, both sums, the derived delta, and the
+selector-balance product. The recursive verifier boundary digest also commits
+to the nested relation, so tampering with either the old `sum_balance_root` or
+the explicit product field changes the boundary digest.
+
+This is a small but important move toward real recursive lookup verification:
+the LogUp balance check is no longer only an implied host-side condition or a
+flat root field. It is now a named, recursively consumable subrelation that a
+future native LogUp verifier gadget can replace in place.
+
+### Security boundary
+
+Stage 10.10 internalizes only the selector-gated sum-balance equation. It still
+does not verify the complete LogUp protocol, native Fiat-Shamir hashing,
+polynomial commitment openings, Dory proofs, or table-membership equations
+inside Nova.
