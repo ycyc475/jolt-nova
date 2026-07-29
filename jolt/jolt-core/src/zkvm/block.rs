@@ -6486,6 +6486,16 @@ impl nova_snark::traits::circuit::StepCircuit<NovaScalar> for JoltNovaStepCircui
             |lc| lc + verified_jolt_lasso_lookup_claim_present.get_variable(),
         );
 
+        cs.enforce(
+            || "verified Jolt Lasso tuple claim count is three when present",
+            |lc| lc + verified_jolt_lasso_lookup_claim_present.get_variable(),
+            |lc| {
+                lc + verified_jolt_lasso_tuple_claim_count.get_variable()
+                    - (NovaScalar::from(3), CS::one())
+            },
+            |lc| lc,
+        );
+
         for (label, value) in [
             (
                 "absent verified Jolt Lasso claim has zero presence",
@@ -16569,6 +16579,71 @@ mod tests {
         assert!(
             !cs.is_satisfied(),
             "tampered verified Jolt Lasso claim digest unexpectedly satisfied"
+        );
+    }
+
+    #[cfg(all(feature = "nova", not(feature = "zk")))]
+    #[test]
+    fn nova_step_circuit_rejects_tampered_jolt_lasso_opening_capsule_root_witness() {
+        let block0 = trace_block(0, boundary(0, 0), boundary(2, 0));
+        let block1 = trace_block(1, block0.end_state.clone(), boundary(4, 0));
+        let blocks = [block0, block1];
+        let bytecode = bytecode_for_blocks(&blocks);
+        let opening_receipt =
+            test_lookup_opening_receipt(&bytecode, &blocks, 8, false, false, false, false, false);
+        let receipt =
+            verify_jolt_lookup_block_openings(&bytecode, &blocks, &opening_receipt).unwrap();
+        let pipeline =
+            BlockProofPipeline::<_, ark_bn254::Fr, MockFoldingBackend>::
+                with_backend_and_verified_jolt_lookup_block_opening_receipt(
+                    [9u8; 32],
+                    MockFoldingBackend,
+                    receipt,
+                );
+        let output = pipeline.prove_blocks(&bytecode, &blocks).unwrap();
+        let mut circuit = nova_step_circuit_for_fold_input(&output.fold_inputs[0]);
+        circuit.witness.jolt_lasso_opening_capsule_root += NovaScalar::from(1);
+
+        let cs = synthesize_nova_step_circuit_for_test(&circuit);
+
+        assert!(
+            !cs.is_satisfied(),
+            "tampered Jolt Lasso opening capsule root unexpectedly satisfied"
+        );
+    }
+
+    #[cfg(all(feature = "nova", not(feature = "zk")))]
+    #[test]
+    fn nova_step_circuit_rejects_non_three_jolt_lasso_tuple_claim_count_witness() {
+        let block0 = trace_block(0, boundary(0, 0), boundary(2, 0));
+        let block1 = trace_block(1, block0.end_state.clone(), boundary(4, 0));
+        let blocks = [block0, block1];
+        let bytecode = bytecode_for_blocks(&blocks);
+        let opening_receipt =
+            test_lookup_opening_receipt(&bytecode, &blocks, 8, false, false, false, false, false);
+        let receipt =
+            verify_jolt_lookup_block_openings(&bytecode, &blocks, &opening_receipt).unwrap();
+        let pipeline =
+            BlockProofPipeline::<_, ark_bn254::Fr, MockFoldingBackend>::
+                with_backend_and_verified_jolt_lookup_block_opening_receipt(
+                    [9u8; 32],
+                    MockFoldingBackend,
+                    receipt,
+                );
+        let output = pipeline.prove_blocks(&bytecode, &blocks).unwrap();
+        let mut statement = BlockFoldStatement::from_fold_input(&output.fold_inputs[0]);
+        statement.verified_jolt_lasso_tuple_claim_count = NovaScalar::from(4);
+        let witness = JoltNovaStepWitness::from_statement_with_subclaim_backend(
+            statement,
+            &JoltLassoSubclaimFoldingBackend,
+        );
+        let circuit = JoltNovaStepCircuit { witness };
+
+        let cs = synthesize_nova_step_circuit_for_test(&circuit);
+
+        assert_eq!(
+            cs.which_is_unsatisfied(),
+            Some("verified Jolt Lasso tuple claim count is three when present")
         );
     }
 
