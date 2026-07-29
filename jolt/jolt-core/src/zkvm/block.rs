@@ -543,6 +543,9 @@ struct VerifiedJoltLookupBlockOpening {
     global_cycle_end: usize,
     lookup_claims_digest: [u8; 32],
     contribution_digest: [u8; 32],
+    lasso_instruction_contribution_digest: [u8; 32],
+    lasso_tuple_contribution_digest: [u8; 32],
+    lasso_claim_digest: [u8; 32],
     binding_digest: [u8; 32],
 }
 
@@ -572,7 +575,7 @@ pub struct VerifiedJoltLookupBlockOpeningReceipt {
 
 #[cfg(not(feature = "zk"))]
 impl VerifiedJoltLookupBlockOpeningReceipt {
-    pub const VERSION: u16 = 5;
+    pub const VERSION: u16 = 6;
 
     pub fn lookup_receipt(&self) -> &VerifiedJoltLookupProofReceipt {
         &self.lookup_receipt
@@ -667,6 +670,12 @@ pub struct FoldableBlockState<F = ark_bn254::Fr> {
     pub verified_jolt_lookup_opening_receipt_digest: [u8; 32],
     pub verified_jolt_lookup_opening_count: usize,
     pub verified_jolt_lookup_opening_block_digest: [u8; 32],
+    pub verified_jolt_lasso_lookup_claim_present: bool,
+    pub verified_jolt_lasso_lookup_instruction_contribution_digest: [u8; 32],
+    pub verified_jolt_lasso_lookup_tuple_contribution_digest: [u8; 32],
+    pub verified_jolt_lasso_lookup_claim_digest: [u8; 32],
+    pub verified_jolt_lasso_instruction_opening_count: usize,
+    pub verified_jolt_lasso_tuple_claim_count: usize,
     pub r1cs_rows_checked: usize,
     pub r1cs_num_steps: usize,
     pub r1cs_vk_digest: F,
@@ -1136,6 +1145,12 @@ pub struct JoltExecutionSubclaimPublicState {
     pub verified_jolt_lookup_opening_receipt_digest: [u8; 32],
     pub verified_jolt_lookup_opening_count: [u8; 32],
     pub verified_jolt_lookup_opening_block_digest: [u8; 32],
+    pub verified_jolt_lasso_lookup_claim_present: [u8; 32],
+    pub verified_jolt_lasso_lookup_instruction_contribution_digest: [u8; 32],
+    pub verified_jolt_lasso_lookup_tuple_contribution_digest: [u8; 32],
+    pub verified_jolt_lasso_lookup_claim_digest: [u8; 32],
+    pub verified_jolt_lasso_instruction_opening_count: [u8; 32],
+    pub verified_jolt_lasso_tuple_claim_count: [u8; 32],
     pub lookup_backend_selector: [u8; 32],
 }
 
@@ -1176,6 +1191,12 @@ pub struct JoltLassoReceiptCapsule {
     pub verified_jolt_recursive_transcript_root: [u8; 32],
     pub verified_jolt_recursive_transcript_stage_count: [u8; 32],
     pub verified_jolt_lookup_block_binding_digest: [u8; 32],
+    pub verified_jolt_lasso_lookup_claim_present: [u8; 32],
+    pub verified_jolt_lasso_lookup_instruction_contribution_digest: [u8; 32],
+    pub verified_jolt_lasso_lookup_tuple_contribution_digest: [u8; 32],
+    pub verified_jolt_lasso_lookup_claim_digest: [u8; 32],
+    pub verified_jolt_lasso_instruction_opening_count: [u8; 32],
+    pub verified_jolt_lasso_tuple_claim_count: [u8; 32],
     pub capsule_root: [u8; 32],
 }
 
@@ -1373,11 +1394,29 @@ impl JoltExecutionSubclaimPublicState {
             verified_jolt_lookup_opening_block_digest: nova_scalar_to_storage(
                 statement.verified_jolt_lookup_opening_block_digest,
             ),
+            verified_jolt_lasso_lookup_claim_present: nova_scalar_to_storage(
+                statement.verified_jolt_lasso_lookup_claim_present,
+            ),
+            verified_jolt_lasso_lookup_instruction_contribution_digest: nova_scalar_to_storage(
+                statement.verified_jolt_lasso_lookup_instruction_contribution_digest,
+            ),
+            verified_jolt_lasso_lookup_tuple_contribution_digest: nova_scalar_to_storage(
+                statement.verified_jolt_lasso_lookup_tuple_contribution_digest,
+            ),
+            verified_jolt_lasso_lookup_claim_digest: nova_scalar_to_storage(
+                statement.verified_jolt_lasso_lookup_claim_digest,
+            ),
+            verified_jolt_lasso_instruction_opening_count: nova_scalar_to_storage(
+                statement.verified_jolt_lasso_instruction_opening_count,
+            ),
+            verified_jolt_lasso_tuple_claim_count: nova_scalar_to_storage(
+                statement.verified_jolt_lasso_tuple_claim_count,
+            ),
             lookup_backend_selector: nova_scalar_to_storage(lookup_backend_selector),
         }
     }
 
-    fn storage_words(&self) -> [[u8; 32]; 36] {
+    fn storage_words(&self) -> [[u8; 32]; 42] {
         [
             self.start_register_digest,
             self.end_register_digest,
@@ -1414,6 +1453,12 @@ impl JoltExecutionSubclaimPublicState {
             self.verified_jolt_lookup_opening_receipt_digest,
             self.verified_jolt_lookup_opening_count,
             self.verified_jolt_lookup_opening_block_digest,
+            self.verified_jolt_lasso_lookup_claim_present,
+            self.verified_jolt_lasso_lookup_instruction_contribution_digest,
+            self.verified_jolt_lasso_lookup_tuple_contribution_digest,
+            self.verified_jolt_lasso_lookup_claim_digest,
+            self.verified_jolt_lasso_instruction_opening_count,
+            self.verified_jolt_lasso_tuple_claim_count,
             self.lookup_backend_selector,
         ]
     }
@@ -1552,11 +1597,29 @@ impl JoltLassoReceiptCapsule {
             verified_jolt_lookup_block_binding_digest: nova_scalar_to_storage(
                 capsule.verified_jolt_lookup_block_binding_digest,
             ),
+            verified_jolt_lasso_lookup_claim_present: nova_scalar_to_storage(
+                capsule.verified_jolt_lasso_lookup_claim_present,
+            ),
+            verified_jolt_lasso_lookup_instruction_contribution_digest: nova_scalar_to_storage(
+                capsule.verified_jolt_lasso_lookup_instruction_contribution_digest,
+            ),
+            verified_jolt_lasso_lookup_tuple_contribution_digest: nova_scalar_to_storage(
+                capsule.verified_jolt_lasso_lookup_tuple_contribution_digest,
+            ),
+            verified_jolt_lasso_lookup_claim_digest: nova_scalar_to_storage(
+                capsule.verified_jolt_lasso_lookup_claim_digest,
+            ),
+            verified_jolt_lasso_instruction_opening_count: nova_scalar_to_storage(
+                capsule.verified_jolt_lasso_instruction_opening_count,
+            ),
+            verified_jolt_lasso_tuple_claim_count: nova_scalar_to_storage(
+                capsule.verified_jolt_lasso_tuple_claim_count,
+            ),
             capsule_root: nova_scalar_to_storage(capsule.root()),
         }
     }
 
-    fn storage_words(&self) -> [[u8; 32]; 12] {
+    fn storage_words(&self) -> [[u8; 32]; 18] {
         [
             self.verified_jolt_lookup_receipt_present,
             self.verified_jolt_lookup_receipt_digest,
@@ -1569,6 +1632,12 @@ impl JoltLassoReceiptCapsule {
             self.verified_jolt_recursive_transcript_root,
             self.verified_jolt_recursive_transcript_stage_count,
             self.verified_jolt_lookup_block_binding_digest,
+            self.verified_jolt_lasso_lookup_claim_present,
+            self.verified_jolt_lasso_lookup_instruction_contribution_digest,
+            self.verified_jolt_lasso_lookup_tuple_contribution_digest,
+            self.verified_jolt_lasso_lookup_claim_digest,
+            self.verified_jolt_lasso_instruction_opening_count,
+            self.verified_jolt_lasso_tuple_claim_count,
             self.capsule_root,
         ]
     }
@@ -2763,6 +2832,12 @@ struct BlockFoldStatement {
     verified_jolt_lookup_opening_receipt_digest: NovaScalar,
     verified_jolt_lookup_opening_count: NovaScalar,
     verified_jolt_lookup_opening_block_digest: NovaScalar,
+    verified_jolt_lasso_lookup_claim_present: NovaScalar,
+    verified_jolt_lasso_lookup_instruction_contribution_digest: NovaScalar,
+    verified_jolt_lasso_lookup_tuple_contribution_digest: NovaScalar,
+    verified_jolt_lasso_lookup_claim_digest: NovaScalar,
+    verified_jolt_lasso_instruction_opening_count: NovaScalar,
+    verified_jolt_lasso_tuple_claim_count: NovaScalar,
     r1cs_rows_checked: NovaScalar,
     r1cs_num_steps: NovaScalar,
     r1cs_vk_digest: NovaScalar,
@@ -2899,6 +2974,12 @@ struct RecursiveJoltLassoReceiptCapsuleScalars {
     verified_jolt_recursive_transcript_root: NovaScalar,
     verified_jolt_recursive_transcript_stage_count: NovaScalar,
     verified_jolt_lookup_block_binding_digest: NovaScalar,
+    verified_jolt_lasso_lookup_claim_present: NovaScalar,
+    verified_jolt_lasso_lookup_instruction_contribution_digest: NovaScalar,
+    verified_jolt_lasso_lookup_tuple_contribution_digest: NovaScalar,
+    verified_jolt_lasso_lookup_claim_digest: NovaScalar,
+    verified_jolt_lasso_instruction_opening_count: NovaScalar,
+    verified_jolt_lasso_tuple_claim_count: NovaScalar,
 }
 
 #[cfg(feature = "nova")]
@@ -2950,6 +3031,30 @@ impl RecursiveJoltLassoReceiptCapsuleScalars {
                 (
                     "verified_jolt_lookup_block_binding_digest",
                     self.verified_jolt_lookup_block_binding_digest,
+                ),
+                (
+                    "verified_jolt_lasso_lookup_claim_present",
+                    self.verified_jolt_lasso_lookup_claim_present,
+                ),
+                (
+                    "verified_jolt_lasso_lookup_instruction_contribution_digest",
+                    self.verified_jolt_lasso_lookup_instruction_contribution_digest,
+                ),
+                (
+                    "verified_jolt_lasso_lookup_tuple_contribution_digest",
+                    self.verified_jolt_lasso_lookup_tuple_contribution_digest,
+                ),
+                (
+                    "verified_jolt_lasso_lookup_claim_digest",
+                    self.verified_jolt_lasso_lookup_claim_digest,
+                ),
+                (
+                    "verified_jolt_lasso_instruction_opening_count",
+                    self.verified_jolt_lasso_instruction_opening_count,
+                ),
+                (
+                    "verified_jolt_lasso_tuple_claim_count",
+                    self.verified_jolt_lasso_tuple_claim_count,
                 ),
             ],
         )
@@ -3423,6 +3528,48 @@ impl BlockFoldStatement {
             } else {
                 NovaScalar::zero()
             },
+            verified_jolt_lasso_lookup_claim_present: NovaScalar::from(u64::from(
+                state.verified_jolt_lasso_lookup_claim_present,
+            )),
+            verified_jolt_lasso_lookup_instruction_contribution_digest: if state
+                .verified_jolt_lasso_lookup_claim_present
+            {
+                nova_hash_bytes_to_scalar(
+                    "statement-field",
+                    "verified_jolt_lasso_lookup_instruction_contribution_digest",
+                    &state.verified_jolt_lasso_lookup_instruction_contribution_digest,
+                )
+            } else {
+                NovaScalar::zero()
+            },
+            verified_jolt_lasso_lookup_tuple_contribution_digest: if state
+                .verified_jolt_lasso_lookup_claim_present
+            {
+                nova_hash_bytes_to_scalar(
+                    "statement-field",
+                    "verified_jolt_lasso_lookup_tuple_contribution_digest",
+                    &state.verified_jolt_lasso_lookup_tuple_contribution_digest,
+                )
+            } else {
+                NovaScalar::zero()
+            },
+            verified_jolt_lasso_lookup_claim_digest: if state
+                .verified_jolt_lasso_lookup_claim_present
+            {
+                nova_hash_bytes_to_scalar(
+                    "statement-field",
+                    "verified_jolt_lasso_lookup_claim_digest",
+                    &state.verified_jolt_lasso_lookup_claim_digest,
+                )
+            } else {
+                NovaScalar::zero()
+            },
+            verified_jolt_lasso_instruction_opening_count: NovaScalar::from(
+                state.verified_jolt_lasso_instruction_opening_count as u64,
+            ),
+            verified_jolt_lasso_tuple_claim_count: NovaScalar::from(
+                state.verified_jolt_lasso_tuple_claim_count as u64,
+            ),
             r1cs_rows_checked: NovaScalar::from(state.r1cs_rows_checked as u64),
             r1cs_num_steps: NovaScalar::from(state.r1cs_num_steps as u64),
             r1cs_vk_digest: nova_jolt_field_to_scalar("r1cs_vk_digest", state.r1cs_vk_digest),
@@ -3438,7 +3585,7 @@ impl BlockFoldStatement {
 
     fn digest(&self) -> [u8; 32] {
         let mut hasher = Sha3_256::new();
-        hasher.update(b"JOLT_NOVA_BLOCK_FOLD_STATEMENT_V5");
+        hasher.update(b"JOLT_NOVA_BLOCK_FOLD_STATEMENT_V6");
         for value in [
             self.program_digest,
             self.block_index,
@@ -3483,6 +3630,12 @@ impl BlockFoldStatement {
             self.verified_jolt_lookup_opening_receipt_digest,
             self.verified_jolt_lookup_opening_count,
             self.verified_jolt_lookup_opening_block_digest,
+            self.verified_jolt_lasso_lookup_claim_present,
+            self.verified_jolt_lasso_lookup_instruction_contribution_digest,
+            self.verified_jolt_lasso_lookup_tuple_contribution_digest,
+            self.verified_jolt_lasso_lookup_claim_digest,
+            self.verified_jolt_lasso_instruction_opening_count,
+            self.verified_jolt_lasso_tuple_claim_count,
             self.r1cs_rows_checked,
             self.r1cs_num_steps,
             self.r1cs_vk_digest,
@@ -3604,6 +3757,30 @@ impl BlockFoldStatement {
                     "verified_jolt_lookup_opening_block_digest",
                     self.verified_jolt_lookup_opening_block_digest,
                 ),
+                (
+                    "verified_jolt_lasso_lookup_claim_present",
+                    self.verified_jolt_lasso_lookup_claim_present,
+                ),
+                (
+                    "verified_jolt_lasso_lookup_instruction_contribution_digest",
+                    self.verified_jolt_lasso_lookup_instruction_contribution_digest,
+                ),
+                (
+                    "verified_jolt_lasso_lookup_tuple_contribution_digest",
+                    self.verified_jolt_lasso_lookup_tuple_contribution_digest,
+                ),
+                (
+                    "verified_jolt_lasso_lookup_claim_digest",
+                    self.verified_jolt_lasso_lookup_claim_digest,
+                ),
+                (
+                    "verified_jolt_lasso_instruction_opening_count",
+                    self.verified_jolt_lasso_instruction_opening_count,
+                ),
+                (
+                    "verified_jolt_lasso_tuple_claim_count",
+                    self.verified_jolt_lasso_tuple_claim_count,
+                ),
                 ("r1cs_rows_checked", self.r1cs_rows_checked),
                 ("r1cs_num_steps", self.r1cs_num_steps),
                 ("r1cs_vk_digest", self.r1cs_vk_digest),
@@ -3675,6 +3852,15 @@ impl BlockFoldStatement {
                 .verified_jolt_recursive_transcript_stage_count,
             verified_jolt_lookup_block_binding_digest: self
                 .verified_jolt_lookup_block_binding_digest,
+            verified_jolt_lasso_lookup_claim_present: self.verified_jolt_lasso_lookup_claim_present,
+            verified_jolt_lasso_lookup_instruction_contribution_digest: self
+                .verified_jolt_lasso_lookup_instruction_contribution_digest,
+            verified_jolt_lasso_lookup_tuple_contribution_digest: self
+                .verified_jolt_lasso_lookup_tuple_contribution_digest,
+            verified_jolt_lasso_lookup_claim_digest: self.verified_jolt_lasso_lookup_claim_digest,
+            verified_jolt_lasso_instruction_opening_count: self
+                .verified_jolt_lasso_instruction_opening_count,
+            verified_jolt_lasso_tuple_claim_count: self.verified_jolt_lasso_tuple_claim_count,
         }
     }
 
@@ -4004,6 +4190,30 @@ impl BlockFoldStatement {
                     self.verified_jolt_lookup_opening_block_digest,
                 ),
                 (
+                    "verified_jolt_lasso_lookup_claim_present",
+                    self.verified_jolt_lasso_lookup_claim_present,
+                ),
+                (
+                    "verified_jolt_lasso_lookup_instruction_contribution_digest",
+                    self.verified_jolt_lasso_lookup_instruction_contribution_digest,
+                ),
+                (
+                    "verified_jolt_lasso_lookup_tuple_contribution_digest",
+                    self.verified_jolt_lasso_lookup_tuple_contribution_digest,
+                ),
+                (
+                    "verified_jolt_lasso_lookup_claim_digest",
+                    self.verified_jolt_lasso_lookup_claim_digest,
+                ),
+                (
+                    "verified_jolt_lasso_instruction_opening_count",
+                    self.verified_jolt_lasso_instruction_opening_count,
+                ),
+                (
+                    "verified_jolt_lasso_tuple_claim_count",
+                    self.verified_jolt_lasso_tuple_claim_count,
+                ),
+                (
                     "jolt_lasso_receipt_capsule_root",
                     self.jolt_lasso_receipt_capsule_root(),
                 ),
@@ -4107,6 +4317,30 @@ impl BlockFoldStatement {
                 (
                     "verified_jolt_lookup_opening_block_digest",
                     self.verified_jolt_lookup_opening_block_digest,
+                ),
+                (
+                    "verified_jolt_lasso_lookup_claim_present",
+                    self.verified_jolt_lasso_lookup_claim_present,
+                ),
+                (
+                    "verified_jolt_lasso_lookup_instruction_contribution_digest",
+                    self.verified_jolt_lasso_lookup_instruction_contribution_digest,
+                ),
+                (
+                    "verified_jolt_lasso_lookup_tuple_contribution_digest",
+                    self.verified_jolt_lasso_lookup_tuple_contribution_digest,
+                ),
+                (
+                    "verified_jolt_lasso_lookup_claim_digest",
+                    self.verified_jolt_lasso_lookup_claim_digest,
+                ),
+                (
+                    "verified_jolt_lasso_instruction_opening_count",
+                    self.verified_jolt_lasso_instruction_opening_count,
+                ),
+                (
+                    "verified_jolt_lasso_tuple_claim_count",
+                    self.verified_jolt_lasso_tuple_claim_count,
                 ),
                 (
                     "jolt_lasso_receipt_capsule_root",
@@ -4273,6 +4507,12 @@ struct JoltNovaStepWitness {
     verified_jolt_lookup_opening_receipt_digest: NovaScalar,
     verified_jolt_lookup_opening_count: NovaScalar,
     verified_jolt_lookup_opening_block_digest: NovaScalar,
+    verified_jolt_lasso_lookup_claim_present: NovaScalar,
+    verified_jolt_lasso_lookup_instruction_contribution_digest: NovaScalar,
+    verified_jolt_lasso_lookup_tuple_contribution_digest: NovaScalar,
+    verified_jolt_lasso_lookup_claim_digest: NovaScalar,
+    verified_jolt_lasso_instruction_opening_count: NovaScalar,
+    verified_jolt_lasso_tuple_claim_count: NovaScalar,
     jolt_lasso_receipt_capsule_root: NovaScalar,
     jolt_lasso_opening_capsule_root: NovaScalar,
     lookup_backend_selector: NovaScalar,
@@ -4416,6 +4656,17 @@ impl JoltNovaStepWitness {
             verified_jolt_lookup_opening_count: statement.verified_jolt_lookup_opening_count,
             verified_jolt_lookup_opening_block_digest: statement
                 .verified_jolt_lookup_opening_block_digest,
+            verified_jolt_lasso_lookup_claim_present: statement
+                .verified_jolt_lasso_lookup_claim_present,
+            verified_jolt_lasso_lookup_instruction_contribution_digest: statement
+                .verified_jolt_lasso_lookup_instruction_contribution_digest,
+            verified_jolt_lasso_lookup_tuple_contribution_digest: statement
+                .verified_jolt_lasso_lookup_tuple_contribution_digest,
+            verified_jolt_lasso_lookup_claim_digest: statement
+                .verified_jolt_lasso_lookup_claim_digest,
+            verified_jolt_lasso_instruction_opening_count: statement
+                .verified_jolt_lasso_instruction_opening_count,
+            verified_jolt_lasso_tuple_claim_count: statement.verified_jolt_lasso_tuple_claim_count,
             jolt_lasso_receipt_capsule_root,
             jolt_lasso_opening_capsule_root,
             lookup_backend_selector,
@@ -4491,6 +4742,15 @@ impl JoltNovaStepWitness {
             verified_jolt_lookup_opening_count: self.verified_jolt_lookup_opening_count,
             verified_jolt_lookup_opening_block_digest: self
                 .verified_jolt_lookup_opening_block_digest,
+            verified_jolt_lasso_lookup_claim_present: self.verified_jolt_lasso_lookup_claim_present,
+            verified_jolt_lasso_lookup_instruction_contribution_digest: self
+                .verified_jolt_lasso_lookup_instruction_contribution_digest,
+            verified_jolt_lasso_lookup_tuple_contribution_digest: self
+                .verified_jolt_lasso_lookup_tuple_contribution_digest,
+            verified_jolt_lasso_lookup_claim_digest: self.verified_jolt_lasso_lookup_claim_digest,
+            verified_jolt_lasso_instruction_opening_count: self
+                .verified_jolt_lasso_instruction_opening_count,
+            verified_jolt_lasso_tuple_claim_count: self.verified_jolt_lasso_tuple_claim_count,
             r1cs_rows_checked: self.r1cs_rows_checked,
             r1cs_num_steps: self.r1cs_num_steps,
             r1cs_vk_digest: self.r1cs_vk_digest,
@@ -4875,6 +5135,38 @@ impl nova_snark::traits::circuit::StepCircuit<NovaScalar> for JoltNovaStepCircui
             cs,
             "verified Jolt lookup opening block digest",
             self.witness.verified_jolt_lookup_opening_block_digest,
+        )?;
+        let verified_jolt_lasso_lookup_claim_present = alloc_nova_witness(
+            cs,
+            "verified Jolt Lasso lookup claim present",
+            self.witness.verified_jolt_lasso_lookup_claim_present,
+        )?;
+        let verified_jolt_lasso_lookup_instruction_contribution_digest = alloc_nova_witness(
+            cs,
+            "verified Jolt Lasso lookup instruction contribution digest",
+            self.witness
+                .verified_jolt_lasso_lookup_instruction_contribution_digest,
+        )?;
+        let verified_jolt_lasso_lookup_tuple_contribution_digest = alloc_nova_witness(
+            cs,
+            "verified Jolt Lasso lookup tuple contribution digest",
+            self.witness
+                .verified_jolt_lasso_lookup_tuple_contribution_digest,
+        )?;
+        let verified_jolt_lasso_lookup_claim_digest = alloc_nova_witness(
+            cs,
+            "verified Jolt Lasso lookup claim digest",
+            self.witness.verified_jolt_lasso_lookup_claim_digest,
+        )?;
+        let verified_jolt_lasso_instruction_opening_count = alloc_nova_witness(
+            cs,
+            "verified Jolt Lasso instruction opening count",
+            self.witness.verified_jolt_lasso_instruction_opening_count,
+        )?;
+        let verified_jolt_lasso_tuple_claim_count = alloc_nova_witness(
+            cs,
+            "verified Jolt Lasso tuple claim count",
+            self.witness.verified_jolt_lasso_tuple_claim_count,
         )?;
         let jolt_lasso_receipt_capsule_root = alloc_nova_witness(
             cs,
@@ -5360,6 +5652,42 @@ impl nova_snark::traits::circuit::StepCircuit<NovaScalar> for JoltNovaStepCircui
                         "verified_jolt_lookup_opening_block_digest",
                     ),
                     verified_jolt_lookup_opening_block_digest.get_variable(),
+                ) + (
+                    nova_transcript_challenge_scalar(
+                        NOVA_TRANSCRIPT_DOMAIN_STATEMENT,
+                        "verified_jolt_lasso_lookup_claim_present",
+                    ),
+                    verified_jolt_lasso_lookup_claim_present.get_variable(),
+                ) + (
+                    nova_transcript_challenge_scalar(
+                        NOVA_TRANSCRIPT_DOMAIN_STATEMENT,
+                        "verified_jolt_lasso_lookup_instruction_contribution_digest",
+                    ),
+                    verified_jolt_lasso_lookup_instruction_contribution_digest.get_variable(),
+                ) + (
+                    nova_transcript_challenge_scalar(
+                        NOVA_TRANSCRIPT_DOMAIN_STATEMENT,
+                        "verified_jolt_lasso_lookup_tuple_contribution_digest",
+                    ),
+                    verified_jolt_lasso_lookup_tuple_contribution_digest.get_variable(),
+                ) + (
+                    nova_transcript_challenge_scalar(
+                        NOVA_TRANSCRIPT_DOMAIN_STATEMENT,
+                        "verified_jolt_lasso_lookup_claim_digest",
+                    ),
+                    verified_jolt_lasso_lookup_claim_digest.get_variable(),
+                ) + (
+                    nova_transcript_challenge_scalar(
+                        NOVA_TRANSCRIPT_DOMAIN_STATEMENT,
+                        "verified_jolt_lasso_instruction_opening_count",
+                    ),
+                    verified_jolt_lasso_instruction_opening_count.get_variable(),
+                ) + (
+                    nova_transcript_challenge_scalar(
+                        NOVA_TRANSCRIPT_DOMAIN_STATEMENT,
+                        "verified_jolt_lasso_tuple_claim_count",
+                    ),
+                    verified_jolt_lasso_tuple_claim_count.get_variable(),
                 ) + (
                     nova_transcript_challenge_scalar(
                         NOVA_TRANSCRIPT_DOMAIN_STATEMENT,
@@ -6152,6 +6480,47 @@ impl nova_snark::traits::circuit::StepCircuit<NovaScalar> for JoltNovaStepCircui
         }
 
         cs.enforce(
+            || "verified Jolt Lasso claim presence matches lookup opening presence",
+            |lc| lc + verified_jolt_lookup_opening_present.get_variable(),
+            |lc| lc + CS::one(),
+            |lc| lc + verified_jolt_lasso_lookup_claim_present.get_variable(),
+        );
+
+        for (label, value) in [
+            (
+                "absent verified Jolt Lasso claim has zero presence",
+                &verified_jolt_lasso_lookup_claim_present,
+            ),
+            (
+                "absent verified Jolt Lasso claim has zero instruction contribution digest",
+                &verified_jolt_lasso_lookup_instruction_contribution_digest,
+            ),
+            (
+                "absent verified Jolt Lasso claim has zero tuple contribution digest",
+                &verified_jolt_lasso_lookup_tuple_contribution_digest,
+            ),
+            (
+                "absent verified Jolt Lasso claim has zero claim digest",
+                &verified_jolt_lasso_lookup_claim_digest,
+            ),
+            (
+                "absent verified Jolt Lasso claim has zero instruction opening count",
+                &verified_jolt_lasso_instruction_opening_count,
+            ),
+            (
+                "absent verified Jolt Lasso claim has zero tuple claim count",
+                &verified_jolt_lasso_tuple_claim_count,
+            ),
+        ] {
+            cs.enforce(
+                || label,
+                |lc| lc + CS::one() - verified_jolt_lasso_lookup_claim_present.get_variable(),
+                |lc| lc + value.get_variable(),
+                |lc| lc,
+            );
+        }
+
+        cs.enforce(
             || "Jolt Lasso receipt capsule root binds verified receipt fields",
             |lc| {
                 lc + (
@@ -6220,6 +6589,42 @@ impl nova_snark::traits::circuit::StepCircuit<NovaScalar> for JoltNovaStepCircui
                         "verified_jolt_lookup_block_binding_digest",
                     ),
                     verified_jolt_lookup_block_binding_digest.get_variable(),
+                ) + (
+                    nova_transcript_challenge_scalar(
+                        NOVA_TRANSCRIPT_DOMAIN_JOLT_LASSO_RECEIPT_CAPSULE,
+                        "verified_jolt_lasso_lookup_claim_present",
+                    ),
+                    verified_jolt_lasso_lookup_claim_present.get_variable(),
+                ) + (
+                    nova_transcript_challenge_scalar(
+                        NOVA_TRANSCRIPT_DOMAIN_JOLT_LASSO_RECEIPT_CAPSULE,
+                        "verified_jolt_lasso_lookup_instruction_contribution_digest",
+                    ),
+                    verified_jolt_lasso_lookup_instruction_contribution_digest.get_variable(),
+                ) + (
+                    nova_transcript_challenge_scalar(
+                        NOVA_TRANSCRIPT_DOMAIN_JOLT_LASSO_RECEIPT_CAPSULE,
+                        "verified_jolt_lasso_lookup_tuple_contribution_digest",
+                    ),
+                    verified_jolt_lasso_lookup_tuple_contribution_digest.get_variable(),
+                ) + (
+                    nova_transcript_challenge_scalar(
+                        NOVA_TRANSCRIPT_DOMAIN_JOLT_LASSO_RECEIPT_CAPSULE,
+                        "verified_jolt_lasso_lookup_claim_digest",
+                    ),
+                    verified_jolt_lasso_lookup_claim_digest.get_variable(),
+                ) + (
+                    nova_transcript_challenge_scalar(
+                        NOVA_TRANSCRIPT_DOMAIN_JOLT_LASSO_RECEIPT_CAPSULE,
+                        "verified_jolt_lasso_instruction_opening_count",
+                    ),
+                    verified_jolt_lasso_instruction_opening_count.get_variable(),
+                ) + (
+                    nova_transcript_challenge_scalar(
+                        NOVA_TRANSCRIPT_DOMAIN_JOLT_LASSO_RECEIPT_CAPSULE,
+                        "verified_jolt_lasso_tuple_claim_count",
+                    ),
+                    verified_jolt_lasso_tuple_claim_count.get_variable(),
                 )
             },
             |lc| lc + CS::one(),
@@ -6479,6 +6884,60 @@ impl nova_snark::traits::circuit::StepCircuit<NovaScalar> for JoltNovaStepCircui
                 ) + (
                     nova_transcript_challenge_scalar(
                         NOVA_TRANSCRIPT_DOMAIN_LOOKUP_LOGUP,
+                        "verified_jolt_lasso_lookup_claim_present",
+                    ) - nova_transcript_challenge_scalar(
+                        NOVA_TRANSCRIPT_DOMAIN_LOOKUP,
+                        "verified_jolt_lasso_lookup_claim_present",
+                    ),
+                    verified_jolt_lasso_lookup_claim_present.get_variable(),
+                ) + (
+                    nova_transcript_challenge_scalar(
+                        NOVA_TRANSCRIPT_DOMAIN_LOOKUP_LOGUP,
+                        "verified_jolt_lasso_lookup_instruction_contribution_digest",
+                    ) - nova_transcript_challenge_scalar(
+                        NOVA_TRANSCRIPT_DOMAIN_LOOKUP,
+                        "verified_jolt_lasso_lookup_instruction_contribution_digest",
+                    ),
+                    verified_jolt_lasso_lookup_instruction_contribution_digest.get_variable(),
+                ) + (
+                    nova_transcript_challenge_scalar(
+                        NOVA_TRANSCRIPT_DOMAIN_LOOKUP_LOGUP,
+                        "verified_jolt_lasso_lookup_tuple_contribution_digest",
+                    ) - nova_transcript_challenge_scalar(
+                        NOVA_TRANSCRIPT_DOMAIN_LOOKUP,
+                        "verified_jolt_lasso_lookup_tuple_contribution_digest",
+                    ),
+                    verified_jolt_lasso_lookup_tuple_contribution_digest.get_variable(),
+                ) + (
+                    nova_transcript_challenge_scalar(
+                        NOVA_TRANSCRIPT_DOMAIN_LOOKUP_LOGUP,
+                        "verified_jolt_lasso_lookup_claim_digest",
+                    ) - nova_transcript_challenge_scalar(
+                        NOVA_TRANSCRIPT_DOMAIN_LOOKUP,
+                        "verified_jolt_lasso_lookup_claim_digest",
+                    ),
+                    verified_jolt_lasso_lookup_claim_digest.get_variable(),
+                ) + (
+                    nova_transcript_challenge_scalar(
+                        NOVA_TRANSCRIPT_DOMAIN_LOOKUP_LOGUP,
+                        "verified_jolt_lasso_instruction_opening_count",
+                    ) - nova_transcript_challenge_scalar(
+                        NOVA_TRANSCRIPT_DOMAIN_LOOKUP,
+                        "verified_jolt_lasso_instruction_opening_count",
+                    ),
+                    verified_jolt_lasso_instruction_opening_count.get_variable(),
+                ) + (
+                    nova_transcript_challenge_scalar(
+                        NOVA_TRANSCRIPT_DOMAIN_LOOKUP_LOGUP,
+                        "verified_jolt_lasso_tuple_claim_count",
+                    ) - nova_transcript_challenge_scalar(
+                        NOVA_TRANSCRIPT_DOMAIN_LOOKUP,
+                        "verified_jolt_lasso_tuple_claim_count",
+                    ),
+                    verified_jolt_lasso_tuple_claim_count.get_variable(),
+                ) + (
+                    nova_transcript_challenge_scalar(
+                        NOVA_TRANSCRIPT_DOMAIN_LOOKUP_LOGUP,
                         "jolt_lasso_receipt_capsule_root",
                     ) - nova_transcript_challenge_scalar(
                         NOVA_TRANSCRIPT_DOMAIN_LOOKUP,
@@ -6631,6 +7090,48 @@ impl nova_snark::traits::circuit::StepCircuit<NovaScalar> for JoltNovaStepCircui
                             "verified_jolt_lookup_opening_block_digest",
                         ),
                         verified_jolt_lookup_opening_block_digest.get_variable(),
+                    )
+                    - (
+                        nova_transcript_challenge_scalar(
+                            NOVA_TRANSCRIPT_DOMAIN_LOOKUP,
+                            "verified_jolt_lasso_lookup_claim_present",
+                        ),
+                        verified_jolt_lasso_lookup_claim_present.get_variable(),
+                    )
+                    - (
+                        nova_transcript_challenge_scalar(
+                            NOVA_TRANSCRIPT_DOMAIN_LOOKUP,
+                            "verified_jolt_lasso_lookup_instruction_contribution_digest",
+                        ),
+                        verified_jolt_lasso_lookup_instruction_contribution_digest.get_variable(),
+                    )
+                    - (
+                        nova_transcript_challenge_scalar(
+                            NOVA_TRANSCRIPT_DOMAIN_LOOKUP,
+                            "verified_jolt_lasso_lookup_tuple_contribution_digest",
+                        ),
+                        verified_jolt_lasso_lookup_tuple_contribution_digest.get_variable(),
+                    )
+                    - (
+                        nova_transcript_challenge_scalar(
+                            NOVA_TRANSCRIPT_DOMAIN_LOOKUP,
+                            "verified_jolt_lasso_lookup_claim_digest",
+                        ),
+                        verified_jolt_lasso_lookup_claim_digest.get_variable(),
+                    )
+                    - (
+                        nova_transcript_challenge_scalar(
+                            NOVA_TRANSCRIPT_DOMAIN_LOOKUP,
+                            "verified_jolt_lasso_instruction_opening_count",
+                        ),
+                        verified_jolt_lasso_instruction_opening_count.get_variable(),
+                    )
+                    - (
+                        nova_transcript_challenge_scalar(
+                            NOVA_TRANSCRIPT_DOMAIN_LOOKUP,
+                            "verified_jolt_lasso_tuple_claim_count",
+                        ),
+                        verified_jolt_lasso_tuple_claim_count.get_variable(),
                     )
                     - (
                         nova_transcript_challenge_scalar(
@@ -10058,6 +10559,17 @@ where
         all_contributions.push(block_ram_inc_contributions[block_position]);
         all_contributions.extend_from_slice(&block_cpu_contributions[block_position]);
         let contribution_digest = digest_jolt_lookup_opening_contributions(&all_contributions);
+        let lasso_instruction_contribution_digest =
+            digest_jolt_lookup_opening_contributions(&block_contributions[block_position]);
+        let lasso_tuple_contribution_digest =
+            digest_jolt_lookup_opening_contributions(&block_tuple_contributions[block_position]);
+        let lasso_claim_digest = digest_verified_jolt_lasso_lookup_claim_block(
+            opening_receipt,
+            public_input,
+            lookup_claims_digest,
+            lasso_instruction_contribution_digest,
+            lasso_tuple_contribution_digest,
+        );
         let binding_digest = digest_verified_jolt_lookup_opening_block(
             opening_receipt.digest(),
             public_input,
@@ -10070,6 +10582,9 @@ where
             global_cycle_end: block.global_cycle_start + block.active_cycles,
             lookup_claims_digest,
             contribution_digest,
+            lasso_instruction_contribution_digest,
+            lasso_tuple_contribution_digest,
+            lasso_claim_digest,
             binding_digest,
         });
     }
@@ -10251,6 +10766,14 @@ where
         state.verified_jolt_lookup_opening_receipt_digest = receipt.digest();
         state.verified_jolt_lookup_opening_count = receipt.authenticated_opening_count();
         state.verified_jolt_lookup_opening_block_digest = opening_block_digest;
+        state.verified_jolt_lasso_lookup_claim_present = true;
+        state.verified_jolt_lasso_lookup_instruction_contribution_digest =
+            opening.lasso_instruction_contribution_digest;
+        state.verified_jolt_lasso_lookup_tuple_contribution_digest =
+            opening.lasso_tuple_contribution_digest;
+        state.verified_jolt_lasso_lookup_claim_digest = opening.lasso_claim_digest;
+        state.verified_jolt_lasso_instruction_opening_count = receipt.instruction_opening_count();
+        state.verified_jolt_lasso_tuple_claim_count = 3;
         state.state_digest = digest_foldable_block_state(state);
     }
     Ok(())
@@ -10286,6 +10809,15 @@ where
         if !state.verified_jolt_lookup_opening_present
             || state.verified_jolt_lookup_opening_receipt_digest != receipt.digest()
             || state.verified_jolt_lookup_opening_count != receipt.authenticated_opening_count()
+            || !state.verified_jolt_lasso_lookup_claim_present
+            || state.verified_jolt_lasso_lookup_instruction_contribution_digest
+                != opening.lasso_instruction_contribution_digest
+            || state.verified_jolt_lasso_lookup_tuple_contribution_digest
+                != opening.lasso_tuple_contribution_digest
+            || state.verified_jolt_lasso_lookup_claim_digest != opening.lasso_claim_digest
+            || state.verified_jolt_lasso_instruction_opening_count
+                != receipt.instruction_opening_count()
+            || state.verified_jolt_lasso_tuple_claim_count != 3
         {
             return Err(BlockTraceError::VerifiedJoltLookupReceiptMismatch {
                 block_index: state.block_index,
@@ -10328,6 +10860,12 @@ where
     state.verified_jolt_lookup_opening_receipt_digest = [0; 32];
     state.verified_jolt_lookup_opening_count = 0;
     state.verified_jolt_lookup_opening_block_digest = [0; 32];
+    state.verified_jolt_lasso_lookup_claim_present = false;
+    state.verified_jolt_lasso_lookup_instruction_contribution_digest = [0; 32];
+    state.verified_jolt_lasso_lookup_tuple_contribution_digest = [0; 32];
+    state.verified_jolt_lasso_lookup_claim_digest = [0; 32];
+    state.verified_jolt_lasso_instruction_opening_count = 0;
+    state.verified_jolt_lasso_tuple_claim_count = 0;
     state.state_digest = digest_foldable_block_state(state);
 }
 
@@ -10835,6 +11373,12 @@ where
         verified_jolt_lookup_opening_receipt_digest: [0; 32],
         verified_jolt_lookup_opening_count: 0,
         verified_jolt_lookup_opening_block_digest: [0; 32],
+        verified_jolt_lasso_lookup_claim_present: false,
+        verified_jolt_lasso_lookup_instruction_contribution_digest: [0; 32],
+        verified_jolt_lasso_lookup_tuple_contribution_digest: [0; 32],
+        verified_jolt_lasso_lookup_claim_digest: [0; 32],
+        verified_jolt_lasso_instruction_opening_count: 0,
+        verified_jolt_lasso_tuple_claim_count: 0,
         r1cs_rows_checked: cpu_proof.r1cs_rows_checked,
         r1cs_num_steps: cpu_proof.r1cs_num_steps,
         r1cs_vk_digest: cpu_proof.r1cs_vk_digest,
@@ -10988,7 +11532,7 @@ where
     F: JoltField,
 {
     let mut hasher = Sha3_256::new();
-    hasher.update(b"JOLT_NOVA_FOLDABLE_BLOCK_STATE_V7");
+    hasher.update(b"JOLT_NOVA_FOLDABLE_BLOCK_STATE_V8");
     update_usize(&mut hasher, state.block_index);
     update_usize(&mut hasher, state.global_cycle_start);
     update_usize(&mut hasher, state.global_cycle_end);
@@ -11039,6 +11583,15 @@ where
     hasher.update(state.verified_jolt_lookup_opening_receipt_digest);
     update_usize(&mut hasher, state.verified_jolt_lookup_opening_count);
     hasher.update(state.verified_jolt_lookup_opening_block_digest);
+    hasher.update([u8::from(state.verified_jolt_lasso_lookup_claim_present)]);
+    hasher.update(state.verified_jolt_lasso_lookup_instruction_contribution_digest);
+    hasher.update(state.verified_jolt_lasso_lookup_tuple_contribution_digest);
+    hasher.update(state.verified_jolt_lasso_lookup_claim_digest);
+    update_usize(
+        &mut hasher,
+        state.verified_jolt_lasso_instruction_opening_count,
+    );
+    update_usize(&mut hasher, state.verified_jolt_lasso_tuple_claim_count);
     update_usize(&mut hasher, state.r1cs_rows_checked);
     update_usize(&mut hasher, state.r1cs_num_steps);
     update_field(&mut hasher, state.r1cs_vk_digest);
@@ -11141,7 +11694,7 @@ fn digest_verified_jolt_lookup_block_opening_receipt(
     receipt: &VerifiedJoltLookupBlockOpeningReceipt,
 ) -> [u8; 32] {
     let mut hasher = Sha3_256::new();
-    hasher.update(b"JOLT_NOVA_VERIFIED_EXECUTION_BLOCK_OPENING_RECEIPT_V5");
+    hasher.update(b"JOLT_NOVA_VERIFIED_EXECUTION_BLOCK_OPENING_RECEIPT_V6");
     hasher.update(receipt.version.to_le_bytes());
     hasher.update(receipt.lookup_receipt.digest());
     hasher.update(receipt.global_opening_receipt_digest);
@@ -11157,8 +11710,37 @@ fn digest_verified_jolt_lookup_block_opening_receipt(
         update_usize(&mut hasher, block.global_cycle_end);
         hasher.update(block.lookup_claims_digest);
         hasher.update(block.contribution_digest);
+        hasher.update(block.lasso_instruction_contribution_digest);
+        hasher.update(block.lasso_tuple_contribution_digest);
+        hasher.update(block.lasso_claim_digest);
         hasher.update(block.binding_digest);
     }
+    finalize_digest(hasher)
+}
+
+#[cfg(not(feature = "zk"))]
+fn digest_verified_jolt_lasso_lookup_claim_block<Digest, F>(
+    opening_receipt: &VerifiedJoltLookupOpeningReceipt<F>,
+    public_input: &BlockPublicInput<Digest>,
+    lookup_claims_digest: [u8; 32],
+    instruction_contribution_digest: [u8; 32],
+    tuple_contribution_digest: [u8; 32],
+) -> [u8; 32]
+where
+    F: JoltField,
+{
+    let mut hasher = Sha3_256::new();
+    hasher.update(b"JOLT_NOVA_VERIFIED_LASSO_LOOKUP_CLAIM_BLOCK_V1");
+    hasher.update(opening_receipt.digest());
+    hasher.update(opening_receipt.lookup_receipt().digest());
+    update_usize(&mut hasher, public_input.block_index);
+    update_usize(&mut hasher, public_input.global_cycle_start);
+    update_usize(&mut hasher, public_input.global_cycle_end());
+    hasher.update(lookup_claims_digest);
+    hasher.update(instruction_contribution_digest);
+    hasher.update(tuple_contribution_digest);
+    update_usize(&mut hasher, opening_receipt.instruction_opening_count());
+    update_usize(&mut hasher, 3);
     finalize_digest(hasher)
 }
 
@@ -11172,7 +11754,7 @@ where
     Digest: AsRef<[u8]>,
 {
     let mut hasher = Sha3_256::new();
-    hasher.update(b"JOLT_NOVA_FOLD_INPUT_EXECUTION_OPENING_BINDING_V5");
+    hasher.update(b"JOLT_NOVA_FOLD_INPUT_EXECUTION_OPENING_BINDING_V6");
     update_usize(&mut hasher, fold_input.program_digest.as_ref().len());
     hasher.update(fold_input.program_digest.as_ref());
     hasher.update(receipt.digest());
@@ -11180,6 +11762,9 @@ where
     hasher.update(receipt.global_opening_receipt_digest);
     hasher.update(opening.binding_digest);
     hasher.update(opening.contribution_digest);
+    hasher.update(opening.lasso_instruction_contribution_digest);
+    hasher.update(opening.lasso_tuple_contribution_digest);
+    hasher.update(opening.lasso_claim_digest);
     hasher.update(fold_input.state.verified_jolt_lookup_block_binding_digest);
     hasher.update(fold_input.state.lookup_claims_digest);
     finalize_digest(hasher)
@@ -15842,6 +16427,8 @@ mod tests {
         let output = pipeline.prove_blocks(&bytecode, &blocks).unwrap();
         let fold_input = &output.fold_inputs[0];
         let statement = BlockFoldStatement::from_fold_input(fold_input);
+        let receipt_capsule =
+            JoltLassoReceiptCapsule::from_scalars(statement.jolt_lasso_receipt_capsule());
         let opening_capsule =
             JoltLassoOpeningCapsule::from_scalars(statement.jolt_lasso_opening_capsule());
         let boundary = build_jolt_recursive_verifier_relation_boundary(
@@ -15851,6 +16438,49 @@ mod tests {
         )
         .unwrap();
         let lookup_transcript = &boundary.verifier_capsule.lookup_verifier_transcript;
+
+        assert_eq!(
+            receipt_capsule.verified_jolt_lasso_lookup_claim_present,
+            nova_scalar_to_storage(NovaScalar::from(1))
+        );
+        assert_eq!(
+            receipt_capsule.verified_jolt_lasso_lookup_instruction_contribution_digest,
+            nova_scalar_to_storage(
+                statement.verified_jolt_lasso_lookup_instruction_contribution_digest
+            )
+        );
+        assert_eq!(
+            receipt_capsule.verified_jolt_lasso_lookup_tuple_contribution_digest,
+            nova_scalar_to_storage(statement.verified_jolt_lasso_lookup_tuple_contribution_digest)
+        );
+        assert_eq!(
+            receipt_capsule.verified_jolt_lasso_lookup_claim_digest,
+            nova_scalar_to_storage(statement.verified_jolt_lasso_lookup_claim_digest)
+        );
+        assert_eq!(
+            receipt_capsule.verified_jolt_lasso_instruction_opening_count,
+            nova_scalar_to_storage(statement.verified_jolt_lasso_instruction_opening_count)
+        );
+        assert_eq!(
+            receipt_capsule.verified_jolt_lasso_tuple_claim_count,
+            nova_scalar_to_storage(NovaScalar::from(3))
+        );
+        assert_eq!(
+            receipt_capsule.capsule_root,
+            nova_scalar_to_storage(statement.jolt_lasso_receipt_capsule_root())
+        );
+        assert_eq!(
+            lookup_transcript.jolt_lasso_receipt_capsule,
+            receipt_capsule
+        );
+        assert_eq!(
+            lookup_transcript.jolt_lasso_receipt_capsule_root,
+            receipt_capsule.capsule_root
+        );
+        assert_ne!(
+            receipt_capsule.verified_jolt_lasso_lookup_claim_digest,
+            [0u8; 32]
+        );
 
         assert_eq!(
             opening_capsule.verified_jolt_lookup_opening_present,
@@ -15882,6 +16512,13 @@ mod tests {
         );
         assert_ne!(opening_capsule.capsule_root, [0u8; 32]);
         assert!(boundary.verify_digest());
+        let circuit = nova_step_circuit_for_fold_input(fold_input);
+        let cs = synthesize_nova_step_circuit_for_test(&circuit);
+        assert!(
+            cs.is_satisfied(),
+            "authenticated Jolt Lasso opening circuit unexpectedly unsatisfied: {:?}",
+            cs.which_is_unsatisfied()
+        );
 
         let mut tampered_field = boundary.clone();
         tampered_field
@@ -15897,6 +16534,42 @@ mod tests {
             .lookup_verifier_transcript
             .jolt_lasso_opening_capsule_root[0] ^= 1;
         assert!(!tampered_root.verify_digest());
+    }
+
+    #[cfg(all(feature = "nova", not(feature = "zk")))]
+    #[test]
+    fn nova_step_circuit_rejects_tampered_verified_jolt_lasso_claim_digest_witness() {
+        let block0 = trace_block(0, boundary(0, 0), boundary(2, 0));
+        let block1 = trace_block(1, block0.end_state.clone(), boundary(4, 0));
+        let blocks = [block0, block1];
+        let bytecode = bytecode_for_blocks(&blocks);
+        let opening_receipt =
+            test_lookup_opening_receipt(&bytecode, &blocks, 8, false, false, false, false, false);
+        let receipt =
+            verify_jolt_lookup_block_openings(&bytecode, &blocks, &opening_receipt).unwrap();
+        let pipeline =
+            BlockProofPipeline::<_, ark_bn254::Fr, MockFoldingBackend>::
+                with_backend_and_verified_jolt_lookup_block_opening_receipt(
+                    [9u8; 32],
+                    MockFoldingBackend,
+                    receipt,
+                );
+        let output = pipeline.prove_blocks(&bytecode, &blocks).unwrap();
+        let mut circuit = nova_step_circuit_for_fold_input(&output.fold_inputs[0]);
+        assert_eq!(
+            circuit.witness.verified_jolt_lasso_lookup_claim_present,
+            NovaScalar::from(1)
+        );
+
+        circuit.witness.verified_jolt_lasso_lookup_claim_digest += NovaScalar::from(1);
+        circuit.witness.statement_digest = circuit.witness.statement().statement_digest_scalar();
+
+        let cs = synthesize_nova_step_circuit_for_test(&circuit);
+
+        assert!(
+            !cs.is_satisfied(),
+            "tampered verified Jolt Lasso claim digest unexpectedly satisfied"
+        );
     }
 
     #[cfg(feature = "nova")]
