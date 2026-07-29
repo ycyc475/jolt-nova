@@ -955,6 +955,7 @@ pub struct NovaFoldConfig {
 }
 
 pub const NOVA_BLOCK_FOLD_RELATION_NAME: &str = "jolt-nova-block-fold-v2";
+pub const NOVA_JOLT_LASSO_SUBCLAIM_BACKEND_NAME: &str = "jolt-lasso-subclaim-v1";
 pub const NOVA_TRANSCRIPT_SUBCLAIM_BACKEND_NAME: &str = "transcript-subclaim-fingerprints";
 pub const NOVA_LOGUP_SUBCLAIM_BACKEND_NAME: &str = "logup-subclaim-v1";
 pub const JOLT_NOVA_STEP_RELATION_VERSION: &str = "jolt-nova-step-relation-v1";
@@ -981,7 +982,7 @@ impl Default for NovaFoldConfig {
                 }
             },
             relation_name: NOVA_BLOCK_FOLD_RELATION_NAME,
-            subclaim_backend_name: NOVA_TRANSCRIPT_SUBCLAIM_BACKEND_NAME,
+            subclaim_backend_name: NOVA_JOLT_LASSO_SUBCLAIM_BACKEND_NAME,
             final_proof_backend_name: SPARTAN_PLACEHOLDER_PROOF_SYSTEM_NAME,
             use_zero_knowledge: true,
         }
@@ -2367,7 +2368,8 @@ fn ensure_supported_nova_subclaim_backend(
     config: &NovaFoldConfig,
     block_index: usize,
 ) -> Result<(), BlockTraceError> {
-    if config.subclaim_backend_name == NOVA_TRANSCRIPT_SUBCLAIM_BACKEND_NAME
+    if config.subclaim_backend_name == NOVA_JOLT_LASSO_SUBCLAIM_BACKEND_NAME
+        || config.subclaim_backend_name == NOVA_TRANSCRIPT_SUBCLAIM_BACKEND_NAME
         || config.subclaim_backend_name == NOVA_LOGUP_SUBCLAIM_BACKEND_NAME
     {
         Ok(())
@@ -2847,12 +2849,30 @@ trait NovaSubclaimFoldingBackend {
 
 #[cfg(feature = "nova")]
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct JoltLassoSubclaimFoldingBackend;
+
+#[cfg(feature = "nova")]
+impl NovaSubclaimFoldingBackend for JoltLassoSubclaimFoldingBackend {
+    fn name(&self) -> &'static str {
+        NOVA_JOLT_LASSO_SUBCLAIM_BACKEND_NAME
+    }
+
+    fn subclaim_fingerprints(
+        &self,
+        statement: &BlockFoldStatement,
+    ) -> BlockFoldSubclaimFingerprints {
+        statement.subclaim_fingerprints()
+    }
+}
+
+#[cfg(feature = "nova")]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 struct TranscriptSubclaimFoldingBackend;
 
 #[cfg(feature = "nova")]
 impl NovaSubclaimFoldingBackend for TranscriptSubclaimFoldingBackend {
     fn name(&self) -> &'static str {
-        "transcript-subclaim-fingerprints"
+        NOVA_TRANSCRIPT_SUBCLAIM_BACKEND_NAME
     }
 
     fn subclaim_fingerprints(
@@ -2890,6 +2910,7 @@ impl NovaSubclaimFoldingBackend for LogUpSubclaimFoldingBackend {
 #[cfg(feature = "nova")]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum ConfiguredSubclaimFoldingBackend {
+    JoltLasso(JoltLassoSubclaimFoldingBackend),
     Transcript(TranscriptSubclaimFoldingBackend),
     LogUp(LogUpSubclaimFoldingBackend),
 }
@@ -2898,6 +2919,7 @@ enum ConfiguredSubclaimFoldingBackend {
 impl NovaSubclaimFoldingBackend for ConfiguredSubclaimFoldingBackend {
     fn name(&self) -> &'static str {
         match self {
+            Self::JoltLasso(backend) => backend.name(),
             Self::Transcript(backend) => backend.name(),
             Self::LogUp(backend) => backend.name(),
         }
@@ -2905,6 +2927,7 @@ impl NovaSubclaimFoldingBackend for ConfiguredSubclaimFoldingBackend {
 
     fn lookup_backend_selector(&self) -> NovaScalar {
         match self {
+            Self::JoltLasso(backend) => backend.lookup_backend_selector(),
             Self::Transcript(backend) => backend.lookup_backend_selector(),
             Self::LogUp(backend) => backend.lookup_backend_selector(),
         }
@@ -2915,6 +2938,7 @@ impl NovaSubclaimFoldingBackend for ConfiguredSubclaimFoldingBackend {
         statement: &BlockFoldStatement,
     ) -> BlockFoldSubclaimFingerprints {
         match self {
+            Self::JoltLasso(backend) => backend.subclaim_fingerprints(statement),
             Self::Transcript(backend) => backend.subclaim_fingerprints(statement),
             Self::LogUp(backend) => backend.subclaim_fingerprints(statement),
         }
@@ -3954,7 +3978,7 @@ impl JoltNovaStepWitness {
         Digest: AsRef<[u8]>,
         F: JoltField,
     {
-        Self::from_fold_input_with_subclaim_backend(fold_input, &TranscriptSubclaimFoldingBackend)
+        Self::from_fold_input_with_subclaim_backend(fold_input, &JoltLassoSubclaimFoldingBackend)
     }
 
     fn from_fold_input_with_subclaim_backend<Digest, F, Backend>(
@@ -4282,7 +4306,7 @@ impl JoltNovaStepCircuit {
         Digest: AsRef<[u8]>,
         F: JoltField,
     {
-        Self::for_fold_input_with_subclaim_backend(fold_input, &TranscriptSubclaimFoldingBackend)
+        Self::for_fold_input_with_subclaim_backend(fold_input, &JoltLassoSubclaimFoldingBackend)
     }
 
     fn for_fold_input_with_subclaim_backend<Digest, F, Backend>(
@@ -6651,7 +6675,7 @@ where
     nova_next_z_state_with_subclaim_backend(
         current_z_state,
         fold_input,
-        &TranscriptSubclaimFoldingBackend,
+        &JoltLassoSubclaimFoldingBackend,
     )
 }
 
@@ -6707,7 +6731,7 @@ where
     Digest: AsRef<[u8]>,
     F: JoltField,
 {
-    nova_expected_z_state_with_subclaim_backend(fold_inputs, &TranscriptSubclaimFoldingBackend)
+    nova_expected_z_state_with_subclaim_backend(fold_inputs, &JoltLassoSubclaimFoldingBackend)
 }
 
 #[cfg(feature = "nova")]
@@ -6971,6 +6995,9 @@ fn nova_subclaim_backend_from_config(
 ) -> Result<ConfiguredSubclaimFoldingBackend, BlockTraceError> {
     ensure_supported_nova_subclaim_backend(config, block_index)?;
     match config.subclaim_backend_name {
+        NOVA_JOLT_LASSO_SUBCLAIM_BACKEND_NAME => Ok(ConfiguredSubclaimFoldingBackend::JoltLasso(
+            JoltLassoSubclaimFoldingBackend,
+        )),
         NOVA_TRANSCRIPT_SUBCLAIM_BACKEND_NAME => Ok(ConfiguredSubclaimFoldingBackend::Transcript(
             TranscriptSubclaimFoldingBackend,
         )),
@@ -14402,7 +14429,7 @@ mod tests {
         );
         assert_eq!(
             accumulator.config.subclaim_backend_name,
-            NOVA_TRANSCRIPT_SUBCLAIM_BACKEND_NAME
+            NOVA_JOLT_LASSO_SUBCLAIM_BACKEND_NAME
         );
         assert_eq!(
             accumulator.config.final_proof_backend_name,
@@ -14676,7 +14703,7 @@ mod tests {
         let bundle = prover.prove_block(&bytecode, &block, None).unwrap();
         let fold_input = build_block_fold_input(&bundle);
         let statement = BlockFoldStatement::from_fold_input(&fold_input);
-        let transcript_witness = JoltNovaStepWitness::from_fold_input(&fold_input);
+        let lasso_witness = JoltNovaStepWitness::from_fold_input(&fold_input);
         let mut logup_config = NovaFoldConfig::default();
         logup_config.subclaim_backend_name = NOVA_LOGUP_SUBCLAIM_BACKEND_NAME;
         let logup_backend =
@@ -14685,50 +14712,50 @@ mod tests {
             JoltNovaStepWitness::from_fold_input_with_subclaim_backend(&fold_input, &logup_backend);
 
         assert_eq!(
-            transcript_witness.recursive_verifier_subclaim_bundle_root_scalar(),
+            lasso_witness.recursive_verifier_subclaim_bundle_root_scalar(),
             statement.recursive_verifier_subclaim_bundle_root_with_subclaims(
-                transcript_witness.subclaim_fingerprints()
+                lasso_witness.subclaim_fingerprints()
             )
         );
         assert_eq!(
-            transcript_witness.recursive_verifier_backend_selector_root_scalar(),
+            lasso_witness.recursive_verifier_backend_selector_root_scalar(),
             statement.recursive_verifier_backend_selector_root_with_selector(NovaScalar::zero())
         );
         assert_eq!(
-            transcript_witness.recursive_verifier_lookup_gadget_root_scalar(),
+            lasso_witness.recursive_verifier_lookup_gadget_root_scalar(),
             statement.recursive_verifier_lookup_gadget_root_with_subclaims_and_selector(
-                transcript_witness.subclaim_fingerprints(),
+                lasso_witness.subclaim_fingerprints(),
                 NovaScalar::zero(),
             )
         );
         assert_eq!(
-            transcript_witness
+            lasso_witness
                 .recursive_verifier_capsule_components()
                 .lookup_verifier_gadget_root(),
-            transcript_witness.recursive_verifier_lookup_gadget_root_scalar()
+            lasso_witness.recursive_verifier_lookup_gadget_root_scalar()
         );
         assert_eq!(
-            transcript_witness.recursive_lookup_claim_proof_root_scalar(),
-            transcript_witness
+            lasso_witness.recursive_lookup_claim_proof_root_scalar(),
+            lasso_witness
                 .recursive_lookup_verifier_transcript()
                 .claim_proof_root()
         );
         assert_eq!(
-            transcript_witness.recursive_lookup_challenge_root_scalar(),
-            transcript_witness
+            lasso_witness.recursive_lookup_challenge_root_scalar(),
+            lasso_witness
                 .recursive_lookup_verifier_transcript()
                 .challenge_root()
         );
         assert_eq!(
-            transcript_witness.recursive_lookup_sum_balance_root_scalar(),
-            transcript_witness
+            lasso_witness.recursive_lookup_sum_balance_root_scalar(),
+            lasso_witness
                 .recursive_lookup_verifier_transcript()
                 .sum_balance_root()
         );
         assert_eq!(
-            transcript_witness.recursive_verifier_capsule_root_scalar(),
+            lasso_witness.recursive_verifier_capsule_root_scalar(),
             statement.recursive_verifier_capsule_root_with_subclaims_and_selector(
-                transcript_witness.subclaim_fingerprints(),
+                lasso_witness.subclaim_fingerprints(),
                 NovaScalar::zero(),
             )
         );
@@ -14744,11 +14771,11 @@ mod tests {
             )
         );
         assert_ne!(
-            transcript_witness.recursive_verifier_lookup_gadget_root_scalar(),
+            lasso_witness.recursive_verifier_lookup_gadget_root_scalar(),
             logup_witness.recursive_verifier_lookup_gadget_root_scalar()
         );
         assert_ne!(
-            transcript_witness.recursive_verifier_capsule_root_scalar(),
+            lasso_witness.recursive_verifier_capsule_root_scalar(),
             logup_witness.recursive_verifier_capsule_root_scalar()
         );
     }
@@ -14951,7 +14978,7 @@ mod tests {
         let expected_execution =
             build_jolt_execution_subclaim_relation_boundary(&config, &fold_inputs[0]).unwrap();
         let statement = BlockFoldStatement::from_fold_input(&fold_inputs[0]);
-        let expected_subclaims = TranscriptSubclaimFoldingBackend.subclaim_fingerprints(&statement);
+        let expected_subclaims = JoltLassoSubclaimFoldingBackend.subclaim_fingerprints(&statement);
         let expected_capsule = JoltRecursiveVerifierCapsuleComponents::from_scalars(
             statement.recursive_verifier_capsule_components_with_subclaims_and_selector(
                 expected_subclaims,
@@ -15294,7 +15321,7 @@ mod tests {
         let witness =
             JoltNovaStepWitness::from_statement_with_subclaim_backend(statement.clone(), &backend);
 
-        assert_eq!(backend.name(), "transcript-subclaim-fingerprints");
+        assert_eq!(backend.name(), NOVA_TRANSCRIPT_SUBCLAIM_BACKEND_NAME);
         assert_eq!(
             backend.subclaim_fingerprints(&statement),
             expected_subclaims
@@ -15315,6 +15342,61 @@ mod tests {
 
     #[cfg(feature = "nova")]
     #[test]
+    fn nova_jolt_lasso_subclaim_backend_matches_statement_fingerprints() {
+        let bytecode = BytecodePreprocessing::default();
+        let block = trace_block(0, boundary(0, 0), boundary(4, 0));
+        let prover = BlockProofBundleProver::<_, ark_bn254::Fr>::new([9u8; 32]);
+        let bundle = prover.prove_block(&bytecode, &block, None).unwrap();
+        let fold_input = build_block_fold_input(&bundle);
+        let statement = BlockFoldStatement::from_fold_input(&fold_input);
+        let backend = JoltLassoSubclaimFoldingBackend;
+        let expected_subclaims = statement.subclaim_fingerprints();
+        let witness =
+            JoltNovaStepWitness::from_statement_with_subclaim_backend(statement.clone(), &backend);
+
+        assert_eq!(backend.name(), NOVA_JOLT_LASSO_SUBCLAIM_BACKEND_NAME);
+        assert_eq!(
+            backend.subclaim_fingerprints(&statement),
+            expected_subclaims
+        );
+        assert_eq!(witness.subclaim_fingerprints(), expected_subclaims);
+        assert_eq!(
+            witness.recursive_verifier_boundary_fingerprint,
+            statement.recursive_verifier_boundary_fingerprint_with_subclaims_and_selector(
+                expected_subclaims,
+                NovaScalar::zero()
+            )
+        );
+        assert_eq!(
+            witness.semantic_delta(),
+            statement.semantic_delta_with_subclaims(expected_subclaims)
+        );
+    }
+
+    #[cfg(feature = "nova")]
+    #[test]
+    fn nova_legacy_transcript_subclaim_backend_name_is_still_accepted() {
+        let bytecode = BytecodePreprocessing::default();
+        let block = trace_block(0, boundary(0, 0), boundary(4, 0));
+        let prover = BlockProofBundleProver::<_, ark_bn254::Fr>::new([9u8; 32]);
+        let bundle = prover.prove_block(&bytecode, &block, None).unwrap();
+        let fold_input = build_block_fold_input(&bundle);
+        let mut config = NovaFoldConfig::default();
+        config.subclaim_backend_name = NOVA_TRANSCRIPT_SUBCLAIM_BACKEND_NAME;
+
+        let backend = nova_subclaim_backend_from_config(&config, fold_input.state.block_index)
+            .expect("legacy transcript alias should still be supported");
+
+        assert!(matches!(
+            backend,
+            ConfiguredSubclaimFoldingBackend::Transcript(_)
+        ));
+        assert_eq!(backend.name(), NOVA_TRANSCRIPT_SUBCLAIM_BACKEND_NAME);
+        assert_eq!(backend.lookup_backend_selector(), NovaScalar::zero());
+    }
+
+    #[cfg(feature = "nova")]
+    #[test]
     fn nova_logup_backend_updates_recursive_verifier_boundary_fingerprint() {
         let bytecode = BytecodePreprocessing::default();
         let block = trace_block(0, boundary(0, 0), boundary(4, 0));
@@ -15322,7 +15404,7 @@ mod tests {
         let bundle = prover.prove_block(&bytecode, &block, None).unwrap();
         let fold_input = build_block_fold_input(&bundle);
         let statement = BlockFoldStatement::from_fold_input(&fold_input);
-        let transcript_witness = JoltNovaStepWitness::from_fold_input(&fold_input);
+        let lasso_witness = JoltNovaStepWitness::from_fold_input(&fold_input);
         let mut config = NovaFoldConfig::default();
         config.subclaim_backend_name = NOVA_LOGUP_SUBCLAIM_BACKEND_NAME;
         let logup_backend =
@@ -15356,15 +15438,15 @@ mod tests {
             )
         );
         assert_ne!(
-            transcript_witness.recursive_verifier_boundary_fingerprint,
+            lasso_witness.recursive_verifier_boundary_fingerprint,
             logup_witness.recursive_verifier_boundary_fingerprint
         );
         assert_ne!(
-            transcript_witness.recursive_verifier_lookup_gadget_root,
+            lasso_witness.recursive_verifier_lookup_gadget_root,
             logup_witness.recursive_verifier_lookup_gadget_root
         );
         assert_ne!(
-            transcript_witness.recursive_verifier_capsule_root,
+            lasso_witness.recursive_verifier_capsule_root,
             logup_witness.recursive_verifier_capsule_root
         );
         assert_eq!(
@@ -15389,7 +15471,7 @@ mod tests {
                 statement: &BlockFoldStatement,
             ) -> BlockFoldSubclaimFingerprints {
                 let mut subclaims =
-                    TranscriptSubclaimFoldingBackend.subclaim_fingerprints(statement);
+                    JoltLassoSubclaimFoldingBackend.subclaim_fingerprints(statement);
                 subclaims.lookup = subclaims.lookup + NovaScalar::from(1);
                 subclaims
             }
@@ -15465,7 +15547,7 @@ mod tests {
 
         assert_eq!(
             subclaim_backend.name(),
-            NOVA_TRANSCRIPT_SUBCLAIM_BACKEND_NAME
+            NOVA_JOLT_LASSO_SUBCLAIM_BACKEND_NAME
         );
         assert_eq!(configured_witness, default_witness);
         assert_eq!(configured_circuit, default_circuit);

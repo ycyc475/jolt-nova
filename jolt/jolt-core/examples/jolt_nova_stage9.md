@@ -1180,3 +1180,18 @@ objects that the next recursive verification stage can replace independently.
 
 Stage 10.12 still uses digest-level transcript binding. It does not yet verify
 the full LogUp challenge transcript or Fiat-Shamir sponge state inside Nova.
+
+## Stage 11: Lasso-first lookup backend naming
+
+Stage 11 does not change the lookup proof math yet. Instead, it makes the
+default lookup path explicit and keeps the older transcript label as a
+compatibility alias:
+
+- `jolt-lasso-subclaim-v1` becomes the default Nova subclaim backend name;
+- `transcript-subclaim-fingerprints` remains accepted for legacy configs;
+- the benchmark runner now reports the default lookup backend as
+  `jolt-lasso`;
+- `logup-subclaim-v1` remains the experimental alternative path.
+
+This keeps the Stage 10 recursive transcript structure intact while making the
+public API line up with the Lasso-first roadmap for the next stages.

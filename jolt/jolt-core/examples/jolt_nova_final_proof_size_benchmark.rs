@@ -25,8 +25,8 @@ use jolt_core::{
             validate_block_chain, BlockProofPipeline, BlockPublicInput, JoltNovaReportOutputFormat,
             NovaBlockProofPipelineFinalProofSizeBenchmarkArtifact, NovaFoldConfig,
             NovaFoldingBackend, JOLT_NOVA_FINAL_PROOF_SIZE_SCALING_REPORT_KIND,
-            JOLT_NOVA_REPORT_SCHEMA_VERSION, NOVA_LOGUP_SUBCLAIM_BACKEND_NAME,
-            NOVA_TRANSCRIPT_SUBCLAIM_BACKEND_NAME,
+            JOLT_NOVA_REPORT_SCHEMA_VERSION, NOVA_JOLT_LASSO_SUBCLAIM_BACKEND_NAME,
+            NOVA_LOGUP_SUBCLAIM_BACKEND_NAME,
         },
         bytecode::BytecodePreprocessing,
     },
@@ -171,7 +171,7 @@ struct Args {
     fixture: ProductionFixture,
 
     /// Lookup subclaim relation folded by Nova.
-    #[arg(long, value_enum, default_value_t = LookupBackend::Transcript)]
+    #[arg(long, value_enum, default_value_t = LookupBackend::JoltLasso)]
     lookup_backend: LookupBackend,
 }
 
@@ -206,8 +206,9 @@ impl fmt::Display for TraceSource {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 enum LookupBackend {
-    /// Existing digest/count transcript fingerprint baseline.
-    Transcript,
+    /// Jolt's Lasso-style lookup backend (legacy `transcript` alias).
+    #[value(name = "jolt-lasso", alias = "transcript")]
+    JoltLasso,
     /// LogUp fractional-sum relation with in-circuit balance enforcement.
     LogUp,
 }
@@ -215,14 +216,14 @@ enum LookupBackend {
 impl LookupBackend {
     fn as_str(self) -> &'static str {
         match self {
-            Self::Transcript => "transcript",
+            Self::JoltLasso => "jolt-lasso",
             Self::LogUp => "logup",
         }
     }
 
     fn nova_subclaim_backend_name(self) -> &'static str {
         match self {
-            Self::Transcript => NOVA_TRANSCRIPT_SUBCLAIM_BACKEND_NAME,
+            Self::JoltLasso => NOVA_JOLT_LASSO_SUBCLAIM_BACKEND_NAME,
             Self::LogUp => NOVA_LOGUP_SUBCLAIM_BACKEND_NAME,
         }
     }
@@ -1944,7 +1945,7 @@ fn relation_profile_seeds(
     let register_accesses = counts.register_reads.saturating_add(counts.register_writes);
     let ram_accesses = counts.ram_reads.saturating_add(counts.ram_writes);
     let lookup_backend_weight = match lookup_backend {
-        LookupBackend::Transcript => 6,
+        LookupBackend::JoltLasso => 6,
         LookupBackend::LogUp => 8,
     };
 
@@ -3355,7 +3356,7 @@ mod tests {
             baseline_input: None,
             max_regression_percent: 10.0,
             fixture: ProductionFixture::CpuLookup64k,
-            lookup_backend: LookupBackend::Transcript,
+            lookup_backend: LookupBackend::JoltLasso,
         };
 
         assert_eq!(
@@ -3514,9 +3515,9 @@ mod tests {
         args.measurement_runs = 3;
         args.warmup_runs = 1;
         let samples = vec![
-            sample_performance_artifact(LookupBackend::Transcript, 90, 100, 900.0, 100.0, 10),
-            sample_performance_artifact(LookupBackend::Transcript, 100, 110, 1_000.0, 90.0, 20),
-            sample_performance_artifact(LookupBackend::Transcript, 110, 120, 1_100.0, 80.0, 30),
+            sample_performance_artifact(LookupBackend::JoltLasso, 90, 100, 900.0, 100.0, 10),
+            sample_performance_artifact(LookupBackend::JoltLasso, 100, 110, 1_000.0, 90.0, 20),
+            sample_performance_artifact(LookupBackend::JoltLasso, 110, 120, 1_100.0, 80.0, 30),
         ];
         let baseline = build_multi_run_baseline(&args, samples).unwrap();
         assert_eq!(baseline.schema_version, MULTI_RUN_SCHEMA_VERSION);
@@ -3592,15 +3593,15 @@ mod tests {
 
     #[test]
     fn lookup_backend_comparison_tracks_same_workload_across_lasso_and_logup() {
-        let transcript = sample_lookup_backend_baseline(LookupBackend::Transcript);
+        let jolt_lasso = sample_lookup_backend_baseline(LookupBackend::JoltLasso);
         let logup = sample_lookup_backend_baseline(LookupBackend::LogUp);
 
-        let comparison = compare_lookup_backend_baselines(&transcript, &logup).unwrap();
+        let comparison = compare_lookup_backend_baselines(&jolt_lasso, &logup).unwrap();
         assert_eq!(
             comparison.schema_version,
             LOOKUP_BACKEND_COMPARISON_SCHEMA_VERSION
         );
-        assert_eq!(comparison.left_lookup_backend, "transcript");
+        assert_eq!(comparison.left_lookup_backend, "jolt-lasso");
         assert_eq!(comparison.right_lookup_backend, "logup");
         assert!(comparison.audit.distinct_lookup_backends);
         assert!(comparison.audit.matching_workload_identity);
@@ -3625,9 +3626,9 @@ mod tests {
 
     #[test]
     fn lookup_backend_comparison_rejects_same_backend_or_workload_mismatch() {
-        let transcript = sample_lookup_backend_baseline(LookupBackend::Transcript);
-        let same_backend = sample_lookup_backend_baseline(LookupBackend::Transcript);
-        assert!(compare_lookup_backend_baselines(&transcript, &same_backend)
+        let jolt_lasso = sample_lookup_backend_baseline(LookupBackend::JoltLasso);
+        let same_backend = sample_lookup_backend_baseline(LookupBackend::JoltLasso);
+        assert!(compare_lookup_backend_baselines(&jolt_lasso, &same_backend)
             .unwrap_err()
             .to_string()
             .contains("distinct lookup_backend"));
@@ -3635,7 +3636,7 @@ mod tests {
         let mut mismatched_workload = sample_lookup_backend_baseline(LookupBackend::LogUp);
         mismatched_workload.workload_sha3_256 = "cd".repeat(32);
         assert!(
-            compare_lookup_backend_baselines(&transcript, &mismatched_workload)
+            compare_lookup_backend_baselines(&jolt_lasso, &mismatched_workload)
                 .unwrap_err()
                 .to_string()
                 .contains("workload_sha3_256")
@@ -3668,7 +3669,7 @@ mod tests {
             baseline_input: None,
             max_regression_percent: 10.0,
             fixture: ProductionFixture::CpuLookup64k,
-            lookup_backend: LookupBackend::Transcript,
+            lookup_backend: LookupBackend::JoltLasso,
         };
         assert_eq!(validate_runner_args(&args), Ok(()));
 
@@ -3736,7 +3737,7 @@ mod tests {
             baseline_input: None,
             max_regression_percent: 10.0,
             fixture: ProductionFixture::CpuLookup64k,
-            lookup_backend: LookupBackend::Transcript,
+            lookup_backend: LookupBackend::JoltLasso,
         };
         let loaded_trace = load_trace_blocks(&args).unwrap();
         let blocks = loaded_trace.blocks;
@@ -3786,7 +3787,7 @@ mod tests {
             baseline_input: None,
             max_regression_percent: 10.0,
             fixture: ProductionFixture::CpuLookup64k,
-            lookup_backend: LookupBackend::Transcript,
+            lookup_backend: LookupBackend::JoltLasso,
         };
         assert!(load_trace_blocks(&synthetic_with_input)
             .unwrap_err()
@@ -3816,7 +3817,7 @@ mod tests {
             baseline_input: None,
             max_regression_percent: 10.0,
             fixture: ProductionFixture::CpuLookup64k,
-            lookup_backend: LookupBackend::Transcript,
+            lookup_backend: LookupBackend::JoltLasso,
         };
         assert!(load_trace_blocks(&trace_file_without_input)
             .unwrap_err()
@@ -3850,7 +3851,7 @@ mod tests {
             baseline_input: None,
             max_regression_percent: 10.0,
             fixture: ProductionFixture::CpuLookup64k,
-            lookup_backend: LookupBackend::Transcript,
+            lookup_backend: LookupBackend::JoltLasso,
         };
         let loaded_trace = load_trace_blocks(&args).unwrap();
         let metadata = loaded_trace.file_metadata.unwrap();
@@ -3910,7 +3911,7 @@ mod tests {
             baseline_input: None,
             max_regression_percent: 10.0,
             fixture: ProductionFixture::CpuLookup64k,
-            lookup_backend: LookupBackend::Transcript,
+            lookup_backend: LookupBackend::JoltLasso,
         };
 
         let loaded = load_trace_blocks(&args).unwrap();
@@ -4246,7 +4247,7 @@ mod tests {
             baseline_input: None,
             max_regression_percent: 10.0,
             fixture: ProductionFixture::CpuLookup64k,
-            lookup_backend: LookupBackend::Transcript,
+            lookup_backend: LookupBackend::JoltLasso,
         };
         let block_counts = normalized_block_counts(&args, 2, false).unwrap();
         let artifact = sample_benchmark_artifact();
@@ -4254,7 +4255,7 @@ mod tests {
         let json = build_manifest_json(&args, &block_counts, 2, None, &artifact, &manifest_path);
 
         assert!(json.contains("\"schema_version\":\"jolt-nova-benchmark-runner-v6\""));
-        assert!(json.contains("\"lookup_backend\":\"transcript\""));
+        assert!(json.contains("\"lookup_backend\":\"jolt-lasso\""));
         assert!(json.contains("\"runner\":\"jolt_nova_final_proof_size_benchmark\""));
         assert!(json.contains("\"trace_source\":\"synthetic\""));
         assert!(json.contains("\"trace_profile\":\"synthetic-noop\""));
@@ -4317,7 +4318,7 @@ mod tests {
             baseline_input: None,
             max_regression_percent: 10.0,
             fixture: ProductionFixture::CpuLookup64k,
-            lookup_backend: LookupBackend::Transcript,
+            lookup_backend: LookupBackend::JoltLasso,
         };
         let artifact = sample_benchmark_artifact();
         let manifest_path = normalized_manifest_output(&args.output, args.manifest_output.as_ref());
@@ -4375,7 +4376,7 @@ mod tests {
             baseline_input: None,
             max_regression_percent: 10.0,
             fixture: ProductionFixture::CpuLookup64k,
-            lookup_backend: LookupBackend::Transcript,
+            lookup_backend: LookupBackend::JoltLasso,
         };
         let artifact = sample_benchmark_artifact();
         let manifest_path = temp_manifest_path("manifest-write", "report.manifest.json");
@@ -4415,7 +4416,7 @@ mod tests {
             baseline_input: None,
             max_regression_percent: 10.0,
             fixture: ProductionFixture::CpuLookup64k,
-            lookup_backend: LookupBackend::Transcript,
+            lookup_backend: LookupBackend::JoltLasso,
         };
         let blocks = build_noop_trace_blocks(2, 3).unwrap();
         let measurements = RunMeasurements {
@@ -4513,7 +4514,7 @@ mod tests {
             baseline_input: None,
             max_regression_percent: 10.0,
             fixture: ProductionFixture::CpuLookup64k,
-            lookup_backend: LookupBackend::Transcript,
+            lookup_backend: LookupBackend::JoltLasso,
         }
     }
 
@@ -4569,7 +4570,7 @@ mod tests {
         prove_ms: u64,
     ) -> Vec<RelationProfileEntry> {
         let lookup_weight = match lookup_backend {
-            LookupBackend::Transcript => 62,
+            LookupBackend::JoltLasso => 62,
             LookupBackend::LogUp => 80,
         };
         let seeds = vec![
@@ -4645,7 +4646,7 @@ mod tests {
         args.lookup_backend = lookup_backend;
         let (prove_ms, total_ms, end_to_end_throughput, proving_throughput, peak_delta_bytes) =
             match lookup_backend {
-                LookupBackend::Transcript => (100, 120, 1_000.0, 90.0, 20),
+                LookupBackend::JoltLasso => (100, 120, 1_000.0, 90.0, 20),
                 LookupBackend::LogUp => (125, 145, 830.0, 72.0, 28),
             };
         let sample = sample_performance_artifact_for_lookup_backend(
