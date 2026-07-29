@@ -1195,3 +1195,30 @@ compatibility alias:
 
 This keeps the Stage 10 recursive transcript structure intact while making the
 public API line up with the Lasso-first roadmap for the next stages.
+
+## Stage 12: Jolt/Lasso receipt and opening capsules
+
+Stage 12 turns the verified Jolt/Lasso receipt and authenticated opening
+metadata into named Nova-side capsule objects. This is still an interface and
+binding stage, not the full in-circuit implementation of the original
+CPU/RAM/Lookup cryptographic relations.
+
+The new public objects are:
+
+- `JoltLassoReceiptCapsule`, which binds the verified lookup receipt digest,
+  trace length, commitment count, ZK/BlindFold metadata, verifier-stage
+  relation digest, recursive transcript root, and per-block binding digest;
+- `JoltLassoOpeningCapsule`, which binds the authenticated opening receipt
+  digest, opening count, and per-block opening digest.
+
+Both capsules have their own transcript roots. The default
+`jolt-lasso-subclaim-v1` path now absorbs those roots into the lookup
+fingerprints and into the recursive lookup verifier transcript capsule. The
+Nova step circuit also exposes witness variables for the two capsule roots and
+checks that they are derived from the corresponding verified Jolt fields.
+
+Security boundary: Stage 12 makes the Lasso receipt/opening boundary explicit
+and tamper-detectable in the recursive boundary digest. It still relies on the
+host-side verified receipt/opening data; implementing the full Lookup, CPU, and
+RAM cryptographic relations inside the recursive verifier is deferred to the
+next stages.

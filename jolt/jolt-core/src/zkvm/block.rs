@@ -1161,6 +1161,35 @@ pub struct JoltExecutionSubclaimRelationBoundary {
     pub witness_subclaim_fingerprints: JoltExecutionSubclaimFingerprints,
 }
 
+/// Explicit receipt capsule for verified Jolt lookup evidence.
+#[cfg(feature = "nova")]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct JoltLassoReceiptCapsule {
+    pub verified_jolt_lookup_receipt_present: [u8; 32],
+    pub verified_jolt_lookup_receipt_digest: [u8; 32],
+    pub verified_jolt_lookup_receipt_trace_length: [u8; 32],
+    pub verified_jolt_lookup_receipt_commitment_count: [u8; 32],
+    pub verified_jolt_lookup_receipt_zk_mode: [u8; 32],
+    pub verified_jolt_blindfold_receipt_digest: [u8; 32],
+    pub verified_jolt_verifier_stage_relation_digest: [u8; 32],
+    pub verified_jolt_verifier_stage_relation_count: [u8; 32],
+    pub verified_jolt_recursive_transcript_root: [u8; 32],
+    pub verified_jolt_recursive_transcript_stage_count: [u8; 32],
+    pub verified_jolt_lookup_block_binding_digest: [u8; 32],
+    pub capsule_root: [u8; 32],
+}
+
+/// Explicit opening capsule for verified Jolt lookup openings.
+#[cfg(feature = "nova")]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct JoltLassoOpeningCapsule {
+    pub verified_jolt_lookup_opening_present: [u8; 32],
+    pub verified_jolt_lookup_opening_receipt_digest: [u8; 32],
+    pub verified_jolt_lookup_opening_count: [u8; 32],
+    pub verified_jolt_lookup_opening_block_digest: [u8; 32],
+    pub capsule_root: [u8; 32],
+}
+
 /// Explicit lookup claim/proof subrelation consumed by the lookup verifier capsule.
 #[cfg(feature = "nova")]
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1206,6 +1235,10 @@ pub struct JoltLookupVerifierTranscriptCapsule {
     pub lookup_logup_query_sum: [u8; 32],
     pub lookup_logup_table_sum: [u8; 32],
     pub lookup_logup_balance_delta: [u8; 32],
+    pub jolt_lasso_receipt_capsule: JoltLassoReceiptCapsule,
+    pub jolt_lasso_receipt_capsule_root: [u8; 32],
+    pub jolt_lasso_opening_capsule: JoltLassoOpeningCapsule,
+    pub jolt_lasso_opening_capsule_root: [u8; 32],
     pub claim_proof_relation: JoltLookupClaimProofRelation,
     pub claim_proof_root: [u8; 32],
     pub challenge_relation: JoltLookupChallengeRelation,
@@ -1483,6 +1516,96 @@ impl JoltLookupSumBalanceRelation {
 }
 
 #[cfg(feature = "nova")]
+impl JoltLassoReceiptCapsule {
+    fn from_scalars(capsule: RecursiveJoltLassoReceiptCapsuleScalars) -> Self {
+        Self {
+            verified_jolt_lookup_receipt_present: nova_scalar_to_storage(
+                capsule.verified_jolt_lookup_receipt_present,
+            ),
+            verified_jolt_lookup_receipt_digest: nova_scalar_to_storage(
+                capsule.verified_jolt_lookup_receipt_digest,
+            ),
+            verified_jolt_lookup_receipt_trace_length: nova_scalar_to_storage(
+                capsule.verified_jolt_lookup_receipt_trace_length,
+            ),
+            verified_jolt_lookup_receipt_commitment_count: nova_scalar_to_storage(
+                capsule.verified_jolt_lookup_receipt_commitment_count,
+            ),
+            verified_jolt_lookup_receipt_zk_mode: nova_scalar_to_storage(
+                capsule.verified_jolt_lookup_receipt_zk_mode,
+            ),
+            verified_jolt_blindfold_receipt_digest: nova_scalar_to_storage(
+                capsule.verified_jolt_blindfold_receipt_digest,
+            ),
+            verified_jolt_verifier_stage_relation_digest: nova_scalar_to_storage(
+                capsule.verified_jolt_verifier_stage_relation_digest,
+            ),
+            verified_jolt_verifier_stage_relation_count: nova_scalar_to_storage(
+                capsule.verified_jolt_verifier_stage_relation_count,
+            ),
+            verified_jolt_recursive_transcript_root: nova_scalar_to_storage(
+                capsule.verified_jolt_recursive_transcript_root,
+            ),
+            verified_jolt_recursive_transcript_stage_count: nova_scalar_to_storage(
+                capsule.verified_jolt_recursive_transcript_stage_count,
+            ),
+            verified_jolt_lookup_block_binding_digest: nova_scalar_to_storage(
+                capsule.verified_jolt_lookup_block_binding_digest,
+            ),
+            capsule_root: nova_scalar_to_storage(capsule.root()),
+        }
+    }
+
+    fn storage_words(&self) -> [[u8; 32]; 12] {
+        [
+            self.verified_jolt_lookup_receipt_present,
+            self.verified_jolt_lookup_receipt_digest,
+            self.verified_jolt_lookup_receipt_trace_length,
+            self.verified_jolt_lookup_receipt_commitment_count,
+            self.verified_jolt_lookup_receipt_zk_mode,
+            self.verified_jolt_blindfold_receipt_digest,
+            self.verified_jolt_verifier_stage_relation_digest,
+            self.verified_jolt_verifier_stage_relation_count,
+            self.verified_jolt_recursive_transcript_root,
+            self.verified_jolt_recursive_transcript_stage_count,
+            self.verified_jolt_lookup_block_binding_digest,
+            self.capsule_root,
+        ]
+    }
+}
+
+#[cfg(feature = "nova")]
+impl JoltLassoOpeningCapsule {
+    fn from_scalars(capsule: RecursiveJoltLassoOpeningCapsuleScalars) -> Self {
+        Self {
+            verified_jolt_lookup_opening_present: nova_scalar_to_storage(
+                capsule.verified_jolt_lookup_opening_present,
+            ),
+            verified_jolt_lookup_opening_receipt_digest: nova_scalar_to_storage(
+                capsule.verified_jolt_lookup_opening_receipt_digest,
+            ),
+            verified_jolt_lookup_opening_count: nova_scalar_to_storage(
+                capsule.verified_jolt_lookup_opening_count,
+            ),
+            verified_jolt_lookup_opening_block_digest: nova_scalar_to_storage(
+                capsule.verified_jolt_lookup_opening_block_digest,
+            ),
+            capsule_root: nova_scalar_to_storage(capsule.root()),
+        }
+    }
+
+    fn storage_words(&self) -> [[u8; 32]; 5] {
+        [
+            self.verified_jolt_lookup_opening_present,
+            self.verified_jolt_lookup_opening_receipt_digest,
+            self.verified_jolt_lookup_opening_count,
+            self.verified_jolt_lookup_opening_block_digest,
+            self.capsule_root,
+        ]
+    }
+}
+
+#[cfg(feature = "nova")]
 impl JoltLookupVerifierTranscriptCapsule {
     fn from_scalars(transcript: RecursiveLookupVerifierTranscriptScalars) -> Self {
         let claim_proof_relation =
@@ -1491,6 +1614,10 @@ impl JoltLookupVerifierTranscriptCapsule {
             JoltLookupChallengeRelation::from_scalars(transcript.challenge_relation());
         let sum_balance_relation =
             JoltLookupSumBalanceRelation::from_scalars(transcript.sum_balance_relation());
+        let jolt_lasso_receipt_capsule =
+            JoltLassoReceiptCapsule::from_scalars(transcript.jolt_lasso_receipt_capsule);
+        let jolt_lasso_opening_capsule =
+            JoltLassoOpeningCapsule::from_scalars(transcript.jolt_lasso_opening_capsule);
         Self {
             lookup_backend_selector: nova_scalar_to_storage(transcript.lookup_backend_selector),
             lookup_claim_fingerprint: nova_scalar_to_storage(transcript.lookup_claim_fingerprint),
@@ -1509,6 +1636,10 @@ impl JoltLookupVerifierTranscriptCapsule {
             lookup_logup_balance_delta: nova_scalar_to_storage(
                 transcript.lookup_logup_balance_delta(),
             ),
+            jolt_lasso_receipt_capsule_root: jolt_lasso_receipt_capsule.capsule_root,
+            jolt_lasso_receipt_capsule,
+            jolt_lasso_opening_capsule_root: jolt_lasso_opening_capsule.capsule_root,
+            jolt_lasso_opening_capsule,
             claim_proof_root: claim_proof_relation.relation_root,
             claim_proof_relation,
             challenge_root: challenge_relation.relation_root,
@@ -1519,7 +1650,7 @@ impl JoltLookupVerifierTranscriptCapsule {
         }
     }
 
-    fn storage_words(&self) -> [[u8; 32]; 13] {
+    fn storage_words(&self) -> [[u8; 32]; 15] {
         [
             self.lookup_backend_selector,
             self.lookup_claim_fingerprint,
@@ -1530,6 +1661,8 @@ impl JoltLookupVerifierTranscriptCapsule {
             self.lookup_logup_query_sum,
             self.lookup_logup_table_sum,
             self.lookup_logup_balance_delta,
+            self.jolt_lasso_receipt_capsule_root,
+            self.jolt_lasso_opening_capsule_root,
             self.claim_proof_root,
             self.challenge_root,
             self.sum_balance_root,
@@ -2553,6 +2686,10 @@ const NOVA_TRANSCRIPT_DOMAIN_LOOKUP: &str = "lookup";
 #[cfg(feature = "nova")]
 const NOVA_TRANSCRIPT_DOMAIN_LOOKUP_LOGUP: &str = "lookup-logup";
 #[cfg(feature = "nova")]
+const NOVA_TRANSCRIPT_DOMAIN_JOLT_LASSO_RECEIPT_CAPSULE: &str = "jolt-lasso-receipt-capsule";
+#[cfg(feature = "nova")]
+const NOVA_TRANSCRIPT_DOMAIN_JOLT_LASSO_OPENING_CAPSULE: &str = "jolt-lasso-opening-capsule";
+#[cfg(feature = "nova")]
 const NOVA_TRANSCRIPT_DOMAIN_CPU: &str = "cpu";
 #[cfg(feature = "nova")]
 const NOVA_TRANSCRIPT_DOMAIN_RECURSIVE_VERIFIER_BOUNDARY: &str = "recursive-verifier-boundary";
@@ -2653,6 +2790,8 @@ struct RecursiveLookupVerifierTranscriptScalars {
     lookup_logup_denominator_retry_count: NovaScalar,
     lookup_logup_query_sum: NovaScalar,
     lookup_logup_table_sum: NovaScalar,
+    jolt_lasso_receipt_capsule: RecursiveJoltLassoReceiptCapsuleScalars,
+    jolt_lasso_opening_capsule: RecursiveJoltLassoOpeningCapsuleScalars,
 }
 
 #[cfg(feature = "nova")]
@@ -2747,9 +2886,124 @@ impl RecursiveLookupSumBalanceRelationScalars {
 }
 
 #[cfg(feature = "nova")]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct RecursiveJoltLassoReceiptCapsuleScalars {
+    verified_jolt_lookup_receipt_present: NovaScalar,
+    verified_jolt_lookup_receipt_digest: NovaScalar,
+    verified_jolt_lookup_receipt_trace_length: NovaScalar,
+    verified_jolt_lookup_receipt_commitment_count: NovaScalar,
+    verified_jolt_lookup_receipt_zk_mode: NovaScalar,
+    verified_jolt_blindfold_receipt_digest: NovaScalar,
+    verified_jolt_verifier_stage_relation_digest: NovaScalar,
+    verified_jolt_verifier_stage_relation_count: NovaScalar,
+    verified_jolt_recursive_transcript_root: NovaScalar,
+    verified_jolt_recursive_transcript_stage_count: NovaScalar,
+    verified_jolt_lookup_block_binding_digest: NovaScalar,
+}
+
+#[cfg(feature = "nova")]
+impl RecursiveJoltLassoReceiptCapsuleScalars {
+    fn root(&self) -> NovaScalar {
+        nova_transcript_delta(
+            NOVA_TRANSCRIPT_DOMAIN_JOLT_LASSO_RECEIPT_CAPSULE,
+            [
+                (
+                    "verified_jolt_lookup_receipt_present",
+                    self.verified_jolt_lookup_receipt_present,
+                ),
+                (
+                    "verified_jolt_lookup_receipt_digest",
+                    self.verified_jolt_lookup_receipt_digest,
+                ),
+                (
+                    "verified_jolt_lookup_receipt_trace_length",
+                    self.verified_jolt_lookup_receipt_trace_length,
+                ),
+                (
+                    "verified_jolt_lookup_receipt_commitment_count",
+                    self.verified_jolt_lookup_receipt_commitment_count,
+                ),
+                (
+                    "verified_jolt_lookup_receipt_zk_mode",
+                    self.verified_jolt_lookup_receipt_zk_mode,
+                ),
+                (
+                    "verified_jolt_blindfold_receipt_digest",
+                    self.verified_jolt_blindfold_receipt_digest,
+                ),
+                (
+                    "verified_jolt_verifier_stage_relation_digest",
+                    self.verified_jolt_verifier_stage_relation_digest,
+                ),
+                (
+                    "verified_jolt_verifier_stage_relation_count",
+                    self.verified_jolt_verifier_stage_relation_count,
+                ),
+                (
+                    "verified_jolt_recursive_transcript_root",
+                    self.verified_jolt_recursive_transcript_root,
+                ),
+                (
+                    "verified_jolt_recursive_transcript_stage_count",
+                    self.verified_jolt_recursive_transcript_stage_count,
+                ),
+                (
+                    "verified_jolt_lookup_block_binding_digest",
+                    self.verified_jolt_lookup_block_binding_digest,
+                ),
+            ],
+        )
+    }
+}
+
+#[cfg(feature = "nova")]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct RecursiveJoltLassoOpeningCapsuleScalars {
+    verified_jolt_lookup_opening_present: NovaScalar,
+    verified_jolt_lookup_opening_receipt_digest: NovaScalar,
+    verified_jolt_lookup_opening_count: NovaScalar,
+    verified_jolt_lookup_opening_block_digest: NovaScalar,
+}
+
+#[cfg(feature = "nova")]
+impl RecursiveJoltLassoOpeningCapsuleScalars {
+    fn root(&self) -> NovaScalar {
+        nova_transcript_delta(
+            NOVA_TRANSCRIPT_DOMAIN_JOLT_LASSO_OPENING_CAPSULE,
+            [
+                (
+                    "verified_jolt_lookup_opening_present",
+                    self.verified_jolt_lookup_opening_present,
+                ),
+                (
+                    "verified_jolt_lookup_opening_receipt_digest",
+                    self.verified_jolt_lookup_opening_receipt_digest,
+                ),
+                (
+                    "verified_jolt_lookup_opening_count",
+                    self.verified_jolt_lookup_opening_count,
+                ),
+                (
+                    "verified_jolt_lookup_opening_block_digest",
+                    self.verified_jolt_lookup_opening_block_digest,
+                ),
+            ],
+        )
+    }
+}
+
+#[cfg(feature = "nova")]
 impl RecursiveLookupVerifierTranscriptScalars {
     fn lookup_logup_balance_delta(&self) -> NovaScalar {
         self.lookup_logup_query_sum - self.lookup_logup_table_sum
+    }
+
+    fn jolt_lasso_receipt_capsule_root(&self) -> NovaScalar {
+        self.jolt_lasso_receipt_capsule.root()
+    }
+
+    fn jolt_lasso_opening_capsule_root(&self) -> NovaScalar {
+        self.jolt_lasso_opening_capsule.root()
     }
 
     fn claim_proof_relation(&self) -> RecursiveLookupClaimProofRelationScalars {
@@ -2795,6 +3049,14 @@ impl RecursiveLookupVerifierTranscriptScalars {
                 ("claim_proof_root", self.claim_proof_root()),
                 ("challenge_root", self.challenge_root()),
                 ("sum_balance_root", self.sum_balance_root()),
+                (
+                    "jolt_lasso_receipt_capsule_root",
+                    self.jolt_lasso_receipt_capsule_root(),
+                ),
+                (
+                    "jolt_lasso_opening_capsule_root",
+                    self.jolt_lasso_opening_capsule_root(),
+                ),
             ],
         )
     }
@@ -3394,6 +3656,47 @@ impl BlockFoldStatement {
         )
     }
 
+    fn jolt_lasso_receipt_capsule(&self) -> RecursiveJoltLassoReceiptCapsuleScalars {
+        RecursiveJoltLassoReceiptCapsuleScalars {
+            verified_jolt_lookup_receipt_present: self.verified_jolt_lookup_receipt_present,
+            verified_jolt_lookup_receipt_digest: self.verified_jolt_lookup_receipt_digest,
+            verified_jolt_lookup_receipt_trace_length: self
+                .verified_jolt_lookup_receipt_trace_length,
+            verified_jolt_lookup_receipt_commitment_count: self
+                .verified_jolt_lookup_receipt_commitment_count,
+            verified_jolt_lookup_receipt_zk_mode: self.verified_jolt_lookup_receipt_zk_mode,
+            verified_jolt_blindfold_receipt_digest: self.verified_jolt_blindfold_receipt_digest,
+            verified_jolt_verifier_stage_relation_digest: self
+                .verified_jolt_verifier_stage_relation_digest,
+            verified_jolt_verifier_stage_relation_count: self
+                .verified_jolt_verifier_stage_relation_count,
+            verified_jolt_recursive_transcript_root: self.verified_jolt_recursive_transcript_root,
+            verified_jolt_recursive_transcript_stage_count: self
+                .verified_jolt_recursive_transcript_stage_count,
+            verified_jolt_lookup_block_binding_digest: self
+                .verified_jolt_lookup_block_binding_digest,
+        }
+    }
+
+    fn jolt_lasso_opening_capsule(&self) -> RecursiveJoltLassoOpeningCapsuleScalars {
+        RecursiveJoltLassoOpeningCapsuleScalars {
+            verified_jolt_lookup_opening_present: self.verified_jolt_lookup_opening_present,
+            verified_jolt_lookup_opening_receipt_digest: self
+                .verified_jolt_lookup_opening_receipt_digest,
+            verified_jolt_lookup_opening_count: self.verified_jolt_lookup_opening_count,
+            verified_jolt_lookup_opening_block_digest: self
+                .verified_jolt_lookup_opening_block_digest,
+        }
+    }
+
+    fn jolt_lasso_receipt_capsule_root(&self) -> NovaScalar {
+        self.jolt_lasso_receipt_capsule().root()
+    }
+
+    fn jolt_lasso_opening_capsule_root(&self) -> NovaScalar {
+        self.jolt_lasso_opening_capsule().root()
+    }
+
     fn recursive_lookup_verifier_transcript_with_subclaims_and_selector(
         &self,
         subclaims: BlockFoldSubclaimFingerprints,
@@ -3408,6 +3711,8 @@ impl BlockFoldStatement {
             lookup_logup_denominator_retry_count: self.lookup_logup_denominator_retry_count,
             lookup_logup_query_sum: self.lookup_logup_query_sum,
             lookup_logup_table_sum: self.lookup_logup_table_sum,
+            jolt_lasso_receipt_capsule: self.jolt_lasso_receipt_capsule(),
+            jolt_lasso_opening_capsule: self.jolt_lasso_opening_capsule(),
         }
     }
 
@@ -3698,6 +4003,14 @@ impl BlockFoldStatement {
                     "verified_jolt_lookup_opening_block_digest",
                     self.verified_jolt_lookup_opening_block_digest,
                 ),
+                (
+                    "jolt_lasso_receipt_capsule_root",
+                    self.jolt_lasso_receipt_capsule_root(),
+                ),
+                (
+                    "jolt_lasso_opening_capsule_root",
+                    self.jolt_lasso_opening_capsule_root(),
+                ),
             ],
         )
     }
@@ -3794,6 +4107,14 @@ impl BlockFoldStatement {
                 (
                     "verified_jolt_lookup_opening_block_digest",
                     self.verified_jolt_lookup_opening_block_digest,
+                ),
+                (
+                    "jolt_lasso_receipt_capsule_root",
+                    self.jolt_lasso_receipt_capsule_root(),
+                ),
+                (
+                    "jolt_lasso_opening_capsule_root",
+                    self.jolt_lasso_opening_capsule_root(),
                 ),
             ],
         )
@@ -3952,6 +4273,8 @@ struct JoltNovaStepWitness {
     verified_jolt_lookup_opening_receipt_digest: NovaScalar,
     verified_jolt_lookup_opening_count: NovaScalar,
     verified_jolt_lookup_opening_block_digest: NovaScalar,
+    jolt_lasso_receipt_capsule_root: NovaScalar,
+    jolt_lasso_opening_capsule_root: NovaScalar,
     lookup_backend_selector: NovaScalar,
     lookup_claim_fingerprint: NovaScalar,
     r1cs_rows_checked: NovaScalar,
@@ -4003,6 +4326,8 @@ impl JoltNovaStepWitness {
     {
         let lookup_backend_selector = subclaim_backend.lookup_backend_selector();
         let subclaims = subclaim_backend.subclaim_fingerprints(&statement);
+        let jolt_lasso_receipt_capsule_root = statement.jolt_lasso_receipt_capsule_root();
+        let jolt_lasso_opening_capsule_root = statement.jolt_lasso_opening_capsule_root();
         let recursive_verifier_boundary_fingerprint = statement
             .recursive_verifier_boundary_fingerprint_with_subclaims_and_selector(
                 subclaims,
@@ -4091,6 +4416,8 @@ impl JoltNovaStepWitness {
             verified_jolt_lookup_opening_count: statement.verified_jolt_lookup_opening_count,
             verified_jolt_lookup_opening_block_digest: statement
                 .verified_jolt_lookup_opening_block_digest,
+            jolt_lasso_receipt_capsule_root,
+            jolt_lasso_opening_capsule_root,
             lookup_backend_selector,
             lookup_claim_fingerprint: subclaims.lookup,
             r1cs_rows_checked: statement.r1cs_rows_checked,
@@ -4548,6 +4875,16 @@ impl nova_snark::traits::circuit::StepCircuit<NovaScalar> for JoltNovaStepCircui
             cs,
             "verified Jolt lookup opening block digest",
             self.witness.verified_jolt_lookup_opening_block_digest,
+        )?;
+        let jolt_lasso_receipt_capsule_root = alloc_nova_witness(
+            cs,
+            "Jolt Lasso receipt capsule root",
+            self.witness.jolt_lasso_receipt_capsule_root,
+        )?;
+        let jolt_lasso_opening_capsule_root = alloc_nova_witness(
+            cs,
+            "Jolt Lasso opening capsule root",
+            self.witness.jolt_lasso_opening_capsule_root,
         )?;
         let lookup_backend_selector = alloc_nova_witness(
             cs,
@@ -5143,6 +5480,16 @@ impl nova_snark::traits::circuit::StepCircuit<NovaScalar> for JoltNovaStepCircui
             NOVA_TRANSCRIPT_DOMAIN_RECURSIVE_VERIFIER_LOOKUP_GADGET,
             "sum_balance_root",
         );
+        let recursive_lookup_gadget_receipt_capsule_root_challenge =
+            nova_transcript_challenge_scalar(
+                NOVA_TRANSCRIPT_DOMAIN_RECURSIVE_VERIFIER_LOOKUP_GADGET,
+                "jolt_lasso_receipt_capsule_root",
+            );
+        let recursive_lookup_gadget_opening_capsule_root_challenge =
+            nova_transcript_challenge_scalar(
+                NOVA_TRANSCRIPT_DOMAIN_RECURSIVE_VERIFIER_LOOKUP_GADGET,
+                "jolt_lasso_opening_capsule_root",
+            );
         let recursive_lookup_claim_proof_selector_challenge = nova_transcript_challenge_scalar(
             NOVA_TRANSCRIPT_DOMAIN_RECURSIVE_VERIFIER_LOOKUP_CLAIM_PROOF,
             "lookup_backend_selector",
@@ -5464,6 +5811,18 @@ impl nova_snark::traits::circuit::StepCircuit<NovaScalar> for JoltNovaStepCircui
                             * (recursive_lookup_gadget_table_sum_challenge
                                 - recursive_lookup_gadget_balance_challenge),
                         lookup_logup_table_sum.get_variable(),
+                    )
+                    + (
+                        recursive_capsule_semantic_challenge
+                            * recursive_capsule_lookup_gadget_challenge
+                            * recursive_lookup_gadget_receipt_capsule_root_challenge,
+                        jolt_lasso_receipt_capsule_root.get_variable(),
+                    )
+                    + (
+                        recursive_capsule_semantic_challenge
+                            * recursive_capsule_lookup_gadget_challenge
+                            * recursive_lookup_gadget_opening_capsule_root_challenge,
+                        jolt_lasso_opening_capsule_root.get_variable(),
                     )
             },
             |lc| lc + CS::one(),
@@ -5793,6 +6152,114 @@ impl nova_snark::traits::circuit::StepCircuit<NovaScalar> for JoltNovaStepCircui
         }
 
         cs.enforce(
+            || "Jolt Lasso receipt capsule root binds verified receipt fields",
+            |lc| {
+                lc + (
+                    nova_transcript_challenge_scalar(
+                        NOVA_TRANSCRIPT_DOMAIN_JOLT_LASSO_RECEIPT_CAPSULE,
+                        "verified_jolt_lookup_receipt_present",
+                    ),
+                    verified_jolt_lookup_receipt_present.get_variable(),
+                ) + (
+                    nova_transcript_challenge_scalar(
+                        NOVA_TRANSCRIPT_DOMAIN_JOLT_LASSO_RECEIPT_CAPSULE,
+                        "verified_jolt_lookup_receipt_digest",
+                    ),
+                    verified_jolt_lookup_receipt_digest.get_variable(),
+                ) + (
+                    nova_transcript_challenge_scalar(
+                        NOVA_TRANSCRIPT_DOMAIN_JOLT_LASSO_RECEIPT_CAPSULE,
+                        "verified_jolt_lookup_receipt_trace_length",
+                    ),
+                    verified_jolt_lookup_receipt_trace_length.get_variable(),
+                ) + (
+                    nova_transcript_challenge_scalar(
+                        NOVA_TRANSCRIPT_DOMAIN_JOLT_LASSO_RECEIPT_CAPSULE,
+                        "verified_jolt_lookup_receipt_commitment_count",
+                    ),
+                    verified_jolt_lookup_receipt_commitment_count.get_variable(),
+                ) + (
+                    nova_transcript_challenge_scalar(
+                        NOVA_TRANSCRIPT_DOMAIN_JOLT_LASSO_RECEIPT_CAPSULE,
+                        "verified_jolt_lookup_receipt_zk_mode",
+                    ),
+                    verified_jolt_lookup_receipt_zk_mode.get_variable(),
+                ) + (
+                    nova_transcript_challenge_scalar(
+                        NOVA_TRANSCRIPT_DOMAIN_JOLT_LASSO_RECEIPT_CAPSULE,
+                        "verified_jolt_blindfold_receipt_digest",
+                    ),
+                    verified_jolt_blindfold_receipt_digest.get_variable(),
+                ) + (
+                    nova_transcript_challenge_scalar(
+                        NOVA_TRANSCRIPT_DOMAIN_JOLT_LASSO_RECEIPT_CAPSULE,
+                        "verified_jolt_verifier_stage_relation_digest",
+                    ),
+                    verified_jolt_verifier_stage_relation_digest.get_variable(),
+                ) + (
+                    nova_transcript_challenge_scalar(
+                        NOVA_TRANSCRIPT_DOMAIN_JOLT_LASSO_RECEIPT_CAPSULE,
+                        "verified_jolt_verifier_stage_relation_count",
+                    ),
+                    verified_jolt_verifier_stage_relation_count.get_variable(),
+                ) + (
+                    nova_transcript_challenge_scalar(
+                        NOVA_TRANSCRIPT_DOMAIN_JOLT_LASSO_RECEIPT_CAPSULE,
+                        "verified_jolt_recursive_transcript_root",
+                    ),
+                    verified_jolt_recursive_transcript_root.get_variable(),
+                ) + (
+                    nova_transcript_challenge_scalar(
+                        NOVA_TRANSCRIPT_DOMAIN_JOLT_LASSO_RECEIPT_CAPSULE,
+                        "verified_jolt_recursive_transcript_stage_count",
+                    ),
+                    verified_jolt_recursive_transcript_stage_count.get_variable(),
+                ) + (
+                    nova_transcript_challenge_scalar(
+                        NOVA_TRANSCRIPT_DOMAIN_JOLT_LASSO_RECEIPT_CAPSULE,
+                        "verified_jolt_lookup_block_binding_digest",
+                    ),
+                    verified_jolt_lookup_block_binding_digest.get_variable(),
+                )
+            },
+            |lc| lc + CS::one(),
+            |lc| lc + jolt_lasso_receipt_capsule_root.get_variable(),
+        );
+
+        cs.enforce(
+            || "Jolt Lasso opening capsule root binds verified opening fields",
+            |lc| {
+                lc + (
+                    nova_transcript_challenge_scalar(
+                        NOVA_TRANSCRIPT_DOMAIN_JOLT_LASSO_OPENING_CAPSULE,
+                        "verified_jolt_lookup_opening_present",
+                    ),
+                    verified_jolt_lookup_opening_present.get_variable(),
+                ) + (
+                    nova_transcript_challenge_scalar(
+                        NOVA_TRANSCRIPT_DOMAIN_JOLT_LASSO_OPENING_CAPSULE,
+                        "verified_jolt_lookup_opening_receipt_digest",
+                    ),
+                    verified_jolt_lookup_opening_receipt_digest.get_variable(),
+                ) + (
+                    nova_transcript_challenge_scalar(
+                        NOVA_TRANSCRIPT_DOMAIN_JOLT_LASSO_OPENING_CAPSULE,
+                        "verified_jolt_lookup_opening_count",
+                    ),
+                    verified_jolt_lookup_opening_count.get_variable(),
+                ) + (
+                    nova_transcript_challenge_scalar(
+                        NOVA_TRANSCRIPT_DOMAIN_JOLT_LASSO_OPENING_CAPSULE,
+                        "verified_jolt_lookup_opening_block_digest",
+                    ),
+                    verified_jolt_lookup_opening_block_digest.get_variable(),
+                )
+            },
+            |lc| lc + CS::one(),
+            |lc| lc + jolt_lasso_opening_capsule_root.get_variable(),
+        );
+
+        cs.enforce(
             || "LogUp query and table sums balance",
             |lc| lc + lookup_logup_query_sum.get_variable() - lookup_logup_table_sum.get_variable(),
             |lc| lc + lookup_backend_selector.get_variable(),
@@ -6009,6 +6476,24 @@ impl nova_snark::traits::circuit::StepCircuit<NovaScalar> for JoltNovaStepCircui
                         "verified_jolt_lookup_opening_block_digest",
                     ),
                     verified_jolt_lookup_opening_block_digest.get_variable(),
+                ) + (
+                    nova_transcript_challenge_scalar(
+                        NOVA_TRANSCRIPT_DOMAIN_LOOKUP_LOGUP,
+                        "jolt_lasso_receipt_capsule_root",
+                    ) - nova_transcript_challenge_scalar(
+                        NOVA_TRANSCRIPT_DOMAIN_LOOKUP,
+                        "jolt_lasso_receipt_capsule_root",
+                    ),
+                    jolt_lasso_receipt_capsule_root.get_variable(),
+                ) + (
+                    nova_transcript_challenge_scalar(
+                        NOVA_TRANSCRIPT_DOMAIN_LOOKUP_LOGUP,
+                        "jolt_lasso_opening_capsule_root",
+                    ) - nova_transcript_challenge_scalar(
+                        NOVA_TRANSCRIPT_DOMAIN_LOOKUP,
+                        "jolt_lasso_opening_capsule_root",
+                    ),
+                    jolt_lasso_opening_capsule_root.get_variable(),
                 )
             },
             |lc| lc + lookup_backend_selector.get_variable(),
@@ -6146,6 +6631,20 @@ impl nova_snark::traits::circuit::StepCircuit<NovaScalar> for JoltNovaStepCircui
                             "verified_jolt_lookup_opening_block_digest",
                         ),
                         verified_jolt_lookup_opening_block_digest.get_variable(),
+                    )
+                    - (
+                        nova_transcript_challenge_scalar(
+                            NOVA_TRANSCRIPT_DOMAIN_LOOKUP,
+                            "jolt_lasso_receipt_capsule_root",
+                        ),
+                        jolt_lasso_receipt_capsule_root.get_variable(),
+                    )
+                    - (
+                        nova_transcript_challenge_scalar(
+                            NOVA_TRANSCRIPT_DOMAIN_LOOKUP,
+                            "jolt_lasso_opening_capsule_root",
+                        ),
+                        jolt_lasso_opening_capsule_root.get_variable(),
                     )
             },
         );
@@ -6388,6 +6887,12 @@ impl nova_snark::traits::circuit::StepCircuit<NovaScalar> for JoltNovaStepCircui
                 ) + (
                     recursive_lookup_gadget_sum_balance_root_challenge,
                     recursive_lookup_sum_balance_root.get_variable(),
+                ) + (
+                    recursive_lookup_gadget_receipt_capsule_root_challenge,
+                    jolt_lasso_receipt_capsule_root.get_variable(),
+                ) + (
+                    recursive_lookup_gadget_opening_capsule_root_challenge,
+                    jolt_lasso_opening_capsule_root.get_variable(),
                 )
             },
             |lc| lc + CS::one(),
@@ -11459,6 +11964,16 @@ fn update_jolt_execution_subclaim_fingerprints(
 }
 
 #[cfg(feature = "nova")]
+fn update_jolt_lasso_receipt_capsule(hasher: &mut Sha3_256, capsule: &JoltLassoReceiptCapsule) {
+    update_storage_words(hasher, &capsule.storage_words());
+}
+
+#[cfg(feature = "nova")]
+fn update_jolt_lasso_opening_capsule(hasher: &mut Sha3_256, capsule: &JoltLassoOpeningCapsule) {
+    update_storage_words(hasher, &capsule.storage_words());
+}
+
+#[cfg(feature = "nova")]
 fn update_jolt_lookup_claim_proof_relation(
     hasher: &mut Sha3_256,
     relation: &JoltLookupClaimProofRelation,
@@ -11488,6 +12003,8 @@ fn update_jolt_lookup_verifier_transcript_capsule(
     capsule: &JoltLookupVerifierTranscriptCapsule,
 ) {
     update_storage_words(hasher, &capsule.storage_words());
+    update_jolt_lasso_receipt_capsule(hasher, &capsule.jolt_lasso_receipt_capsule);
+    update_jolt_lasso_opening_capsule(hasher, &capsule.jolt_lasso_opening_capsule);
     update_jolt_lookup_claim_proof_relation(hasher, &capsule.claim_proof_relation);
     update_jolt_lookup_challenge_relation(hasher, &capsule.challenge_relation);
     update_jolt_lookup_sum_balance_relation(hasher, &capsule.sum_balance_relation);
@@ -15226,6 +15743,164 @@ mod tests {
 
     #[cfg(feature = "nova")]
     #[test]
+    fn nova_jolt_lasso_receipt_capsule_tracks_verified_receipt_fields() {
+        let bytecode = BytecodePreprocessing::default();
+        let block = trace_block(0, boundary(0, 0), boundary(4, 0));
+        let blocks = [block];
+        let receipt = VerifiedJoltLookupProofReceipt::new_for_test(31, 8);
+        let pipeline =
+            BlockProofPipeline::<_, ark_bn254::Fr, MockFoldingBackend>::
+                with_backend_and_verified_jolt_lookup_receipt(
+                    [9u8; 32],
+                    MockFoldingBackend,
+                    receipt,
+                );
+
+        let output = pipeline.prove_blocks(&bytecode, &blocks).unwrap();
+        let fold_input = &output.fold_inputs[0];
+        let statement = BlockFoldStatement::from_fold_input(fold_input);
+        let receipt_capsule =
+            JoltLassoReceiptCapsule::from_scalars(statement.jolt_lasso_receipt_capsule());
+        let boundary = build_jolt_recursive_verifier_relation_boundary(
+            &NovaFoldConfig::default(),
+            None,
+            fold_input,
+        )
+        .unwrap();
+        let lookup_transcript = &boundary.verifier_capsule.lookup_verifier_transcript;
+
+        assert_eq!(
+            receipt_capsule.verified_jolt_lookup_receipt_present,
+            nova_scalar_to_storage(NovaScalar::from(1))
+        );
+        assert_eq!(
+            receipt_capsule.verified_jolt_lookup_receipt_digest,
+            nova_scalar_to_storage(statement.verified_jolt_lookup_receipt_digest)
+        );
+        assert_eq!(
+            receipt_capsule.verified_jolt_verifier_stage_relation_digest,
+            nova_scalar_to_storage(statement.verified_jolt_verifier_stage_relation_digest)
+        );
+        assert_eq!(
+            receipt_capsule.verified_jolt_recursive_transcript_root,
+            nova_scalar_to_storage(statement.verified_jolt_recursive_transcript_root)
+        );
+        assert_eq!(
+            receipt_capsule.verified_jolt_lookup_block_binding_digest,
+            nova_scalar_to_storage(statement.verified_jolt_lookup_block_binding_digest)
+        );
+        assert_eq!(
+            receipt_capsule.capsule_root,
+            nova_scalar_to_storage(statement.jolt_lasso_receipt_capsule_root())
+        );
+        assert_eq!(
+            lookup_transcript.jolt_lasso_receipt_capsule,
+            receipt_capsule
+        );
+        assert_eq!(
+            lookup_transcript.jolt_lasso_receipt_capsule_root,
+            receipt_capsule.capsule_root
+        );
+        assert_ne!(receipt_capsule.capsule_root, [0u8; 32]);
+        assert!(boundary.verify_digest());
+
+        let mut tampered_field = boundary.clone();
+        tampered_field
+            .verifier_capsule
+            .lookup_verifier_transcript
+            .jolt_lasso_receipt_capsule
+            .verified_jolt_lookup_receipt_digest[0] ^= 1;
+        assert!(!tampered_field.verify_digest());
+
+        let mut tampered_root = boundary.clone();
+        tampered_root
+            .verifier_capsule
+            .lookup_verifier_transcript
+            .jolt_lasso_receipt_capsule_root[0] ^= 1;
+        assert!(!tampered_root.verify_digest());
+    }
+
+    #[cfg(all(feature = "nova", not(feature = "zk")))]
+    #[test]
+    fn nova_jolt_lasso_opening_capsule_tracks_authenticated_openings() {
+        let block0 = trace_block(0, boundary(0, 0), boundary(2, 0));
+        let block1 = trace_block(1, block0.end_state.clone(), boundary(4, 0));
+        let blocks = [block0, block1];
+        let bytecode = bytecode_for_blocks(&blocks);
+        let opening_receipt =
+            test_lookup_opening_receipt(&bytecode, &blocks, 8, false, false, false, false, false);
+        let receipt =
+            verify_jolt_lookup_block_openings(&bytecode, &blocks, &opening_receipt).unwrap();
+        let pipeline =
+            BlockProofPipeline::<_, ark_bn254::Fr, MockFoldingBackend>::
+                with_backend_and_verified_jolt_lookup_block_opening_receipt(
+                    [9u8; 32],
+                    MockFoldingBackend,
+                    receipt,
+                );
+
+        let output = pipeline.prove_blocks(&bytecode, &blocks).unwrap();
+        let fold_input = &output.fold_inputs[0];
+        let statement = BlockFoldStatement::from_fold_input(fold_input);
+        let opening_capsule =
+            JoltLassoOpeningCapsule::from_scalars(statement.jolt_lasso_opening_capsule());
+        let boundary = build_jolt_recursive_verifier_relation_boundary(
+            &NovaFoldConfig::default(),
+            None,
+            fold_input,
+        )
+        .unwrap();
+        let lookup_transcript = &boundary.verifier_capsule.lookup_verifier_transcript;
+
+        assert_eq!(
+            opening_capsule.verified_jolt_lookup_opening_present,
+            nova_scalar_to_storage(NovaScalar::from(1))
+        );
+        assert_eq!(
+            opening_capsule.verified_jolt_lookup_opening_receipt_digest,
+            nova_scalar_to_storage(statement.verified_jolt_lookup_opening_receipt_digest)
+        );
+        assert_eq!(
+            opening_capsule.verified_jolt_lookup_opening_count,
+            nova_scalar_to_storage(statement.verified_jolt_lookup_opening_count)
+        );
+        assert_eq!(
+            opening_capsule.verified_jolt_lookup_opening_block_digest,
+            nova_scalar_to_storage(statement.verified_jolt_lookup_opening_block_digest)
+        );
+        assert_eq!(
+            opening_capsule.capsule_root,
+            nova_scalar_to_storage(statement.jolt_lasso_opening_capsule_root())
+        );
+        assert_eq!(
+            lookup_transcript.jolt_lasso_opening_capsule,
+            opening_capsule
+        );
+        assert_eq!(
+            lookup_transcript.jolt_lasso_opening_capsule_root,
+            opening_capsule.capsule_root
+        );
+        assert_ne!(opening_capsule.capsule_root, [0u8; 32]);
+        assert!(boundary.verify_digest());
+
+        let mut tampered_field = boundary.clone();
+        tampered_field
+            .verifier_capsule
+            .lookup_verifier_transcript
+            .jolt_lasso_opening_capsule
+            .verified_jolt_lookup_opening_block_digest[0] ^= 1;
+        assert!(!tampered_field.verify_digest());
+
+        let mut tampered_root = boundary.clone();
+        tampered_root
+            .verifier_capsule
+            .lookup_verifier_transcript
+            .jolt_lasso_opening_capsule_root[0] ^= 1;
+        assert!(!tampered_root.verify_digest());
+    }
+
+    #[cfg(feature = "nova")]
+    #[test]
     fn nova_step_circuit_rejects_unused_lookahead_with_digest() {
         let bytecode = BytecodePreprocessing::default();
         let block0 = trace_block(0, boundary(0, 0), boundary(2, 0));
@@ -16782,6 +17457,27 @@ mod tests {
 
     #[cfg(feature = "nova")]
     #[test]
+    fn nova_step_circuit_rejects_tampered_jolt_lasso_receipt_capsule_root_witness() {
+        let bytecode = BytecodePreprocessing::default();
+        let block = trace_block(0, boundary(0, 0), boundary(4, 0));
+        let prover = BlockProofBundleProver::<_, ark_bn254::Fr>::new([9u8; 32]);
+        let bundle = prover.prove_block(&bytecode, &block, None).unwrap();
+        let mut fold_inputs = vec![build_block_fold_input(&bundle)];
+        let receipt = VerifiedJoltLookupProofReceipt::new_for_test(33, 8);
+        bind_verified_jolt_lookup_receipt_to_fold_inputs(&mut fold_inputs, &receipt).unwrap();
+        let mut circuit = nova_step_circuit_for_fold_input(&fold_inputs[0]);
+        circuit.witness.jolt_lasso_receipt_capsule_root += NovaScalar::from(1);
+
+        let cs = synthesize_nova_step_circuit_for_test(&circuit);
+
+        assert_eq!(
+            cs.which_is_unsatisfied(),
+            Some("semantic fold accumulator transition")
+        );
+    }
+
+    #[cfg(feature = "nova")]
+    #[test]
     fn nova_step_circuit_rejects_tampered_blindfold_receipt_digest_witness() {
         let bytecode = BytecodePreprocessing::default();
         let block = trace_block(0, boundary(0, 0), boundary(4, 0));
@@ -16799,7 +17495,7 @@ mod tests {
 
         assert_eq!(
             cs.which_is_unsatisfied(),
-            Some("lookup claim fingerprint binds lookup fields")
+            Some("semantic fold accumulator transition")
         );
     }
 
