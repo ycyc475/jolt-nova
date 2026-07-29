@@ -8,7 +8,7 @@ use num::{bigint::Sign, BigInt};
 
 use super::{
     NovaScalar, RecursiveJoltBlockOpeningWitness, RecursiveJoltFieldElement,
-    RecursiveJoltOpeningPoint, RecursiveJoltRegisterOpeningWitness,
+    RecursiveJoltOpeningPoint, RecursiveJoltRamOpeningWitness, RecursiveJoltRegisterOpeningWitness,
 };
 
 const JOLT_FIELD_LIMB_WIDTH: usize = 64;
@@ -162,6 +162,8 @@ fn alloc_index_bits<CS: ConstraintSystem<NovaScalar>>(
 fn alloc_global_cycle_bits<CS: ConstraintSystem<NovaScalar>>(
     mut cs: CS,
     global_cycle_start: &AllocatedNum<NovaScalar>,
+    active: &AllocatedBit,
+    active_value: bool,
     local_cycle: usize,
     global_cycle: usize,
     bit_len: usize,
@@ -184,17 +186,100 @@ fn alloc_global_cycle_bits<CS: ConstraintSystem<NovaScalar>>(
             coefficient = coefficient + coefficient;
             lc + (current, bit.get_variable())
         });
+    let inactive_packed = packed.clone();
     cs.enforce(
-        || "global cycle bits equal public block start plus local offset",
+        || "active global cycle bits equal public block start plus local offset",
         |_| {
             packed
                 - global_cycle_start.get_variable()
                 - (NovaScalar::from(local_cycle as u64), CS::one())
         },
+        |lc| lc + active.get_variable(),
+        |lc| lc,
+    );
+    cs.enforce(
+        || "inactive global cycle is canonical zero",
+        |_| inactive_packed,
+        |lc| lc + CS::one() - active.get_variable(),
+        |lc| lc,
+    );
+    if !active_value && global_cycle != 0 {
+        return Err(SynthesisError::Unsatisfiable(
+            "inactive recursive opening cycle has a nonzero global index".to_string(),
+        ));
+    }
+    Ok(bits)
+}
+
+fn enforce_bit_implies<CS: ConstraintSystem<NovaScalar>>(
+    mut cs: CS,
+    premise: &AllocatedBit,
+    consequence: &AllocatedBit,
+) {
+    cs.enforce(
+        || "boolean implication",
+        |lc| lc + premise.get_variable(),
+        |lc| lc + CS::one() - consequence.get_variable(),
+        |lc| lc,
+    );
+}
+
+fn packed_bits_lc<CS: ConstraintSystem<NovaScalar>>(
+    bits: &[AllocatedBit],
+) -> LinearCombination<NovaScalar> {
+    let mut coefficient = NovaScalar::from(1);
+    bits.iter()
+        .fold(LinearCombination::<NovaScalar>::zero(), |lc, bit| {
+            let current = coefficient;
+            coefficient = coefficient + coefficient;
+            lc + (current, bit.get_variable())
+        })
+}
+
+fn alloc_u64_jolt_field_with_bits<CS: ConstraintSystem<NovaScalar>>(
+    mut cs: CS,
+    value: u64,
+) -> Result<(BigNat<NovaScalar>, Vec<AllocatedBit>), SynthesisError> {
+    let allocated = alloc_small_jolt_field(cs.namespace(|| "allocate u64 as Jolt field"), value)?;
+    let bits = (0..64)
+        .map(|bit| {
+            AllocatedBit::alloc(
+                cs.namespace(|| format!("u64 bit {bit}")),
+                Some(((value >> bit) & 1) == 1),
+            )
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let packed = packed_bits_lc::<CS>(&bits);
+    cs.enforce(
+        || "u64 bits equal low Jolt-field limb",
+        |_| packed - &allocated.limbs[0],
         |lc| lc + CS::one(),
         |lc| lc,
     );
-    Ok(bits)
+    for limb_index in 1..JOLT_FIELD_LIMBS {
+        cs.enforce(
+            || format!("u64 upper Jolt-field limb {limb_index} is zero"),
+            |lc| lc + &allocated.limbs[limb_index],
+            |lc| lc + CS::one(),
+            |lc| lc,
+        );
+    }
+    Ok((allocated, bits))
+}
+
+fn enforce_zero_when_disabled<CS: ConstraintSystem<NovaScalar>>(
+    mut cs: CS,
+    enabled: &AllocatedBit,
+    value: &BigNat<NovaScalar>,
+) {
+    for limb_index in 0..JOLT_FIELD_LIMBS {
+        cs.enforce(
+            || format!("disabled value limb {limb_index} is zero"),
+            |lc| lc + &value.limbs[limb_index],
+            |lc| lc + CS::one() - enabled.get_variable(),
+            |lc| lc,
+        );
+    }
 }
 
 fn alloc_opening_point<CS: ConstraintSystem<NovaScalar>>(
@@ -320,6 +405,44 @@ fn allocate_register_claims<CS: ConstraintSystem<NovaScalar>>(
     Ok(())
 }
 
+fn allocate_ram_claims<CS: ConstraintSystem<NovaScalar>>(
+    mut cs: CS,
+    ram: &RecursiveJoltRamOpeningWitness,
+    modulus: &BigNat<NovaScalar>,
+) -> Result<(), SynthesisError> {
+    for (index, claim) in ram.ra_claims.iter().enumerate() {
+        alloc_jolt_field(
+            cs.namespace(|| format!("RamRa global claim {index}")),
+            claim,
+            modulus,
+        )?;
+    }
+    for (index, claim) in ram.tuple_claims.iter().enumerate() {
+        alloc_jolt_field(
+            cs.namespace(|| format!("RAM tuple global claim {index}")),
+            claim,
+            modulus,
+        )?;
+    }
+    alloc_jolt_field(
+        cs.namespace(|| "RAM increment global claim"),
+        &ram.inc_claim,
+        modulus,
+    )?;
+    Ok(())
+}
+
+struct AllocatedRamCycle {
+    access: AllocatedBit,
+    is_write: AllocatedBit,
+    cycle_bits: Vec<AllocatedBit>,
+    address: BigNat<NovaScalar>,
+    read_value: BigNat<NovaScalar>,
+    write_value: BigNat<NovaScalar>,
+    offset_bits: Vec<AllocatedBit>,
+    offset: usize,
+}
+
 /// Verify the complete per-block register opening decomposition inside the
 /// Nova step circuit.
 ///
@@ -383,9 +506,15 @@ pub(super) fn synthesize_recursive_register_opening_relation<CS: ConstraintSyste
     let mut inc_sum = zero.clone();
 
     for (local_cycle, cycle) in witness.cycles.iter().enumerate() {
+        let active = alloc_boolean(
+            cs.namespace(|| format!("cycle {local_cycle} active")),
+            cycle.active,
+        )?;
         let cycle_bits = alloc_global_cycle_bits(
             cs.namespace(|| format!("cycle {local_cycle} global index")),
             global_cycle_start,
+            &active,
+            cycle.active,
             local_cycle,
             cycle.global_cycle,
             value_point.len(),
@@ -430,6 +559,11 @@ pub(super) fn synthesize_recursive_register_opening_relation<CS: ConstraintSyste
                 cs.namespace(|| format!("cycle {local_cycle} {label} present")),
                 present_value,
             )?;
+            enforce_bit_implies(
+                cs.namespace(|| format!("cycle {local_cycle} {label} requires active cycle")),
+                &present,
+                &active,
+            );
             let allocated_value = alloc_small_jolt_field(
                 cs.namespace(|| format!("cycle {local_cycle} {label} value")),
                 value,
@@ -487,6 +621,11 @@ pub(super) fn synthesize_recursive_register_opening_relation<CS: ConstraintSyste
             cs.namespace(|| format!("cycle {local_cycle} rd increment present")),
             cycle.rd_present,
         )?;
+        enforce_bit_implies(
+            cs.namespace(|| format!("cycle {local_cycle} rd increment requires active cycle")),
+            &rd_present,
+            &active,
+        );
         let rd_pre = alloc_small_jolt_field(
             cs.namespace(|| format!("cycle {local_cycle} rd pre value")),
             cycle.rd_pre_value,
@@ -545,6 +684,420 @@ pub(super) fn synthesize_recursive_register_opening_relation<CS: ConstraintSyste
     )?;
     enforce_equal(
         cs.namespace(|| "register increment contribution matches"),
+        &inc_sum,
+        &expected_inc,
+    )?;
+    Ok(())
+}
+
+/// Verify the complete per-block RAM opening decomposition inside the Nova
+/// step circuit.
+///
+/// This relation derives the RamRa chunks from constrained, aligned RAM
+/// addresses and separately reconstructs the RAM tuple and RamInc openings.
+/// The native Jolt verifier remains responsible for authenticating the global
+/// Dory claims; Nova verifies that this block's raw RAM accesses produce the
+/// exact authenticated block contributions.
+pub(super) fn synthesize_recursive_ram_opening_relation<CS: ConstraintSystem<NovaScalar>>(
+    mut cs: CS,
+    witness: &RecursiveJoltBlockOpeningWitness,
+    global_cycle_start: &AllocatedNum<NovaScalar>,
+    opening_present: &AllocatedNum<NovaScalar>,
+) -> Result<(), SynthesisError> {
+    witness
+        .validate_shape()
+        .map_err(|reason| SynthesisError::Unsatisfiable(reason.to_string()))?;
+
+    cs.enforce(
+        || "full recursive RAM opening witness requires authenticated opening",
+        |lc| lc + opening_present.get_variable(),
+        |lc| lc + CS::one(),
+        |lc| lc + CS::one(),
+    );
+
+    let ram = &witness.ram;
+    if ram.ram_k == 0
+        || !ram.ram_k.is_power_of_two()
+        || ram.log_k_chunk == 0
+        || ram.log_k_chunk >= usize::BITS as usize
+    {
+        return Err(SynthesisError::Unsatisfiable(
+            "recursive RAM opening has invalid one-hot parameters".to_string(),
+        ));
+    }
+    let log_ram_k = ram.ram_k.ilog2() as usize;
+    let ram_d = log_ram_k.div_ceil(ram.log_k_chunk);
+    let cycle_bits_len = ram.tuple_opening_point.coordinates.len();
+    if ram_d != ram.ra_opening_points.len()
+        || ram.ra_claims.len() != ram_d
+        || ram.ra_block_contributions.len() != ram_d
+        || ram.inc_opening_point.coordinates.len() != cycle_bits_len
+        || ram
+            .ra_opening_points
+            .iter()
+            .any(|point| point.coordinates.len() != ram.log_k_chunk + cycle_bits_len)
+    {
+        return Err(SynthesisError::Unsatisfiable(
+            "recursive RAM opening points have inconsistent dimensions".to_string(),
+        ));
+    }
+
+    let modulus = alloc_jolt_modulus(cs.namespace(|| "Jolt field modulus"))?;
+    let zero = alloc_jolt_constant(cs.namespace(|| "Jolt field zero"), 0)?;
+    let one = alloc_jolt_constant(cs.namespace(|| "Jolt field one"), 1)?;
+    allocate_ram_claims(
+        cs.namespace(|| "allocate authenticated global RAM claims"),
+        ram,
+        &modulus,
+    )?;
+
+    let tuple_point = alloc_opening_point(
+        cs.namespace(|| "RAM tuple opening point"),
+        &ram.tuple_opening_point,
+        &modulus,
+    )?;
+    let inc_point = alloc_opening_point(
+        cs.namespace(|| "RAM increment opening point"),
+        &ram.inc_opening_point,
+        &modulus,
+    )?;
+    let ra_points = ram
+        .ra_opening_points
+        .iter()
+        .enumerate()
+        .map(|(opening_index, point)| {
+            alloc_opening_point(
+                cs.namespace(|| format!("RamRa opening point {opening_index}")),
+                point,
+                &modulus,
+            )
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+
+    let mut allocated_cycles = Vec::with_capacity(witness.cycle_capacity);
+    for (local_cycle, cycle) in witness.cycles.iter().enumerate() {
+        let active = alloc_boolean(
+            cs.namespace(|| format!("RAM cycle {local_cycle} active")),
+            cycle.active,
+        )?;
+        let cycle_bits = alloc_global_cycle_bits(
+            cs.namespace(|| format!("RAM cycle {local_cycle} global index")),
+            global_cycle_start,
+            &active,
+            cycle.active,
+            local_cycle,
+            cycle.global_cycle,
+            cycle_bits_len,
+        )?;
+
+        let (is_read_value, is_write_value) = match cycle.ram_kind {
+            0 => (false, false),
+            1 => (true, false),
+            2 => (false, true),
+            _ => {
+                return Err(SynthesisError::Unsatisfiable(
+                    "recursive RAM access kind is not NoOp, Read, or Write".to_string(),
+                ));
+            }
+        };
+        let access_value = is_read_value || is_write_value;
+        let is_read = alloc_boolean(
+            cs.namespace(|| format!("RAM cycle {local_cycle} is read")),
+            is_read_value,
+        )?;
+        let is_write = alloc_boolean(
+            cs.namespace(|| format!("RAM cycle {local_cycle} is write")),
+            is_write_value,
+        )?;
+        let access = alloc_boolean(
+            cs.namespace(|| format!("RAM cycle {local_cycle} has access")),
+            access_value,
+        )?;
+        cs.enforce(
+            || format!("RAM cycle {local_cycle} access kind is exclusive"),
+            |lc| lc + is_read.get_variable() + is_write.get_variable() - access.get_variable(),
+            |lc| lc + CS::one(),
+            |lc| lc,
+        );
+        enforce_bit_implies(
+            cs.namespace(|| format!("RAM cycle {local_cycle} access requires active cycle")),
+            &access,
+            &active,
+        );
+
+        let (address, _) = alloc_u64_jolt_field_with_bits(
+            cs.namespace(|| format!("RAM cycle {local_cycle} address")),
+            cycle.ram_address,
+        )?;
+        let (read_value, _) = alloc_u64_jolt_field_with_bits(
+            cs.namespace(|| format!("RAM cycle {local_cycle} read value")),
+            cycle.ram_read_value,
+        )?;
+        let (write_value, _) = alloc_u64_jolt_field_with_bits(
+            cs.namespace(|| format!("RAM cycle {local_cycle} write value")),
+            cycle.ram_write_value,
+        )?;
+        enforce_zero_when_disabled(
+            cs.namespace(|| format!("RAM cycle {local_cycle} NoOp address is zero")),
+            &access,
+            &address,
+        );
+        enforce_zero_when_disabled(
+            cs.namespace(|| format!("RAM cycle {local_cycle} NoOp read value is zero")),
+            &access,
+            &read_value,
+        );
+        enforce_zero_when_disabled(
+            cs.namespace(|| format!("RAM cycle {local_cycle} NoOp write value is zero")),
+            &access,
+            &write_value,
+        );
+        for limb_index in 0..JOLT_FIELD_LIMBS {
+            cs.enforce(
+                || {
+                    format!(
+                        "RAM cycle {local_cycle} read mirrors its write tuple limb {limb_index}"
+                    )
+                },
+                |lc| lc + &read_value.limbs[limb_index] - &write_value.limbs[limb_index],
+                |lc| lc + is_read.get_variable(),
+                |lc| lc,
+            );
+        }
+
+        let offset_u64 = if access_value {
+            let address_offset = cycle
+                .ram_address
+                .checked_sub(ram.ram_start_address)
+                .ok_or_else(|| {
+                    SynthesisError::Unsatisfiable(
+                        "recursive RAM address is below the authenticated RAM start".to_string(),
+                    )
+                })?;
+            if address_offset % 8 != 0 {
+                return Err(SynthesisError::Unsatisfiable(
+                    "recursive RAM address is not word aligned".to_string(),
+                ));
+            }
+            let offset = address_offset / 8;
+            if offset >= ram.ram_k as u64 {
+                return Err(SynthesisError::Unsatisfiable(
+                    "recursive RAM address exceeds the authenticated RAM domain".to_string(),
+                ));
+            }
+            offset
+        } else {
+            0
+        };
+        let offset = usize::try_from(offset_u64).map_err(|_| {
+            SynthesisError::Unsatisfiable(
+                "recursive RAM word offset does not fit the host index".to_string(),
+            )
+        })?;
+        let offset_bits = alloc_index_bits(
+            cs.namespace(|| format!("RAM cycle {local_cycle} remapped address bits")),
+            offset,
+            log_ram_k,
+        )?;
+        let mut address_relation = LinearCombination::<NovaScalar>::zero() + &address.limbs[0]
+            - (
+                NovaScalar::from(ram.ram_start_address),
+                access.get_variable(),
+            );
+        let mut coefficient = NovaScalar::from(8);
+        for bit in &offset_bits {
+            address_relation = address_relation - (coefficient, bit.get_variable());
+            coefficient = coefficient + coefficient;
+        }
+        cs.enforce(
+            || format!("RAM cycle {local_cycle} address is aligned remapped word"),
+            |_| address_relation,
+            |lc| lc + CS::one(),
+            |lc| lc,
+        );
+
+        allocated_cycles.push(AllocatedRamCycle {
+            access,
+            is_write,
+            cycle_bits,
+            address,
+            read_value,
+            write_value,
+            offset_bits,
+            offset,
+        });
+    }
+
+    let mut tuple_sums = [zero.clone(), zero.clone(), zero.clone()];
+    let mut inc_sum = zero.clone();
+    for (local_cycle, allocated) in allocated_cycles.iter().enumerate() {
+        let cycle = &witness.cycles[local_cycle];
+        let tuple_weight = eq_at_index(
+            cs.namespace(|| format!("RAM cycle {local_cycle} tuple weight")),
+            &tuple_point,
+            &allocated.cycle_bits,
+            cycle.global_cycle,
+            &zero,
+            &one,
+            &modulus,
+        )?;
+        for (claim_index, value) in [
+            &allocated.address,
+            &allocated.read_value,
+            &allocated.write_value,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let gated = gated_value(
+                cs.namespace(|| format!("RAM cycle {local_cycle} gate tuple value {claim_index}")),
+                &allocated.access,
+                cycle.ram_kind != 0,
+                value,
+                &zero,
+            )?;
+            tuple_sums[claim_index] = accumulate_weighted_value(
+                cs.namespace(|| {
+                    format!("RAM cycle {local_cycle} accumulate tuple value {claim_index}")
+                }),
+                &tuple_sums[claim_index],
+                &tuple_weight,
+                &gated,
+                &modulus,
+            )?;
+        }
+
+        let inc_weight = eq_at_index(
+            cs.namespace(|| format!("RAM cycle {local_cycle} increment weight")),
+            &inc_point,
+            &allocated.cycle_bits,
+            cycle.global_cycle,
+            &zero,
+            &one,
+            &modulus,
+        )?;
+        let difference = allocated.write_value.sub_mod(
+            cs.namespace(|| format!("RAM cycle {local_cycle} write difference")),
+            &allocated.read_value,
+            &modulus,
+        )?;
+        let gated_difference = gated_value(
+            cs.namespace(|| format!("RAM cycle {local_cycle} gate write difference")),
+            &allocated.is_write,
+            cycle.ram_kind == 2,
+            &difference,
+            &zero,
+        )?;
+        inc_sum = accumulate_weighted_value(
+            cs.namespace(|| format!("RAM cycle {local_cycle} accumulate increment")),
+            &inc_sum,
+            &inc_weight,
+            &gated_difference,
+            &modulus,
+        )?;
+    }
+
+    let mut ra_sums = vec![zero.clone(); ram_d];
+    for (opening_index, point) in ra_points.iter().enumerate() {
+        let (address_point, cycle_point) = point.split_at(ram.log_k_chunk);
+        let shift = ram.log_k_chunk * (ram_d - 1 - opening_index);
+        for (local_cycle, allocated) in allocated_cycles.iter().enumerate() {
+            let cycle = &witness.cycles[local_cycle];
+            let chunk =
+                (allocated.offset >> shift) & ((1usize << ram.log_k_chunk).saturating_sub(1));
+            let mut chunk_bits = Vec::with_capacity(ram.log_k_chunk);
+            for chunk_bit in 0..ram.log_k_chunk {
+                if let Some(offset_bit) = allocated.offset_bits.get(shift + chunk_bit) {
+                    chunk_bits.push(offset_bit.clone());
+                } else {
+                    chunk_bits.push(alloc_boolean(
+                        cs.namespace(|| {
+                            format!(
+                                "RamRa opening {opening_index} cycle {local_cycle} padded chunk bit {chunk_bit}"
+                            )
+                        }),
+                        false,
+                    )?);
+                }
+            }
+            let address_weight = eq_at_index(
+                cs.namespace(|| {
+                    format!("RamRa opening {opening_index} cycle {local_cycle} address weight")
+                }),
+                address_point,
+                &chunk_bits,
+                chunk,
+                &zero,
+                &one,
+                &modulus,
+            )?;
+            let cycle_weight = eq_at_index(
+                cs.namespace(|| {
+                    format!("RamRa opening {opening_index} cycle {local_cycle} cycle weight")
+                }),
+                cycle_point,
+                &allocated.cycle_bits,
+                cycle.global_cycle,
+                &zero,
+                &one,
+                &modulus,
+            )?;
+            let gated_address_weight = gated_value(
+                cs.namespace(|| {
+                    format!("RamRa opening {opening_index} cycle {local_cycle} gate access")
+                }),
+                &allocated.access,
+                cycle.ram_kind != 0,
+                &address_weight,
+                &zero,
+            )?;
+            let (_, term) = cycle_weight.mult_mod(
+                cs.namespace(|| format!("RamRa opening {opening_index} cycle {local_cycle} term")),
+                &gated_address_weight,
+                &modulus,
+            )?;
+            ra_sums[opening_index] = add_mod(
+                cs.namespace(|| {
+                    format!("RamRa opening {opening_index} cycle {local_cycle} accumulate")
+                }),
+                &ra_sums[opening_index],
+                &term,
+                &modulus,
+            )?;
+        }
+    }
+
+    for (opening_index, actual) in ra_sums.iter().enumerate() {
+        let expected = alloc_jolt_field(
+            cs.namespace(|| format!("expected RamRa contribution {opening_index}")),
+            &ram.ra_block_contributions[opening_index],
+            &modulus,
+        )?;
+        enforce_equal(
+            cs.namespace(|| format!("RamRa contribution {opening_index} matches")),
+            actual,
+            &expected,
+        )?;
+    }
+    for (claim_index, actual) in tuple_sums.iter().enumerate() {
+        let expected = alloc_jolt_field(
+            cs.namespace(|| format!("expected RAM tuple contribution {claim_index}")),
+            &ram.tuple_block_contributions[claim_index],
+            &modulus,
+        )?;
+        enforce_equal(
+            cs.namespace(|| format!("RAM tuple contribution {claim_index} matches")),
+            actual,
+            &expected,
+        )?;
+    }
+    let expected_inc = alloc_jolt_field(
+        cs.namespace(|| "expected RAM increment contribution"),
+        &ram.inc_block_contribution,
+        &modulus,
+    )?;
+    enforce_equal(
+        cs.namespace(|| "RAM increment contribution matches"),
         &inc_sum,
         &expected_inc,
     )?;

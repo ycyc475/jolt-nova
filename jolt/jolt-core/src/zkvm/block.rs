@@ -20,7 +20,9 @@ pub use recursive_openings::{
     RecursiveJoltRamOpeningWitness, RecursiveJoltRegisterOpeningWitness,
 };
 #[cfg(all(feature = "nova", not(feature = "zk")))]
-use recursive_relations::synthesize_recursive_register_opening_relation;
+use recursive_relations::{
+    synthesize_recursive_ram_opening_relation, synthesize_recursive_register_opening_relation,
+};
 
 use crate::{
     field::JoltField,
@@ -5641,6 +5643,12 @@ impl nova_snark::traits::circuit::StepCircuit<NovaScalar> for JoltNovaStepCircui
         if let Some(recursive_opening_witness) = &self.witness.recursive_opening_witness {
             synthesize_recursive_register_opening_relation(
                 cs.namespace(|| "native Jolt register opening relation"),
+                recursive_opening_witness,
+                &global_cycle_start,
+                &verified_jolt_lookup_opening_present,
+            )?;
+            synthesize_recursive_ram_opening_relation(
+                cs.namespace(|| "native Jolt RAM opening relation"),
                 recursive_opening_witness,
                 &global_cycle_start,
                 &verified_jolt_lookup_opening_present,
@@ -20389,6 +20397,34 @@ mod tests {
     }
 
     #[cfg(all(feature = "nova", not(feature = "zk")))]
+    fn synthesize_recursive_ram_relation_for_test(
+        witness: &RecursiveJoltBlockOpeningWitness,
+        global_cycle_start: usize,
+    ) -> Result<
+        nova_snark::frontend::test_cs::TestConstraintSystem<NovaScalar>,
+        nova_snark::frontend::SynthesisError,
+    > {
+        use nova_snark::frontend::{
+            num::AllocatedNum, test_cs::TestConstraintSystem, ConstraintSystem,
+        };
+
+        let mut cs = TestConstraintSystem::<NovaScalar>::new();
+        let start = AllocatedNum::alloc(cs.namespace(|| "global cycle start"), || {
+            Ok(NovaScalar::from(global_cycle_start as u64))
+        })?;
+        let opening_present = AllocatedNum::alloc(cs.namespace(|| "opening present"), || {
+            Ok(NovaScalar::from(1))
+        })?;
+        synthesize_recursive_ram_opening_relation(
+            cs.namespace(|| "recursive RAM relation"),
+            witness,
+            &start,
+            &opening_present,
+        )?;
+        Ok(cs)
+    }
+
+    #[cfg(all(feature = "nova", not(feature = "zk")))]
     #[test]
     fn nova_register_opening_relation_checks_native_field_arithmetic() {
         let blocks = [register_trace_block()];
@@ -20465,9 +20501,141 @@ mod tests {
 
     #[cfg(all(feature = "nova", not(feature = "zk")))]
     #[test]
+    fn nova_ram_opening_relation_checks_native_field_arithmetic_and_address_mapping() {
+        let blocks = [ram_trace_block()];
+        let bytecode = bytecode_for_blocks(&blocks);
+        let opening_receipt =
+            test_lookup_opening_receipt(&bytecode, &blocks, 4, false, false, false, false, false);
+        let receipt =
+            verify_jolt_lookup_block_openings(&bytecode, &blocks, &opening_receipt).unwrap();
+        let witness = receipt
+            .recursive_block_opening_witness(blocks[0].block_index)
+            .unwrap();
+
+        let cs = synthesize_recursive_ram_relation_for_test(witness, blocks[0].global_cycle_start)
+            .unwrap();
+        assert!(
+            cs.is_satisfied(),
+            "honest native RAM opening relation is unsatisfied: {:?}",
+            cs.which_is_unsatisfied()
+        );
+
+        let mut tampered_address = witness.clone();
+        tampered_address.cycles[0].ram_address += 8;
+        tampered_address = tampered_address.seal();
+        let cs = synthesize_recursive_ram_relation_for_test(
+            &tampered_address,
+            blocks[0].global_cycle_start,
+        )
+        .unwrap();
+        assert!(
+            !cs.is_satisfied(),
+            "tampering a RAM address must invalidate RamRa or tuple openings"
+        );
+
+        let mut unaligned_address = witness.clone();
+        unaligned_address.cycles[0].ram_address += 1;
+        unaligned_address = unaligned_address.seal();
+        assert!(
+            synthesize_recursive_ram_relation_for_test(
+                &unaligned_address,
+                blocks[0].global_cycle_start,
+            )
+            .is_err(),
+            "an unaligned RAM address must be rejected before proving"
+        );
+
+        let mut tampered_read = witness.clone();
+        tampered_read.cycles[0].ram_read_value += 1;
+        tampered_read.cycles[0].ram_write_value += 1;
+        tampered_read = tampered_read.seal();
+        let cs = synthesize_recursive_ram_relation_for_test(
+            &tampered_read,
+            blocks[0].global_cycle_start,
+        )
+        .unwrap();
+        assert!(
+            !cs.is_satisfied(),
+            "tampering a RAM read value must invalidate the tuple opening"
+        );
+
+        let mut tampered_write = witness.clone();
+        tampered_write.cycles[1].ram_write_value += 1;
+        tampered_write = tampered_write.seal();
+        let cs = synthesize_recursive_ram_relation_for_test(
+            &tampered_write,
+            blocks[0].global_cycle_start,
+        )
+        .unwrap();
+        assert!(
+            !cs.is_satisfied(),
+            "tampering a RAM post-write value must invalidate tuple or RamInc openings"
+        );
+
+        let mut tampered_ra_point = witness.clone();
+        tampered_ra_point.ram.ra_opening_points[0].coordinates[0].canonical_le_bytes[0] ^= 1;
+        tampered_ra_point = tampered_ra_point.seal();
+        let cs = synthesize_recursive_ram_relation_for_test(
+            &tampered_ra_point,
+            blocks[0].global_cycle_start,
+        )
+        .unwrap();
+        assert!(
+            !cs.is_satisfied(),
+            "tampering the RamRa opening point must invalidate the Nova relation"
+        );
+
+        let mut tampered_tuple_contribution = witness.clone();
+        tampered_tuple_contribution.ram.tuple_block_contributions[0].canonical_le_bytes[0] ^= 1;
+        tampered_tuple_contribution = tampered_tuple_contribution.seal();
+        let cs = synthesize_recursive_ram_relation_for_test(
+            &tampered_tuple_contribution,
+            blocks[0].global_cycle_start,
+        )
+        .unwrap();
+        assert!(
+            !cs.is_satisfied(),
+            "tampering a RAM tuple contribution must invalidate the Nova relation"
+        );
+
+        let mut tampered_inc_contribution = witness.clone();
+        tampered_inc_contribution
+            .ram
+            .inc_block_contribution
+            .canonical_le_bytes[0] ^= 1;
+        tampered_inc_contribution = tampered_inc_contribution.seal();
+        let cs = synthesize_recursive_ram_relation_for_test(
+            &tampered_inc_contribution,
+            blocks[0].global_cycle_start,
+        )
+        .unwrap();
+        assert!(
+            !cs.is_satisfied(),
+            "tampering the RamInc contribution must invalidate the Nova relation"
+        );
+
+        let mut noncanonical_claim = witness.clone();
+        noncanonical_claim.ram.inc_claim.canonical_le_bytes = [0xff; 32];
+        noncanonical_claim = noncanonical_claim.seal();
+        let cs = synthesize_recursive_ram_relation_for_test(
+            &noncanonical_claim,
+            blocks[0].global_cycle_start,
+        )
+        .unwrap();
+        assert!(
+            !cs.is_satisfied(),
+            "a non-canonical RAM claim encoding must be rejected"
+        );
+    }
+
+    #[cfg(all(feature = "nova", not(feature = "zk")))]
+    #[test]
     fn nova_register_opening_relation_is_satisfied_for_each_folded_block() {
-        let block0 = trace_block(0, boundary(0, 0), boundary(2, 0));
-        let block1 = trace_block(1, block0.end_state.clone(), boundary(4, 0));
+        // Deliberately use unequal block lengths. The first step contains one
+        // inactive fixed-shape slot, which must remain canonical padding and
+        // must not be constrained as a real global cycle.
+        let block0 = trace_block(0, boundary(0, 0), boundary(1, 0));
+        let block1 = trace_block(1, block0.end_state.clone(), boundary(3, 0));
         let blocks = [block0, block1];
         let bytecode = bytecode_for_blocks(&blocks);
         let opening_receipt =
@@ -20488,7 +20656,7 @@ mod tests {
             synthesize_nova_step_circuit_with_input_for_test(&first_circuit, first_input);
         assert!(
             first_cs.is_satisfied(),
-            "first recursive register block is unsatisfied: {:?}",
+            "first recursive native-opening block is unsatisfied: {:?}",
             first_cs.which_is_unsatisfied()
         );
 
@@ -20498,7 +20666,7 @@ mod tests {
             synthesize_nova_step_circuit_with_input_for_test(&second_circuit, second_input);
         assert!(
             second_cs.is_satisfied(),
-            "second recursive register block is unsatisfied: {:?}",
+            "second recursive native-opening block is unsatisfied: {:?}",
             second_cs.which_is_unsatisfied()
         );
     }
