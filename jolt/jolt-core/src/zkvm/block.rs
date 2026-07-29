@@ -11,12 +11,16 @@ use tracer::{instruction::Cycle, MachineBoundaryState, TraceBlock};
 
 #[cfg(not(feature = "zk"))]
 mod recursive_openings;
+#[cfg(all(feature = "nova", not(feature = "zk")))]
+mod recursive_relations;
 #[cfg(not(feature = "zk"))]
 pub use recursive_openings::{
     RecursiveJoltBlockOpeningWitness, RecursiveJoltCpuOpeningWitness, RecursiveJoltCycleWitness,
-    RecursiveJoltFieldElement, RecursiveJoltOpeningPoint, RecursiveJoltRamOpeningWitness,
-    RecursiveJoltRegisterOpeningWitness,
+    RecursiveJoltFieldElement, RecursiveJoltOpeningCircuitShape, RecursiveJoltOpeningPoint,
+    RecursiveJoltRamOpeningWitness, RecursiveJoltRegisterOpeningWitness,
 };
+#[cfg(all(feature = "nova", not(feature = "zk")))]
+use recursive_relations::synthesize_recursive_register_opening_relation;
 
 use crate::{
     field::JoltField,
@@ -1946,6 +1950,8 @@ pub struct NovaFoldAccumulator<Digest = [u8; 32]> {
     pub recursive_snark_bytes: Option<Vec<u8>>,
     pub recursive_snark_output_digest: Option<[u8; 32]>,
     pub recursive_z_state: Option<NovaFoldZState>,
+    #[cfg(feature = "nova")]
+    recursive_setup_circuit: Option<NovaStepCircuit>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -2852,6 +2858,8 @@ where
             recursive_snark_bytes: None,
             recursive_snark_output_digest: None,
             recursive_z_state: None,
+            #[cfg(feature = "nova")]
+            recursive_setup_circuit: None,
         }
     }
 
@@ -2864,6 +2872,23 @@ where
 
         #[cfg(feature = "nova")]
         {
+            let subclaim_backend =
+                nova_subclaim_backend_from_config(&self.config, fold_input.state.block_index)?;
+            let step_circuit = nova_step_circuit_for_fold_input_with_subclaim_backend(
+                fold_input,
+                &subclaim_backend,
+            );
+            #[cfg(not(feature = "zk"))]
+            if let Some(setup_circuit) = &accumulator.recursive_setup_circuit {
+                if setup_circuit.recursive_opening_shape() != step_circuit.recursive_opening_shape()
+                {
+                    return Err(BlockTraceError::NovaFoldingBackendError {
+                        block_index: fold_input.state.block_index,
+                        reason:
+                            "native recursive opening circuit shape changed across folded blocks",
+                    });
+                }
+            }
             let relation_boundary = build_jolt_nova_step_relation_boundary(
                 &self.config,
                 accumulator.recursive_z_state.as_ref(),
@@ -2900,6 +2925,9 @@ where
             accumulator.recursive_snark_bytes = Some(recursive_snark_bytes);
             accumulator.recursive_snark_output_digest = Some(recursive_snark_output_digest);
             accumulator.recursive_z_state = Some(recursive_z_state);
+            if accumulator.recursive_setup_circuit.is_none() {
+                accumulator.recursive_setup_circuit = Some(step_circuit);
+            }
 
             return Ok(());
         }
@@ -4846,6 +4874,8 @@ struct JoltNovaStepWitness {
     recursive_lookup_sum_balance_root: NovaScalar,
     recursive_verifier_lookup_gadget_root: NovaScalar,
     recursive_verifier_capsule_root: NovaScalar,
+    #[cfg(not(feature = "zk"))]
+    recursive_opening_witness: Option<RecursiveJoltBlockOpeningWitness>,
 }
 
 #[cfg(feature = "nova")]
@@ -4868,7 +4898,12 @@ impl JoltNovaStepWitness {
         Backend: NovaSubclaimFoldingBackend,
     {
         let statement = BlockFoldStatement::from_fold_input(fold_input);
-        Self::from_statement_with_subclaim_backend(statement, subclaim_backend)
+        let mut witness = Self::from_statement_with_subclaim_backend(statement, subclaim_backend);
+        #[cfg(not(feature = "zk"))]
+        {
+            witness.recursive_opening_witness = fold_input.recursive_opening_witness.clone();
+        }
+        witness
     }
 
     fn from_statement_with_subclaim_backend<Backend>(
@@ -5002,6 +5037,8 @@ impl JoltNovaStepWitness {
             recursive_lookup_sum_balance_root,
             recursive_verifier_lookup_gadget_root,
             recursive_verifier_capsule_root,
+            #[cfg(not(feature = "zk"))]
+            recursive_opening_witness: None,
         }
     }
 
@@ -5208,6 +5245,25 @@ impl JoltNovaStepWitness {
 
 #[cfg(feature = "nova")]
 impl JoltNovaStepCircuit {
+    fn has_recursive_native_opening_relation(&self) -> bool {
+        #[cfg(not(feature = "zk"))]
+        {
+            self.witness.recursive_opening_witness.is_some()
+        }
+        #[cfg(feature = "zk")]
+        {
+            false
+        }
+    }
+
+    #[cfg(not(feature = "zk"))]
+    fn recursive_opening_shape(&self) -> Option<RecursiveJoltOpeningCircuitShape> {
+        self.witness
+            .recursive_opening_witness
+            .as_ref()
+            .map(RecursiveJoltOpeningCircuitShape::from_witness)
+    }
+
     fn for_fold_input<Digest, F>(fold_input: &BlockFoldInput<Digest, F>) -> Self
     where
         Digest: AsRef<[u8]>,
@@ -5580,6 +5636,16 @@ impl nova_snark::traits::circuit::StepCircuit<NovaScalar> for JoltNovaStepCircui
             "recursive verifier capsule root",
             self.witness.recursive_verifier_capsule_root,
         )?;
+
+        #[cfg(not(feature = "zk"))]
+        if let Some(recursive_opening_witness) = &self.witness.recursive_opening_witness {
+            synthesize_recursive_register_opening_relation(
+                cs.namespace(|| "native Jolt register opening relation"),
+                recursive_opening_witness,
+                &global_cycle_start,
+                &verified_jolt_lookup_opening_present,
+            )?;
+        }
 
         let output_accumulator = nova_snark::frontend::num::AllocatedNum::alloc(
             cs.namespace(|| "next semantic fold accumulator"),
@@ -8574,6 +8640,22 @@ fn nova_public_params(block_index: usize) -> Result<&'static NovaPublicParams, B
 }
 
 #[cfg(feature = "nova")]
+fn setup_nova_public_params_for_circuit(
+    circuit: &NovaStepCircuit,
+    block_index: usize,
+) -> Result<NovaPublicParams, BlockTraceError> {
+    NovaPublicParams::setup(
+        circuit,
+        &*nova_snark::traits::snark::default_ck_hint::<NovaPrimaryEngine>(),
+        &*nova_snark::traits::snark::default_ck_hint::<NovaSecondaryEngine>(),
+    )
+    .map_err(|_| BlockTraceError::NovaFoldingBackendError {
+        block_index,
+        reason: "Nova shape-specific public parameter setup failed",
+    })
+}
+
+#[cfg(feature = "nova")]
 fn nova_compressed_keys(
     block_index: usize,
 ) -> Result<&'static (NovaCompressedProverKey, NovaCompressedVerifierKey), BlockTraceError> {
@@ -8617,8 +8699,33 @@ where
             reason: "Nova recursive SNARK deserialization failed",
         })?;
 
-    let pp = nova_public_params(block_index)?;
-    let (pk, vk) = nova_compressed_keys(block_index)?;
+    let shape_specific_pp = accumulator
+        .recursive_setup_circuit
+        .as_ref()
+        .filter(|circuit| circuit.has_recursive_native_opening_relation())
+        .map(|circuit| setup_nova_public_params_for_circuit(circuit, block_index))
+        .transpose()?;
+    let pp = match shape_specific_pp.as_ref() {
+        Some(pp) => pp,
+        None => nova_public_params(block_index)?,
+    };
+    let shape_specific_keys = if shape_specific_pp.is_some() {
+        Some(NovaCompressedSnark::setup(pp).map_err(|_| {
+            BlockTraceError::NovaFoldingBackendError {
+                block_index,
+                reason: "Nova shape-specific compressed Spartan key setup failed",
+            }
+        })?)
+    } else {
+        None
+    };
+    let (pk, vk) = match shape_specific_keys.as_ref() {
+        Some((pk, vk)) => (pk, vk),
+        None => {
+            let (pk, vk) = nova_compressed_keys(block_index)?;
+            (pk, vk)
+        }
+    };
     let compressed_snark = NovaCompressedSnark::prove(pp, pk, &recursive_snark).map_err(|_| {
         BlockTraceError::NovaFoldingBackendError {
             block_index,
@@ -8686,7 +8793,28 @@ where
             }
         })?;
 
-    let (_, vk) = nova_compressed_keys(block_index)?;
+    let shape_specific_pp = accumulator
+        .recursive_setup_circuit
+        .as_ref()
+        .filter(|circuit| circuit.has_recursive_native_opening_relation())
+        .map(|circuit| setup_nova_public_params_for_circuit(circuit, block_index))
+        .transpose()?;
+    let shape_specific_keys = shape_specific_pp
+        .as_ref()
+        .map(|pp| {
+            NovaCompressedSnark::setup(pp).map_err(|_| BlockTraceError::NovaFoldingBackendError {
+                block_index,
+                reason: "Nova shape-specific compressed Spartan key setup failed",
+            })
+        })
+        .transpose()?;
+    let vk = match shape_specific_keys.as_ref() {
+        Some((_, vk)) => vk,
+        None => {
+            let (_, vk) = nova_compressed_keys(block_index)?;
+            vk
+        }
+    };
     let z0 = nova_initial_z_state_from_metadata(&proof.instance.metadata, block_index)?;
     let output = compressed_snark
         .verify(vk, proof.instance.metadata.absorbed_blocks, &z0)
@@ -8722,7 +8850,6 @@ where
     Digest: AsRef<[u8]>,
     F: JoltField,
 {
-    let pp = nova_public_params(block_index)?;
     let subclaim_backend = nova_subclaim_backend_from_config(config, block_index)?;
     let current_z_state_storage = nova_z_state_to_storage(current_z_state);
     let _recursive_boundary = build_jolt_recursive_verifier_relation_boundary(
@@ -8732,6 +8859,14 @@ where
     )?;
     let circuit =
         nova_step_circuit_for_fold_input_with_subclaim_backend(fold_input, &subclaim_backend);
+    let shape_specific_pp = circuit
+        .has_recursive_native_opening_relation()
+        .then(|| setup_nova_public_params_for_circuit(&circuit, block_index))
+        .transpose()?;
+    let pp = match shape_specific_pp.as_ref() {
+        Some(pp) => pp,
+        None => nova_public_params(block_index)?,
+    };
     let z0 = initial_z_state;
     let next_z_state =
         nova_next_z_state_with_subclaim_backend(current_z_state, fold_input, &subclaim_backend);
@@ -8840,7 +8975,16 @@ where
             reason: "Nova recursive SNARK deserialization failed",
         })?;
 
-    let pp = nova_public_params(block_index)?;
+    let shape_specific_pp = accumulator
+        .recursive_setup_circuit
+        .as_ref()
+        .filter(|circuit| circuit.has_recursive_native_opening_relation())
+        .map(|circuit| setup_nova_public_params_for_circuit(circuit, block_index))
+        .transpose()?;
+    let pp = match shape_specific_pp.as_ref() {
+        Some(pp) => pp,
+        None => nova_public_params(block_index)?,
+    };
     let output = recursive_snark
         .verify(pp, accumulator.metadata.absorbed_blocks, &initial_z_state)
         .map_err(|_| BlockTraceError::NovaFoldingBackendError {
@@ -20216,6 +20360,149 @@ mod tests {
         ));
     }
 
+    #[cfg(all(feature = "nova", not(feature = "zk")))]
+    fn synthesize_recursive_register_relation_for_test(
+        witness: &RecursiveJoltBlockOpeningWitness,
+        global_cycle_start: usize,
+    ) -> Result<
+        nova_snark::frontend::test_cs::TestConstraintSystem<NovaScalar>,
+        nova_snark::frontend::SynthesisError,
+    > {
+        use nova_snark::frontend::{
+            num::AllocatedNum, test_cs::TestConstraintSystem, ConstraintSystem,
+        };
+
+        let mut cs = TestConstraintSystem::<NovaScalar>::new();
+        let start = AllocatedNum::alloc(cs.namespace(|| "global cycle start"), || {
+            Ok(NovaScalar::from(global_cycle_start as u64))
+        })?;
+        let opening_present = AllocatedNum::alloc(cs.namespace(|| "opening present"), || {
+            Ok(NovaScalar::from(1))
+        })?;
+        synthesize_recursive_register_opening_relation(
+            cs.namespace(|| "recursive register relation"),
+            witness,
+            &start,
+            &opening_present,
+        )?;
+        Ok(cs)
+    }
+
+    #[cfg(all(feature = "nova", not(feature = "zk")))]
+    #[test]
+    fn nova_register_opening_relation_checks_native_field_arithmetic() {
+        let blocks = [register_trace_block()];
+        let bytecode = bytecode_for_blocks(&blocks);
+        let opening_receipt =
+            test_lookup_opening_receipt(&bytecode, &blocks, 4, false, false, false, false, false);
+        let receipt =
+            verify_jolt_lookup_block_openings(&bytecode, &blocks, &opening_receipt).unwrap();
+        let witness = receipt
+            .recursive_block_opening_witness(blocks[0].block_index)
+            .unwrap();
+
+        let cs =
+            synthesize_recursive_register_relation_for_test(witness, blocks[0].global_cycle_start)
+                .unwrap();
+        assert!(
+            cs.is_satisfied(),
+            "honest native register opening relation is unsatisfied: {:?}",
+            cs.which_is_unsatisfied()
+        );
+
+        let mut tampered_cycle = witness.clone();
+        tampered_cycle.cycles[0].rs1_value += 1;
+        tampered_cycle = tampered_cycle.seal();
+        let cs = synthesize_recursive_register_relation_for_test(
+            &tampered_cycle,
+            blocks[0].global_cycle_start,
+        )
+        .unwrap();
+        assert!(
+            !cs.is_satisfied(),
+            "tampering a raw register value must invalidate the Nova relation"
+        );
+
+        let mut tampered_point = witness.clone();
+        tampered_point.register.value_opening_point.coordinates[0].canonical_le_bytes[0] ^= 1;
+        tampered_point = tampered_point.seal();
+        let cs = synthesize_recursive_register_relation_for_test(
+            &tampered_point,
+            blocks[0].global_cycle_start,
+        )
+        .unwrap();
+        assert!(
+            !cs.is_satisfied(),
+            "tampering the native opening point must invalidate the Nova relation"
+        );
+
+        let mut tampered_contribution = witness.clone();
+        tampered_contribution.register.value_block_contributions[0].canonical_le_bytes[0] ^= 1;
+        tampered_contribution = tampered_contribution.seal();
+        let cs = synthesize_recursive_register_relation_for_test(
+            &tampered_contribution,
+            blocks[0].global_cycle_start,
+        )
+        .unwrap();
+        assert!(
+            !cs.is_satisfied(),
+            "tampering the authenticated block contribution must invalidate the Nova relation"
+        );
+
+        let mut noncanonical_claim = witness.clone();
+        noncanonical_claim.register.inc_claim.canonical_le_bytes = [0xff; 32];
+        noncanonical_claim = noncanonical_claim.seal();
+        let cs = synthesize_recursive_register_relation_for_test(
+            &noncanonical_claim,
+            blocks[0].global_cycle_start,
+        )
+        .unwrap();
+        assert!(
+            !cs.is_satisfied(),
+            "a non-canonical BN254 field encoding must be rejected"
+        );
+    }
+
+    #[cfg(all(feature = "nova", not(feature = "zk")))]
+    #[test]
+    fn nova_register_opening_relation_is_satisfied_for_each_folded_block() {
+        let block0 = trace_block(0, boundary(0, 0), boundary(2, 0));
+        let block1 = trace_block(1, block0.end_state.clone(), boundary(4, 0));
+        let blocks = [block0, block1];
+        let bytecode = bytecode_for_blocks(&blocks);
+        let opening_receipt =
+            test_lookup_opening_receipt(&bytecode, &blocks, 8, false, false, false, false, false);
+        let receipt =
+            verify_jolt_lookup_block_openings(&bytecode, &blocks, &opening_receipt).unwrap();
+        let pipeline =
+            BlockProofPipeline::<_, ark_bn254::Fr, MockFoldingBackend>::
+                with_backend_and_verified_jolt_lookup_block_opening_receipt(
+                    [9u8; 32],
+                    MockFoldingBackend,
+                    receipt,
+                );
+        let output = pipeline.prove_blocks(&bytecode, &blocks).unwrap();
+        let first_circuit = nova_step_circuit_for_fold_input(&output.fold_inputs[0]);
+        let first_input = nova_initial_z_state_for_witness(&first_circuit.witness);
+        let first_cs =
+            synthesize_nova_step_circuit_with_input_for_test(&first_circuit, first_input);
+        assert!(
+            first_cs.is_satisfied(),
+            "first recursive register block is unsatisfied: {:?}",
+            first_cs.which_is_unsatisfied()
+        );
+
+        let second_circuit = nova_step_circuit_for_fold_input(&output.fold_inputs[1]);
+        let second_input = nova_next_z_state(first_input, &output.fold_inputs[0]);
+        let second_cs =
+            synthesize_nova_step_circuit_with_input_for_test(&second_circuit, second_input);
+        assert!(
+            second_cs.is_satisfied(),
+            "second recursive register block is unsatisfied: {:?}",
+            second_cs.which_is_unsatisfied()
+        );
+    }
+
     #[cfg(not(feature = "zk"))]
     #[test]
     fn authenticated_jolt_register_openings_reconstruct_nonzero_accesses() {
@@ -20380,6 +20667,46 @@ mod tests {
                 ..
             })
         ));
+    }
+
+    #[cfg(all(feature = "nova", not(feature = "zk")))]
+    #[test]
+    fn nova_spartan_compresses_native_register_opening_relation() {
+        let blocks = [trace_block(0, boundary(0, 0), boundary(2, 0))];
+        let bytecode = bytecode_for_blocks(&blocks);
+        let opening_receipt =
+            test_lookup_opening_receipt(&bytecode, &blocks, 4, false, false, false, false, false);
+        let receipt =
+            verify_jolt_lookup_block_openings(&bytecode, &blocks, &opening_receipt).unwrap();
+        let backend = NovaFoldingBackend::new(NovaFoldConfig {
+            final_proof_backend_name: SPARTAN_FINAL_PROOF_SYSTEM_NAME,
+            ..NovaFoldConfig::default()
+        });
+        let pipeline =
+            BlockProofPipeline::<_, ark_bn254::Fr, NovaFoldingBackend>::
+                with_backend_and_verified_jolt_lookup_block_opening_receipt(
+                    [9u8; 32],
+                    backend.clone(),
+                    receipt.clone(),
+                );
+
+        let output = pipeline
+            .prove_blocks_with_final_proof(&bytecode, &blocks)
+            .unwrap();
+        verify_nova_block_proof_pipeline_with_final_proof_and_verified_jolt_lookup_block_opening_receipt(
+            &bytecode,
+            &blocks,
+            &output,
+            &backend,
+            &receipt,
+        )
+        .unwrap();
+        let proof = output.final_proof.as_ref().unwrap();
+        assert_eq!(proof.proof_system, SPARTAN_FINAL_PROOF_SYSTEM_NAME);
+        assert!(proof
+            .spartan_proof_bytes
+            .as_ref()
+            .is_some_and(|bytes| !bytes.is_empty()));
     }
 
     #[cfg(feature = "nova")]

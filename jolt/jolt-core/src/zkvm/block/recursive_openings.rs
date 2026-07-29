@@ -232,6 +232,45 @@ pub struct RecursiveJoltBlockOpeningWitness {
     pub witness_digest: [u8; 32],
 }
 
+/// Value-independent description of the recursive verifier's R1CS shape.
+///
+/// Nova public parameters are tied to one exact step-circuit matrix. Native
+/// opening dimensions therefore have to remain identical across all blocks in
+/// one fold, even though their witness values differ.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct RecursiveJoltOpeningCircuitShape {
+    pub cycle_capacity: usize,
+    pub register_value_point_len: usize,
+    pub register_address_point_len: usize,
+    pub register_inc_point_len: usize,
+    pub ram_ra_point_lens: Vec<usize>,
+    pub ram_tuple_point_len: usize,
+    pub ram_inc_point_len: usize,
+    pub cpu_point_len: usize,
+    pub cpu_claim_count: usize,
+}
+
+impl RecursiveJoltOpeningCircuitShape {
+    pub fn from_witness(witness: &RecursiveJoltBlockOpeningWitness) -> Self {
+        Self {
+            cycle_capacity: witness.cycle_capacity,
+            register_value_point_len: witness.register.value_opening_point.coordinates.len(),
+            register_address_point_len: witness.register.address_opening_point.coordinates.len(),
+            register_inc_point_len: witness.register.inc_opening_point.coordinates.len(),
+            ram_ra_point_lens: witness
+                .ram
+                .ra_opening_points
+                .iter()
+                .map(|point| point.coordinates.len())
+                .collect(),
+            ram_tuple_point_len: witness.ram.tuple_opening_point.coordinates.len(),
+            ram_inc_point_len: witness.ram.inc_opening_point.coordinates.len(),
+            cpu_point_len: witness.cpu.opening_point.coordinates.len(),
+            cpu_claim_count: witness.cpu.claims.len(),
+        }
+    }
+}
+
 impl RecursiveJoltBlockOpeningWitness {
     pub const VERSION: u16 = 1;
 
