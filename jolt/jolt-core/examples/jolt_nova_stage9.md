@@ -1154,3 +1154,29 @@ outer recursive verifier capsule.
 Stage 10.11 still binds a digest-level proof surface. It does not yet verify
 the LogUp proof bytes, polynomial openings, Dory transcript, or native
 Fiat-Shamir sponge inside Nova.
+
+## Stage 10.12: lookup challenge verifier subrelation
+
+Stage 10.12 makes the lookup challenge part of the recursive transcript
+explicit too. The public lookup transcript capsule now also stores a nested
+`JoltLookupChallengeRelation` containing:
+
+- `lookup_logup_tuple_challenge`;
+- `lookup_logup_denominator_challenge`;
+- `lookup_logup_denominator_retry_count`;
+- `relation_root`.
+
+The existing `challenge_root` binding is now backed by the same typed relation
+object used to populate the public recursive-verifier boundary. The recursive
+verifier boundary digest absorbs the nested challenge relation as well, so
+tampering with the explicit challenge fields changes the boundary digest even
+if the outer `challenge_root` field is preserved.
+
+At this point the lookup verifier transcript capsule is no longer a flat blob:
+its claim/proof, challenge, and sum-balance subroots are each surfaced as named
+objects that the next recursive verification stage can replace independently.
+
+### Security boundary
+
+Stage 10.12 still uses digest-level transcript binding. It does not yet verify
+the full LogUp challenge transcript or Fiat-Shamir sponge state inside Nova.
