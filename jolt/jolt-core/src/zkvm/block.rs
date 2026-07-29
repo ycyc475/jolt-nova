@@ -21,7 +21,8 @@ pub use recursive_openings::{
 };
 #[cfg(all(feature = "nova", not(feature = "zk")))]
 use recursive_relations::{
-    synthesize_recursive_ram_opening_relation, synthesize_recursive_register_opening_relation,
+    synthesize_recursive_cpu_opening_relation, synthesize_recursive_ram_opening_relation,
+    synthesize_recursive_register_opening_relation,
 };
 
 use crate::{
@@ -5645,12 +5646,21 @@ impl nova_snark::traits::circuit::StepCircuit<NovaScalar> for JoltNovaStepCircui
                 cs.namespace(|| "native Jolt register opening relation"),
                 recursive_opening_witness,
                 &global_cycle_start,
+                &active_cycles,
                 &verified_jolt_lookup_opening_present,
             )?;
             synthesize_recursive_ram_opening_relation(
                 cs.namespace(|| "native Jolt RAM opening relation"),
                 recursive_opening_witness,
                 &global_cycle_start,
+                &active_cycles,
+                &verified_jolt_lookup_opening_present,
+            )?;
+            synthesize_recursive_cpu_opening_relation(
+                cs.namespace(|| "native Jolt CPU R1CS opening relation"),
+                recursive_opening_witness,
+                &global_cycle_start,
+                &active_cycles,
                 &verified_jolt_lookup_opening_present,
             )?;
         }
@@ -20387,10 +20397,14 @@ mod tests {
         let opening_present = AllocatedNum::alloc(cs.namespace(|| "opening present"), || {
             Ok(NovaScalar::from(1))
         })?;
+        let active_cycles = AllocatedNum::alloc(cs.namespace(|| "active cycles"), || {
+            Ok(NovaScalar::from(witness.active_cycles as u64))
+        })?;
         synthesize_recursive_register_opening_relation(
             cs.namespace(|| "recursive register relation"),
             witness,
             &start,
+            &active_cycles,
             &opening_present,
         )?;
         Ok(cs)
@@ -20415,13 +20429,96 @@ mod tests {
         let opening_present = AllocatedNum::alloc(cs.namespace(|| "opening present"), || {
             Ok(NovaScalar::from(1))
         })?;
+        let active_cycles = AllocatedNum::alloc(cs.namespace(|| "active cycles"), || {
+            Ok(NovaScalar::from(witness.active_cycles as u64))
+        })?;
         synthesize_recursive_ram_opening_relation(
             cs.namespace(|| "recursive RAM relation"),
             witness,
             &start,
+            &active_cycles,
             &opening_present,
         )?;
         Ok(cs)
+    }
+
+    #[cfg(all(feature = "nova", not(feature = "zk")))]
+    fn synthesize_recursive_cpu_relation_for_test(
+        witness: &RecursiveJoltBlockOpeningWitness,
+        global_cycle_start: usize,
+    ) -> Result<
+        nova_snark::frontend::test_cs::TestConstraintSystem<NovaScalar>,
+        nova_snark::frontend::SynthesisError,
+    > {
+        synthesize_recursive_cpu_relation_with_active_count_for_test(
+            witness,
+            global_cycle_start,
+            witness.active_cycles,
+        )
+    }
+
+    #[cfg(all(feature = "nova", not(feature = "zk")))]
+    fn synthesize_recursive_cpu_relation_with_active_count_for_test(
+        witness: &RecursiveJoltBlockOpeningWitness,
+        global_cycle_start: usize,
+        claimed_active_cycles: usize,
+    ) -> Result<
+        nova_snark::frontend::test_cs::TestConstraintSystem<NovaScalar>,
+        nova_snark::frontend::SynthesisError,
+    > {
+        use nova_snark::frontend::{
+            num::AllocatedNum, test_cs::TestConstraintSystem, ConstraintSystem,
+        };
+
+        let mut cs = TestConstraintSystem::<NovaScalar>::new();
+        let start = AllocatedNum::alloc(cs.namespace(|| "global cycle start"), || {
+            Ok(NovaScalar::from(global_cycle_start as u64))
+        })?;
+        let opening_present = AllocatedNum::alloc(cs.namespace(|| "opening present"), || {
+            Ok(NovaScalar::from(1))
+        })?;
+        let active_cycles = AllocatedNum::alloc(cs.namespace(|| "active cycles"), || {
+            Ok(NovaScalar::from(claimed_active_cycles as u64))
+        })?;
+        synthesize_recursive_cpu_opening_relation(
+            cs.namespace(|| "recursive CPU relation"),
+            witness,
+            &start,
+            &active_cycles,
+            &opening_present,
+        )?;
+        Ok(cs)
+    }
+
+    #[cfg(all(feature = "nova", not(feature = "zk")))]
+    fn recompute_recursive_cpu_block_contributions(
+        mut witness: RecursiveJoltBlockOpeningWitness,
+    ) -> RecursiveJoltBlockOpeningWitness {
+        let point = witness
+            .cpu
+            .opening_point
+            .coordinates
+            .iter()
+            .map(|coordinate| {
+                <ark_bn254::Fr as ark_ff::PrimeField>::from_le_bytes_mod_order(
+                    &coordinate.canonical_le_bytes,
+                )
+            })
+            .collect::<Vec<_>>();
+        let weights = EqPolynomial::<ark_bn254::Fr>::evals(&point);
+        let mut contributions = vec![ark_bn254::Fr::zero(); witness.cpu.claims.len()];
+        for cycle in witness.cycles.iter().filter(|cycle| cycle.active) {
+            let weight = weights[cycle.global_cycle];
+            for (input_index, input) in cycle.cpu_r1cs_inputs.iter().copied().enumerate() {
+                contributions[input_index] +=
+                    weight * <ark_bn254::Fr as JoltField>::from_i128(input);
+            }
+        }
+        witness.cpu.block_contributions = contributions
+            .into_iter()
+            .map(|value| RecursiveJoltFieldElement::from_field(value).unwrap())
+            .collect();
+        witness.seal()
     }
 
     #[cfg(all(feature = "nova", not(feature = "zk")))]
@@ -20630,7 +20727,124 @@ mod tests {
 
     #[cfg(all(feature = "nova", not(feature = "zk")))]
     #[test]
-    fn nova_register_opening_relation_is_satisfied_for_each_folded_block() {
+    fn nova_cpu_opening_relation_checks_all_native_r1cs_rows_and_spartan_inputs() {
+        let blocks = [trace_block(0, boundary(0, 0), boundary(2, 0))];
+        let bytecode = bytecode_for_blocks(&blocks);
+        let opening_receipt =
+            test_lookup_opening_receipt(&bytecode, &blocks, 4, false, false, false, false, false);
+        let receipt =
+            verify_jolt_lookup_block_openings(&bytecode, &blocks, &opening_receipt).unwrap();
+        let witness = receipt
+            .recursive_block_opening_witness(blocks[0].block_index)
+            .unwrap();
+
+        let cs = synthesize_recursive_cpu_relation_for_test(witness, blocks[0].global_cycle_start)
+            .unwrap();
+        assert!(
+            cs.is_satisfied(),
+            "honest native CPU/R1CS opening relation is unsatisfied: {:?}",
+            cs.which_is_unsatisfied()
+        );
+
+        let cs = synthesize_recursive_cpu_relation_with_active_count_for_test(
+            witness,
+            blocks[0].global_cycle_start,
+            witness.active_cycles - 1,
+        )
+        .unwrap();
+        assert!(
+            !cs.is_satisfied(),
+            "the recursive relation must bind active slots to public active_cycles"
+        );
+
+        // Recompute the opening contribution after changing RamAddress. This
+        // keeps the CPU/Spartan opening internally consistent, so rejection
+        // can only come from the native Jolt R1CS row.
+        let mut invalid_r1cs = witness.clone();
+        invalid_r1cs.cycles[0].cpu_r1cs_inputs[7] = 1;
+        invalid_r1cs = recompute_recursive_cpu_block_contributions(invalid_r1cs);
+        let cs =
+            synthesize_recursive_cpu_relation_for_test(&invalid_r1cs, blocks[0].global_cycle_start)
+                .unwrap();
+        assert!(
+            !cs.is_satisfied(),
+            "a CPU row that preserves its opening but violates Jolt R1CS must fail"
+        );
+        assert!(
+            cs.which_is_unsatisfied()
+                .is_some_and(|name| name.contains("RamAddrEqZeroIfNotLoadStore")),
+            "the negative test must fail in the native CPU relation, not only the opening"
+        );
+
+        let mut non_boolean_flag = witness.clone();
+        non_boolean_flag.cycles[0].cpu_r1cs_inputs[24] = 2;
+        non_boolean_flag = recompute_recursive_cpu_block_contributions(non_boolean_flag);
+        let cs = synthesize_recursive_cpu_relation_for_test(
+            &non_boolean_flag,
+            blocks[0].global_cycle_start,
+        )
+        .unwrap();
+        assert!(
+            !cs.is_satisfied(),
+            "a non-boolean CPU operation flag must be rejected"
+        );
+
+        let mut tampered_input = witness.clone();
+        tampered_input.cycles[0].cpu_r1cs_inputs[4] += 1;
+        tampered_input = tampered_input.seal();
+        let cs = synthesize_recursive_cpu_relation_for_test(
+            &tampered_input,
+            blocks[0].global_cycle_start,
+        )
+        .unwrap();
+        assert!(
+            !cs.is_satisfied(),
+            "tampering a raw CPU input must invalidate its opening contribution"
+        );
+
+        let mut tampered_point = witness.clone();
+        tampered_point.cpu.opening_point.coordinates[0].canonical_le_bytes[0] ^= 1;
+        tampered_point = tampered_point.seal();
+        let cs = synthesize_recursive_cpu_relation_for_test(
+            &tampered_point,
+            blocks[0].global_cycle_start,
+        )
+        .unwrap();
+        assert!(
+            !cs.is_satisfied(),
+            "tampering the CPU opening point must invalidate the Nova relation"
+        );
+
+        let mut tampered_contribution = witness.clone();
+        tampered_contribution.cpu.block_contributions[0].canonical_le_bytes[0] ^= 1;
+        tampered_contribution = tampered_contribution.seal();
+        let cs = synthesize_recursive_cpu_relation_for_test(
+            &tampered_contribution,
+            blocks[0].global_cycle_start,
+        )
+        .unwrap();
+        assert!(
+            !cs.is_satisfied(),
+            "tampering a CPU block contribution must invalidate the Nova relation"
+        );
+
+        let mut noncanonical_claim = witness.clone();
+        noncanonical_claim.cpu.claims[0].canonical_le_bytes = [0xff; 32];
+        noncanonical_claim = noncanonical_claim.seal();
+        let cs = synthesize_recursive_cpu_relation_for_test(
+            &noncanonical_claim,
+            blocks[0].global_cycle_start,
+        )
+        .unwrap();
+        assert!(
+            !cs.is_satisfied(),
+            "a non-canonical CPU claim encoding must be rejected"
+        );
+    }
+
+    #[cfg(all(feature = "nova", not(feature = "zk")))]
+    #[test]
+    fn nova_native_opening_relations_are_satisfied_for_each_folded_block() {
         // Deliberately use unequal block lengths. The first step contains one
         // inactive fixed-shape slot, which must remain canonical padding and
         // must not be constrained as a real global cycle.
@@ -20839,7 +21053,7 @@ mod tests {
 
     #[cfg(all(feature = "nova", not(feature = "zk")))]
     #[test]
-    fn nova_spartan_compresses_native_register_opening_relation() {
+    fn nova_spartan_compresses_native_opening_relations() {
         let blocks = [trace_block(0, boundary(0, 0), boundary(2, 0))];
         let bytecode = bytecode_for_blocks(&blocks);
         let opening_receipt =

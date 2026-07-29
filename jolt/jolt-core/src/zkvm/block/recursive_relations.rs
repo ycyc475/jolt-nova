@@ -6,6 +6,8 @@ use nova_snark::{
 };
 use num::{bigint::Sign, BigInt};
 
+use crate::zkvm::r1cs::constraints::{LC, R1CS_CONSTRAINTS};
+
 use super::{
     NovaScalar, RecursiveJoltBlockOpeningWitness, RecursiveJoltFieldElement,
     RecursiveJoltOpeningPoint, RecursiveJoltRamOpeningWitness, RecursiveJoltRegisterOpeningWitness,
@@ -224,6 +226,32 @@ fn enforce_bit_implies<CS: ConstraintSystem<NovaScalar>>(
     );
 }
 
+fn enforce_active_cycle_prefix<CS: ConstraintSystem<NovaScalar>>(
+    mut cs: CS,
+    active_bits: &[AllocatedBit],
+    active_cycles: &AllocatedNum<NovaScalar>,
+) {
+    let active_sum = active_bits
+        .iter()
+        .fold(LinearCombination::<NovaScalar>::zero(), |lc, active| {
+            lc + active.get_variable()
+        });
+    cs.enforce(
+        || "active-cycle bit sum equals public active-cycle count",
+        |_| active_sum - active_cycles.get_variable(),
+        |lc| lc + CS::one(),
+        |lc| lc,
+    );
+    for (index, window) in active_bits.windows(2).enumerate() {
+        cs.enforce(
+            || format!("active-cycle bits form a prefix at slot {index}"),
+            |lc| lc + window[1].get_variable(),
+            |lc| lc + CS::one() - window[0].get_variable(),
+            |lc| lc,
+        );
+    }
+}
+
 fn packed_bits_lc<CS: ConstraintSystem<NovaScalar>>(
     bits: &[AllocatedBit],
 ) -> LinearCombination<NovaScalar> {
@@ -280,6 +308,175 @@ fn enforce_zero_when_disabled<CS: ConstraintSystem<NovaScalar>>(
             |lc| lc,
         );
     }
+}
+
+fn nova_scalar_from_u128(value: u128) -> NovaScalar {
+    let low = NovaScalar::from(value as u64);
+    let high = NovaScalar::from((value >> 64) as u64);
+    let mut two_to_64 = NovaScalar::from(1);
+    for _ in 0..64 {
+        two_to_64 = two_to_64 + two_to_64;
+    }
+    low + high * two_to_64
+}
+
+fn nova_scalar_from_i128(value: i128) -> NovaScalar {
+    if value < 0 {
+        -nova_scalar_from_u128(value.unsigned_abs())
+    } else {
+        nova_scalar_from_u128(value as u128)
+    }
+}
+
+fn alloc_signed_jolt_input<CS: ConstraintSystem<NovaScalar>>(
+    mut cs: CS,
+    value: i128,
+    zero: &BigNat<NovaScalar>,
+    modulus: &BigNat<NovaScalar>,
+) -> Result<(AllocatedNum<NovaScalar>, BigNat<NovaScalar>), SynthesisError> {
+    let negative_value = value < 0;
+    let magnitude_value = value.unsigned_abs();
+    let sign = alloc_boolean(cs.namespace(|| "signed input sign"), negative_value)?;
+    let magnitude = BigNat::alloc_from_nat(
+        cs.namespace(|| "signed input magnitude"),
+        || Ok(BigInt::from(magnitude_value)),
+        JOLT_FIELD_LIMB_WIDTH,
+        JOLT_FIELD_LIMBS,
+    )?;
+    magnitude.assert_well_formed(cs.namespace(|| "signed input magnitude limbs fit"))?;
+
+    let magnitude_bits = (0..128)
+        .map(|bit| {
+            AllocatedBit::alloc(
+                cs.namespace(|| format!("signed input magnitude bit {bit}")),
+                Some(((magnitude_value >> bit) & 1) == 1),
+            )
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    for limb_index in 0..2 {
+        let packed = packed_bits_lc::<CS>(
+            &magnitude_bits
+                [limb_index * JOLT_FIELD_LIMB_WIDTH..(limb_index + 1) * JOLT_FIELD_LIMB_WIDTH],
+        );
+        cs.enforce(
+            || format!("signed input magnitude limb {limb_index} matches bits"),
+            |_| packed - &magnitude.limbs[limb_index],
+            |lc| lc + CS::one(),
+            |lc| lc,
+        );
+    }
+    for limb_index in 2..JOLT_FIELD_LIMBS {
+        cs.enforce(
+            || format!("signed input magnitude upper limb {limb_index} is zero"),
+            |lc| lc + &magnitude.limbs[limb_index],
+            |lc| lc + CS::one(),
+            |lc| lc,
+        );
+    }
+
+    let native = AllocatedNum::alloc(cs.namespace(|| "signed input in Nova field"), || {
+        Ok(nova_scalar_from_i128(value))
+    })?;
+    let packed_magnitude = packed_bits_lc::<CS>(&magnitude_bits);
+    let signed_left_magnitude = packed_magnitude.clone();
+    let signed_right_magnitude = packed_magnitude;
+    cs.enforce(
+        || "signed Nova value equals sign and magnitude",
+        |_| signed_left_magnitude,
+        |lc| lc + (NovaScalar::from(2), sign.get_variable()),
+        |_| signed_right_magnitude - native.get_variable(),
+    );
+
+    let negative = zero.sub_mod(
+        cs.namespace(|| "negative signed input modulo Jolt field"),
+        &magnitude,
+        modulus,
+    )?;
+    let mapped = select_bignat(
+        cs.namespace(|| "select signed Jolt-field encoding"),
+        &sign,
+        negative_value,
+        &negative,
+        &magnitude,
+    )?;
+    Ok((native, mapped))
+}
+
+fn jolt_lc_to_nova<CS: ConstraintSystem<NovaScalar>>(
+    lc: &LC,
+    inputs: &[AllocatedNum<NovaScalar>],
+) -> Result<LinearCombination<NovaScalar>, SynthesisError> {
+    let mut result = LinearCombination::<NovaScalar>::zero();
+    for term_index in 0..lc.num_terms() {
+        let term = lc.term(term_index).ok_or_else(|| {
+            SynthesisError::Unsatisfiable(
+                "Jolt R1CS linear combination omitted a declared term".to_string(),
+            )
+        })?;
+        let input = inputs.get(term.input_index).ok_or_else(|| {
+            SynthesisError::Unsatisfiable(
+                "Jolt R1CS input index exceeds recursive CPU row".to_string(),
+            )
+        })?;
+        result = result + (nova_scalar_from_i128(term.coeff), input.get_variable());
+    }
+    if let Some(constant) = lc.const_term() {
+        result = result + (nova_scalar_from_i128(constant), CS::one());
+    }
+    Ok(result)
+}
+
+fn evaluate_jolt_lc(lc: &LC, inputs: &[i128]) -> Result<i128, SynthesisError> {
+    let mut result = lc.const_term().unwrap_or(0);
+    for term_index in 0..lc.num_terms() {
+        let term = lc.term(term_index).ok_or_else(|| {
+            SynthesisError::Unsatisfiable(
+                "Jolt R1CS linear combination omitted a declared term".to_string(),
+            )
+        })?;
+        let input = inputs.get(term.input_index).ok_or_else(|| {
+            SynthesisError::Unsatisfiable(
+                "Jolt R1CS input index exceeds recursive CPU row".to_string(),
+            )
+        })?;
+        result = result
+            .checked_add(term.coeff.checked_mul(*input).ok_or_else(|| {
+                SynthesisError::Unsatisfiable(
+                    "Jolt R1CS linear combination multiplication overflow".to_string(),
+                )
+            })?)
+            .ok_or_else(|| {
+                SynthesisError::Unsatisfiable(
+                    "Jolt R1CS linear combination addition overflow".to_string(),
+                )
+            })?;
+    }
+    Ok(result)
+}
+
+fn enforce_native_zero_when_disabled<CS: ConstraintSystem<NovaScalar>>(
+    mut cs: CS,
+    enabled: &AllocatedBit,
+    value: &AllocatedNum<NovaScalar>,
+) {
+    cs.enforce(
+        || "inactive native value is zero",
+        |lc| lc + value.get_variable(),
+        |lc| lc + CS::one() - enabled.get_variable(),
+        |lc| lc,
+    );
+}
+
+fn enforce_boolean_num<CS: ConstraintSystem<NovaScalar>>(
+    mut cs: CS,
+    value: &AllocatedNum<NovaScalar>,
+) {
+    cs.enforce(
+        || "CPU boolean input",
+        |lc| lc + value.get_variable(),
+        |lc| lc + value.get_variable() - CS::one(),
+        |lc| lc,
+    );
 }
 
 fn alloc_opening_point<CS: ConstraintSystem<NovaScalar>>(
@@ -433,6 +630,7 @@ fn allocate_ram_claims<CS: ConstraintSystem<NovaScalar>>(
 }
 
 struct AllocatedRamCycle {
+    active: AllocatedBit,
     access: AllocatedBit,
     is_write: AllocatedBit,
     cycle_bits: Vec<AllocatedBit>,
@@ -454,6 +652,7 @@ pub(super) fn synthesize_recursive_register_opening_relation<CS: ConstraintSyste
     mut cs: CS,
     witness: &RecursiveJoltBlockOpeningWitness,
     global_cycle_start: &AllocatedNum<NovaScalar>,
+    active_cycles: &AllocatedNum<NovaScalar>,
     opening_present: &AllocatedNum<NovaScalar>,
 ) -> Result<(), SynthesisError> {
     witness
@@ -504,12 +703,14 @@ pub(super) fn synthesize_recursive_register_opening_relation<CS: ConstraintSyste
     let mut value_sums = [zero.clone(), zero.clone(), zero.clone()];
     let mut address_sums = [zero.clone(), zero.clone(), zero.clone()];
     let mut inc_sum = zero.clone();
+    let mut active_bits = Vec::with_capacity(witness.cycle_capacity);
 
     for (local_cycle, cycle) in witness.cycles.iter().enumerate() {
         let active = alloc_boolean(
             cs.namespace(|| format!("cycle {local_cycle} active")),
             cycle.active,
         )?;
+        active_bits.push(active.clone());
         let cycle_bits = alloc_global_cycle_bits(
             cs.namespace(|| format!("cycle {local_cycle} global index")),
             global_cycle_start,
@@ -654,6 +855,11 @@ pub(super) fn synthesize_recursive_register_opening_relation<CS: ConstraintSyste
             &modulus,
         )?;
     }
+    enforce_active_cycle_prefix(
+        cs.namespace(|| "register active-cycle prefix"),
+        &active_bits,
+        active_cycles,
+    );
 
     for claim_index in 0..3 {
         let expected_value = alloc_jolt_field(
@@ -702,6 +908,7 @@ pub(super) fn synthesize_recursive_ram_opening_relation<CS: ConstraintSystem<Nov
     mut cs: CS,
     witness: &RecursiveJoltBlockOpeningWitness,
     global_cycle_start: &AllocatedNum<NovaScalar>,
+    active_cycles: &AllocatedNum<NovaScalar>,
     opening_present: &AllocatedNum<NovaScalar>,
 ) -> Result<(), SynthesisError> {
     witness
@@ -917,6 +1124,7 @@ pub(super) fn synthesize_recursive_ram_opening_relation<CS: ConstraintSystem<Nov
         );
 
         allocated_cycles.push(AllocatedRamCycle {
+            active,
             access,
             is_write,
             cycle_bits,
@@ -927,6 +1135,14 @@ pub(super) fn synthesize_recursive_ram_opening_relation<CS: ConstraintSystem<Nov
             offset,
         });
     }
+    enforce_active_cycle_prefix(
+        cs.namespace(|| "RAM active-cycle prefix"),
+        &allocated_cycles
+            .iter()
+            .map(|cycle| cycle.active.clone())
+            .collect::<Vec<_>>(),
+        active_cycles,
+    );
 
     let mut tuple_sums = [zero.clone(), zero.clone(), zero.clone()];
     let mut inc_sum = zero.clone();
@@ -1101,5 +1317,201 @@ pub(super) fn synthesize_recursive_ram_opening_relation<CS: ConstraintSystem<Nov
         &inc_sum,
         &expected_inc,
     )?;
+    Ok(())
+}
+
+/// Verify the native Jolt CPU/Spartan opening and all uniform CPU R1CS rows
+/// inside one Nova step.
+///
+/// Every one of the 35 CPU inputs is range-bound to a signed 128-bit integer,
+/// mapped losslessly into the BN254 scalar field for opening arithmetic, and
+/// simultaneously represented in Nova's scalar field for the uniform R1CS
+/// constraints. The active-cycle selector gates padded fixed-shape rows.
+pub(super) fn synthesize_recursive_cpu_opening_relation<CS: ConstraintSystem<NovaScalar>>(
+    mut cs: CS,
+    witness: &RecursiveJoltBlockOpeningWitness,
+    global_cycle_start: &AllocatedNum<NovaScalar>,
+    active_cycles: &AllocatedNum<NovaScalar>,
+    opening_present: &AllocatedNum<NovaScalar>,
+) -> Result<(), SynthesisError> {
+    witness
+        .validate_shape()
+        .map_err(|reason| SynthesisError::Unsatisfiable(reason.to_string()))?;
+
+    cs.enforce(
+        || "full recursive CPU opening witness requires authenticated opening",
+        |lc| lc + opening_present.get_variable(),
+        |lc| lc + CS::one(),
+        |lc| lc + CS::one(),
+    );
+
+    let cpu = &witness.cpu;
+    if cpu.claims.len() != 35
+        || cpu.block_contributions.len() != cpu.claims.len()
+        || cpu.opening_point.coordinates.is_empty()
+    {
+        return Err(SynthesisError::Unsatisfiable(
+            "recursive CPU opening has inconsistent dimensions".to_string(),
+        ));
+    }
+
+    let modulus = alloc_jolt_modulus(cs.namespace(|| "Jolt field modulus"))?;
+    let zero = alloc_jolt_constant(cs.namespace(|| "Jolt field zero"), 0)?;
+    let one = alloc_jolt_constant(cs.namespace(|| "Jolt field one"), 1)?;
+    for (claim_index, claim) in cpu.claims.iter().enumerate() {
+        alloc_jolt_field(
+            cs.namespace(|| format!("CPU global claim {claim_index}")),
+            claim,
+            &modulus,
+        )?;
+    }
+    let opening_point = alloc_opening_point(
+        cs.namespace(|| "CPU opening point"),
+        &cpu.opening_point,
+        &modulus,
+    )?;
+
+    // Product-virtualization outputs and instruction flags are boolean in the
+    // native Jolt relation. Enforcing them here prevents non-boolean guards
+    // from satisfying a conditional row through field cancellation.
+    const CPU_BOOLEAN_INPUTS: [usize; 18] = [
+        3, 17, 18, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34,
+    ];
+
+    let mut opening_sums = vec![zero.clone(); cpu.claims.len()];
+    let mut active_bits = Vec::with_capacity(witness.cycle_capacity);
+    for (local_cycle, cycle) in witness.cycles.iter().enumerate() {
+        let active = alloc_boolean(
+            cs.namespace(|| format!("CPU cycle {local_cycle} active")),
+            cycle.active,
+        )?;
+        active_bits.push(active.clone());
+        let cycle_bits = alloc_global_cycle_bits(
+            cs.namespace(|| format!("CPU cycle {local_cycle} global index")),
+            global_cycle_start,
+            &active,
+            cycle.active,
+            local_cycle,
+            cycle.global_cycle,
+            opening_point.len(),
+        )?;
+        let opening_weight = eq_at_index(
+            cs.namespace(|| format!("CPU cycle {local_cycle} opening weight")),
+            &opening_point,
+            &cycle_bits,
+            cycle.global_cycle,
+            &zero,
+            &one,
+            &modulus,
+        )?;
+
+        let mut native_inputs = Vec::with_capacity(cpu.claims.len());
+        for (input_index, value) in cycle.cpu_r1cs_inputs.iter().copied().enumerate() {
+            let (native, mapped) = alloc_signed_jolt_input(
+                cs.namespace(|| format!("CPU cycle {local_cycle} input {input_index}")),
+                value,
+                &zero,
+                &modulus,
+            )?;
+            enforce_native_zero_when_disabled(
+                cs.namespace(|| {
+                    format!("CPU cycle {local_cycle} inactive native input {input_index}")
+                }),
+                &active,
+                &native,
+            );
+            enforce_zero_when_disabled(
+                cs.namespace(|| {
+                    format!("CPU cycle {local_cycle} inactive Jolt input {input_index}")
+                }),
+                &active,
+                &mapped,
+            );
+            if CPU_BOOLEAN_INPUTS.contains(&input_index) {
+                enforce_boolean_num(
+                    cs.namespace(|| format!("CPU cycle {local_cycle} boolean input {input_index}")),
+                    &native,
+                );
+            }
+
+            let gated = gated_value(
+                cs.namespace(|| {
+                    format!("CPU cycle {local_cycle} gate opening input {input_index}")
+                }),
+                &active,
+                cycle.active,
+                &mapped,
+                &zero,
+            )?;
+            opening_sums[input_index] = accumulate_weighted_value(
+                cs.namespace(|| {
+                    format!("CPU cycle {local_cycle} accumulate opening input {input_index}")
+                }),
+                &opening_sums[input_index],
+                &opening_weight,
+                &gated,
+                &modulus,
+            )?;
+            native_inputs.push(native);
+        }
+
+        for (constraint_index, named_constraint) in R1CS_CONSTRAINTS.iter().enumerate() {
+            let a = jolt_lc_to_nova::<CS>(&named_constraint.cons.a, &native_inputs)?;
+            let b = jolt_lc_to_nova::<CS>(&named_constraint.cons.b, &native_inputs)?;
+            let a_value = evaluate_jolt_lc(&named_constraint.cons.a, &cycle.cpu_r1cs_inputs)?;
+            let gated_a = AllocatedNum::alloc(
+                cs.namespace(|| {
+                    format!("CPU cycle {local_cycle} constraint {constraint_index} gated A")
+                }),
+                || {
+                    Ok(if cycle.active {
+                        nova_scalar_from_i128(a_value)
+                    } else {
+                        NovaScalar::from(0)
+                    })
+                },
+            )?;
+            cs.enforce(
+                || {
+                    format!(
+                        "CPU cycle {local_cycle} constraint {:?} active gate",
+                        named_constraint.label
+                    )
+                },
+                |_| a,
+                |lc| lc + active.get_variable(),
+                |lc| lc + gated_a.get_variable(),
+            );
+            cs.enforce(
+                || {
+                    format!(
+                        "CPU cycle {local_cycle} constraint {:?}",
+                        named_constraint.label
+                    )
+                },
+                |lc| lc + gated_a.get_variable(),
+                |_| b,
+                |lc| lc,
+            );
+        }
+    }
+    enforce_active_cycle_prefix(
+        cs.namespace(|| "CPU active-cycle prefix"),
+        &active_bits,
+        active_cycles,
+    );
+
+    for (claim_index, actual) in opening_sums.iter().enumerate() {
+        let expected = alloc_jolt_field(
+            cs.namespace(|| format!("expected CPU contribution {claim_index}")),
+            &cpu.block_contributions[claim_index],
+            &modulus,
+        )?;
+        enforce_equal(
+            cs.namespace(|| format!("CPU contribution {claim_index} matches")),
+            actual,
+            &expected,
+        )?;
+    }
     Ok(())
 }
