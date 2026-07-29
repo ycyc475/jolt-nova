@@ -1211,6 +1211,30 @@ pub struct JoltLassoOpeningCapsule {
     pub capsule_root: [u8; 32],
 }
 
+/// Fixed-shape recursive relation for one authenticated block-level Lasso claim.
+///
+/// The relation makes the block coordinates and local lookup claim explicit
+/// alongside the receipt/opening roots and the two native Jolt Lasso
+/// contribution digests. Later Nova constraints can therefore bind the same
+/// object without trusting an opaque host-generated claim digest.
+#[cfg(feature = "nova")]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct JoltLassoBlockClaimRelation {
+    pub claim_present: [u8; 32],
+    pub block_index: [u8; 32],
+    pub global_cycle_start: [u8; 32],
+    pub global_cycle_end: [u8; 32],
+    pub lookup_claims_digest: [u8; 32],
+    pub receipt_capsule_root: [u8; 32],
+    pub opening_capsule_root: [u8; 32],
+    pub instruction_contribution_digest: [u8; 32],
+    pub tuple_contribution_digest: [u8; 32],
+    pub claim_digest: [u8; 32],
+    pub instruction_opening_count: [u8; 32],
+    pub tuple_claim_count: [u8; 32],
+    pub relation_root: [u8; 32],
+}
+
 /// Explicit lookup claim/proof subrelation consumed by the lookup verifier capsule.
 #[cfg(feature = "nova")]
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1260,6 +1284,8 @@ pub struct JoltLookupVerifierTranscriptCapsule {
     pub jolt_lasso_receipt_capsule_root: [u8; 32],
     pub jolt_lasso_opening_capsule: JoltLassoOpeningCapsule,
     pub jolt_lasso_opening_capsule_root: [u8; 32],
+    pub jolt_lasso_block_claim_relation: JoltLassoBlockClaimRelation,
+    pub jolt_lasso_block_claim_relation_root: [u8; 32],
     pub claim_proof_relation: JoltLookupClaimProofRelation,
     pub claim_proof_root: [u8; 32],
     pub challenge_relation: JoltLookupChallengeRelation,
@@ -1675,6 +1701,47 @@ impl JoltLassoOpeningCapsule {
 }
 
 #[cfg(feature = "nova")]
+impl JoltLassoBlockClaimRelation {
+    fn from_scalars(relation: RecursiveJoltLassoBlockClaimRelationScalars) -> Self {
+        Self {
+            claim_present: nova_scalar_to_storage(relation.claim_present),
+            block_index: nova_scalar_to_storage(relation.block_index),
+            global_cycle_start: nova_scalar_to_storage(relation.global_cycle_start),
+            global_cycle_end: nova_scalar_to_storage(relation.global_cycle_end),
+            lookup_claims_digest: nova_scalar_to_storage(relation.lookup_claims_digest),
+            receipt_capsule_root: nova_scalar_to_storage(relation.receipt_capsule_root),
+            opening_capsule_root: nova_scalar_to_storage(relation.opening_capsule_root),
+            instruction_contribution_digest: nova_scalar_to_storage(
+                relation.instruction_contribution_digest,
+            ),
+            tuple_contribution_digest: nova_scalar_to_storage(relation.tuple_contribution_digest),
+            claim_digest: nova_scalar_to_storage(relation.claim_digest),
+            instruction_opening_count: nova_scalar_to_storage(relation.instruction_opening_count),
+            tuple_claim_count: nova_scalar_to_storage(relation.tuple_claim_count),
+            relation_root: nova_scalar_to_storage(relation.root()),
+        }
+    }
+
+    fn storage_words(&self) -> [[u8; 32]; 13] {
+        [
+            self.claim_present,
+            self.block_index,
+            self.global_cycle_start,
+            self.global_cycle_end,
+            self.lookup_claims_digest,
+            self.receipt_capsule_root,
+            self.opening_capsule_root,
+            self.instruction_contribution_digest,
+            self.tuple_contribution_digest,
+            self.claim_digest,
+            self.instruction_opening_count,
+            self.tuple_claim_count,
+            self.relation_root,
+        ]
+    }
+}
+
+#[cfg(feature = "nova")]
 impl JoltLookupVerifierTranscriptCapsule {
     fn from_scalars(transcript: RecursiveLookupVerifierTranscriptScalars) -> Self {
         let claim_proof_relation =
@@ -1687,6 +1754,8 @@ impl JoltLookupVerifierTranscriptCapsule {
             JoltLassoReceiptCapsule::from_scalars(transcript.jolt_lasso_receipt_capsule);
         let jolt_lasso_opening_capsule =
             JoltLassoOpeningCapsule::from_scalars(transcript.jolt_lasso_opening_capsule);
+        let jolt_lasso_block_claim_relation =
+            JoltLassoBlockClaimRelation::from_scalars(transcript.jolt_lasso_block_claim_relation);
         Self {
             lookup_backend_selector: nova_scalar_to_storage(transcript.lookup_backend_selector),
             lookup_claim_fingerprint: nova_scalar_to_storage(transcript.lookup_claim_fingerprint),
@@ -1709,6 +1778,8 @@ impl JoltLookupVerifierTranscriptCapsule {
             jolt_lasso_receipt_capsule,
             jolt_lasso_opening_capsule_root: jolt_lasso_opening_capsule.capsule_root,
             jolt_lasso_opening_capsule,
+            jolt_lasso_block_claim_relation_root: jolt_lasso_block_claim_relation.relation_root,
+            jolt_lasso_block_claim_relation,
             claim_proof_root: claim_proof_relation.relation_root,
             claim_proof_relation,
             challenge_root: challenge_relation.relation_root,
@@ -1719,7 +1790,7 @@ impl JoltLookupVerifierTranscriptCapsule {
         }
     }
 
-    fn storage_words(&self) -> [[u8; 32]; 15] {
+    fn storage_words(&self) -> [[u8; 32]; 16] {
         [
             self.lookup_backend_selector,
             self.lookup_claim_fingerprint,
@@ -1732,6 +1803,7 @@ impl JoltLookupVerifierTranscriptCapsule {
             self.lookup_logup_balance_delta,
             self.jolt_lasso_receipt_capsule_root,
             self.jolt_lasso_opening_capsule_root,
+            self.jolt_lasso_block_claim_relation_root,
             self.claim_proof_root,
             self.challenge_root,
             self.sum_balance_root,
@@ -2759,6 +2831,9 @@ const NOVA_TRANSCRIPT_DOMAIN_JOLT_LASSO_RECEIPT_CAPSULE: &str = "jolt-lasso-rece
 #[cfg(feature = "nova")]
 const NOVA_TRANSCRIPT_DOMAIN_JOLT_LASSO_OPENING_CAPSULE: &str = "jolt-lasso-opening-capsule";
 #[cfg(feature = "nova")]
+const NOVA_TRANSCRIPT_DOMAIN_JOLT_LASSO_BLOCK_CLAIM_RELATION: &str =
+    "jolt-lasso-block-claim-relation";
+#[cfg(feature = "nova")]
 const NOVA_TRANSCRIPT_DOMAIN_CPU: &str = "cpu";
 #[cfg(feature = "nova")]
 const NOVA_TRANSCRIPT_DOMAIN_RECURSIVE_VERIFIER_BOUNDARY: &str = "recursive-verifier-boundary";
@@ -2867,6 +2942,7 @@ struct RecursiveLookupVerifierTranscriptScalars {
     lookup_logup_table_sum: NovaScalar,
     jolt_lasso_receipt_capsule: RecursiveJoltLassoReceiptCapsuleScalars,
     jolt_lasso_opening_capsule: RecursiveJoltLassoOpeningCapsuleScalars,
+    jolt_lasso_block_claim_relation: RecursiveJoltLassoBlockClaimRelationScalars,
 }
 
 #[cfg(feature = "nova")]
@@ -3092,6 +3168,49 @@ impl RecursiveJoltLassoOpeningCapsuleScalars {
                     "verified_jolt_lookup_opening_block_digest",
                     self.verified_jolt_lookup_opening_block_digest,
                 ),
+            ],
+        )
+    }
+}
+
+#[cfg(feature = "nova")]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct RecursiveJoltLassoBlockClaimRelationScalars {
+    claim_present: NovaScalar,
+    block_index: NovaScalar,
+    global_cycle_start: NovaScalar,
+    global_cycle_end: NovaScalar,
+    lookup_claims_digest: NovaScalar,
+    receipt_capsule_root: NovaScalar,
+    opening_capsule_root: NovaScalar,
+    instruction_contribution_digest: NovaScalar,
+    tuple_contribution_digest: NovaScalar,
+    claim_digest: NovaScalar,
+    instruction_opening_count: NovaScalar,
+    tuple_claim_count: NovaScalar,
+}
+
+#[cfg(feature = "nova")]
+impl RecursiveJoltLassoBlockClaimRelationScalars {
+    fn root(&self) -> NovaScalar {
+        nova_transcript_delta(
+            NOVA_TRANSCRIPT_DOMAIN_JOLT_LASSO_BLOCK_CLAIM_RELATION,
+            [
+                ("claim_present", self.claim_present),
+                ("block_index", self.block_index),
+                ("global_cycle_start", self.global_cycle_start),
+                ("global_cycle_end", self.global_cycle_end),
+                ("lookup_claims_digest", self.lookup_claims_digest),
+                ("receipt_capsule_root", self.receipt_capsule_root),
+                ("opening_capsule_root", self.opening_capsule_root),
+                (
+                    "instruction_contribution_digest",
+                    self.instruction_contribution_digest,
+                ),
+                ("tuple_contribution_digest", self.tuple_contribution_digest),
+                ("claim_digest", self.claim_digest),
+                ("instruction_opening_count", self.instruction_opening_count),
+                ("tuple_claim_count", self.tuple_claim_count),
             ],
         )
     }
@@ -3883,6 +4002,28 @@ impl BlockFoldStatement {
         self.jolt_lasso_opening_capsule().root()
     }
 
+    fn jolt_lasso_block_claim_relation(&self) -> RecursiveJoltLassoBlockClaimRelationScalars {
+        RecursiveJoltLassoBlockClaimRelationScalars {
+            claim_present: self.verified_jolt_lasso_lookup_claim_present,
+            block_index: self.block_index,
+            global_cycle_start: self.global_cycle_start,
+            global_cycle_end: self.global_cycle_end,
+            lookup_claims_digest: self.lookup_claims_digest,
+            receipt_capsule_root: self.jolt_lasso_receipt_capsule_root(),
+            opening_capsule_root: self.jolt_lasso_opening_capsule_root(),
+            instruction_contribution_digest: self
+                .verified_jolt_lasso_lookup_instruction_contribution_digest,
+            tuple_contribution_digest: self.verified_jolt_lasso_lookup_tuple_contribution_digest,
+            claim_digest: self.verified_jolt_lasso_lookup_claim_digest,
+            instruction_opening_count: self.verified_jolt_lasso_instruction_opening_count,
+            tuple_claim_count: self.verified_jolt_lasso_tuple_claim_count,
+        }
+    }
+
+    fn jolt_lasso_block_claim_relation_root(&self) -> NovaScalar {
+        self.jolt_lasso_block_claim_relation().root()
+    }
+
     fn recursive_lookup_verifier_transcript_with_subclaims_and_selector(
         &self,
         subclaims: BlockFoldSubclaimFingerprints,
@@ -3899,6 +4040,7 @@ impl BlockFoldStatement {
             lookup_logup_table_sum: self.lookup_logup_table_sum,
             jolt_lasso_receipt_capsule: self.jolt_lasso_receipt_capsule(),
             jolt_lasso_opening_capsule: self.jolt_lasso_opening_capsule(),
+            jolt_lasso_block_claim_relation: self.jolt_lasso_block_claim_relation(),
         }
     }
 
@@ -12569,6 +12711,14 @@ fn update_jolt_lasso_opening_capsule(hasher: &mut Sha3_256, capsule: &JoltLassoO
 }
 
 #[cfg(feature = "nova")]
+fn update_jolt_lasso_block_claim_relation(
+    hasher: &mut Sha3_256,
+    relation: &JoltLassoBlockClaimRelation,
+) {
+    update_storage_words(hasher, &relation.storage_words());
+}
+
+#[cfg(feature = "nova")]
 fn update_jolt_lookup_claim_proof_relation(
     hasher: &mut Sha3_256,
     relation: &JoltLookupClaimProofRelation,
@@ -12600,6 +12750,7 @@ fn update_jolt_lookup_verifier_transcript_capsule(
     update_storage_words(hasher, &capsule.storage_words());
     update_jolt_lasso_receipt_capsule(hasher, &capsule.jolt_lasso_receipt_capsule);
     update_jolt_lasso_opening_capsule(hasher, &capsule.jolt_lasso_opening_capsule);
+    update_jolt_lasso_block_claim_relation(hasher, &capsule.jolt_lasso_block_claim_relation);
     update_jolt_lookup_claim_proof_relation(hasher, &capsule.claim_proof_relation);
     update_jolt_lookup_challenge_relation(hasher, &capsule.challenge_relation);
     update_jolt_lookup_sum_balance_relation(hasher, &capsule.sum_balance_relation);
@@ -16521,6 +16672,50 @@ mod tests {
             opening_capsule.capsule_root
         );
         assert_ne!(opening_capsule.capsule_root, [0u8; 32]);
+
+        let block_claim_relation =
+            JoltLassoBlockClaimRelation::from_scalars(statement.jolt_lasso_block_claim_relation());
+        assert_eq!(
+            block_claim_relation.claim_present,
+            nova_scalar_to_storage(NovaScalar::from(1))
+        );
+        assert_eq!(
+            block_claim_relation.block_index,
+            nova_scalar_to_storage(statement.block_index)
+        );
+        assert_eq!(
+            block_claim_relation.global_cycle_start,
+            nova_scalar_to_storage(statement.global_cycle_start)
+        );
+        assert_eq!(
+            block_claim_relation.global_cycle_end,
+            nova_scalar_to_storage(statement.global_cycle_end)
+        );
+        assert_eq!(
+            block_claim_relation.lookup_claims_digest,
+            nova_scalar_to_storage(statement.lookup_claims_digest)
+        );
+        assert_eq!(
+            block_claim_relation.receipt_capsule_root,
+            receipt_capsule.capsule_root
+        );
+        assert_eq!(
+            block_claim_relation.opening_capsule_root,
+            opening_capsule.capsule_root
+        );
+        assert_eq!(
+            block_claim_relation.relation_root,
+            nova_scalar_to_storage(statement.jolt_lasso_block_claim_relation_root())
+        );
+        assert_eq!(
+            lookup_transcript.jolt_lasso_block_claim_relation,
+            block_claim_relation
+        );
+        assert_eq!(
+            lookup_transcript.jolt_lasso_block_claim_relation_root,
+            block_claim_relation.relation_root
+        );
+        assert_ne!(block_claim_relation.relation_root, [0u8; 32]);
         assert!(boundary.verify_digest());
         let circuit = nova_step_circuit_for_fold_input(fold_input);
         let cs = synthesize_nova_step_circuit_for_test(&circuit);
@@ -16544,6 +16739,14 @@ mod tests {
             .lookup_verifier_transcript
             .jolt_lasso_opening_capsule_root[0] ^= 1;
         assert!(!tampered_root.verify_digest());
+
+        let mut tampered_relation = boundary.clone();
+        tampered_relation
+            .verifier_capsule
+            .lookup_verifier_transcript
+            .jolt_lasso_block_claim_relation
+            .lookup_claims_digest[0] ^= 1;
+        assert!(!tampered_relation.verify_digest());
     }
 
     #[cfg(all(feature = "nova", not(feature = "zk")))]
