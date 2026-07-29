@@ -9,6 +9,15 @@ use common::constants::{REGISTER_COUNT, XLEN};
 use sha3::{Digest as ShaDigest, Sha3_256};
 use tracer::{instruction::Cycle, MachineBoundaryState, TraceBlock};
 
+#[cfg(not(feature = "zk"))]
+mod recursive_openings;
+#[cfg(not(feature = "zk"))]
+pub use recursive_openings::{
+    RecursiveJoltBlockOpeningWitness, RecursiveJoltCpuOpeningWitness, RecursiveJoltCycleWitness,
+    RecursiveJoltFieldElement, RecursiveJoltOpeningPoint, RecursiveJoltRamOpeningWitness,
+    RecursiveJoltRegisterOpeningWitness,
+};
+
 use crate::{
     field::JoltField,
     zkvm::{
@@ -546,6 +555,7 @@ struct VerifiedJoltLookupBlockOpening {
     lasso_instruction_contribution_digest: [u8; 32],
     lasso_tuple_contribution_digest: [u8; 32],
     lasso_claim_digest: [u8; 32],
+    recursive_opening_witness: RecursiveJoltBlockOpeningWitness,
     binding_digest: [u8; 32],
 }
 
@@ -575,7 +585,7 @@ pub struct VerifiedJoltLookupBlockOpeningReceipt {
 
 #[cfg(not(feature = "zk"))]
 impl VerifiedJoltLookupBlockOpeningReceipt {
-    pub const VERSION: u16 = 6;
+    pub const VERSION: u16 = 7;
 
     pub fn lookup_receipt(&self) -> &VerifiedJoltLookupProofReceipt {
         &self.lookup_receipt
@@ -611,6 +621,16 @@ impl VerifiedJoltLookupBlockOpeningReceipt {
 
     pub fn cpu_opening_count(&self) -> usize {
         self.cpu_opening_count
+    }
+
+    pub fn recursive_block_opening_witness(
+        &self,
+        block_index: usize,
+    ) -> Option<&RecursiveJoltBlockOpeningWitness> {
+        self.blocks
+            .iter()
+            .find(|block| block.block_index == block_index)
+            .map(|block| &block.recursive_opening_witness)
     }
 }
 
@@ -726,6 +746,11 @@ impl<F> FoldableBlockState<F> {
 pub struct BlockFoldInput<Digest = [u8; 32], F = ark_bn254::Fr> {
     pub program_digest: Digest,
     pub state: FoldableBlockState<F>,
+    /// Complete native-field witness used by the recursive register/RAM/CPU
+    /// opening verifier. It is private to the Nova step circuit; the foldable
+    /// state retains only its authenticated relation roots.
+    #[cfg(not(feature = "zk"))]
+    pub recursive_opening_witness: Option<RecursiveJoltBlockOpeningWitness>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -10538,6 +10563,8 @@ where
     BlockFoldInput {
         program_digest: bundle.public_input().program_digest.clone(),
         state: build_foldable_block_state(bundle),
+        #[cfg(not(feature = "zk"))]
+        recursive_opening_witness: None,
     }
 }
 
@@ -10549,6 +10576,56 @@ where
     F: JoltField,
 {
     bundles.iter().map(build_block_fold_input).collect()
+}
+
+#[cfg(not(feature = "zk"))]
+fn encode_recursive_jolt_field<F: JoltField>(
+    block_index: usize,
+    value: F,
+) -> Result<RecursiveJoltFieldElement, BlockTraceError> {
+    RecursiveJoltFieldElement::from_field(value).map_err(|reason| {
+        BlockTraceError::VerifiedJoltLookupReceiptMismatch {
+            block_index,
+            reason,
+        }
+    })
+}
+
+#[cfg(not(feature = "zk"))]
+fn encode_recursive_jolt_field_array<F: JoltField, const N: usize>(
+    block_index: usize,
+    values: [F; N],
+) -> Result<[RecursiveJoltFieldElement; N], BlockTraceError> {
+    let mut encoded = [RecursiveJoltFieldElement::default(); N];
+    for (index, value) in values.into_iter().enumerate() {
+        encoded[index] = encode_recursive_jolt_field(block_index, value)?;
+    }
+    Ok(encoded)
+}
+
+#[cfg(not(feature = "zk"))]
+fn encode_recursive_jolt_field_vec<F: JoltField>(
+    block_index: usize,
+    values: &[F],
+) -> Result<Vec<RecursiveJoltFieldElement>, BlockTraceError> {
+    values
+        .iter()
+        .copied()
+        .map(|value| encode_recursive_jolt_field(block_index, value))
+        .collect()
+}
+
+#[cfg(not(feature = "zk"))]
+fn encode_recursive_jolt_opening_point<F: JoltField>(
+    block_index: usize,
+    point: &[F::Challenge],
+) -> Result<RecursiveJoltOpeningPoint, BlockTraceError> {
+    RecursiveJoltOpeningPoint::from_challenges::<F>(point).map_err(|reason| {
+        BlockTraceError::VerifiedJoltLookupReceiptMismatch {
+            block_index,
+            reason,
+        }
+    })
 }
 
 /// Checks that a complete block chain decomposes the same instruction lookup,
@@ -11059,6 +11136,11 @@ where
         }
     }
 
+    let cycle_capacity = blocks
+        .iter()
+        .map(|block| block.active_cycles)
+        .max()
+        .unwrap_or(0);
     let mut receipt_blocks = Vec::with_capacity(blocks.len());
     for (block_position, block) in blocks.iter().enumerate() {
         let public_input = &public_inputs[block_position];
@@ -11085,12 +11167,184 @@ where
             lasso_instruction_contribution_digest,
             lasso_tuple_contribution_digest,
         );
+        let mut cycles = Vec::with_capacity(cycle_capacity);
+        for (local_cycle, cycle) in block.cycles.iter().enumerate() {
+            let next_cycle = block
+                .cycles
+                .get(local_cycle + 1)
+                .or_else(|| {
+                    blocks
+                        .get(block_position + 1)
+                        .and_then(|next_block| next_block.cycles.first())
+                })
+                .or_else(|| {
+                    if final_cycle < trace_length {
+                        Some(&noop_cycle)
+                    } else {
+                        None
+                    }
+                });
+            let cpu_row = R1CSCycleInputs::from_cycle_with_next::<F>(
+                bytecode_preprocessing,
+                cycle,
+                next_cycle,
+            );
+            let mut cpu_r1cs_inputs = [0i128; ALL_R1CS_INPUTS.len()];
+            for (input_index, input) in ALL_R1CS_INPUTS.iter().enumerate() {
+                cpu_r1cs_inputs[input_index] = cpu_row.get_input_value(*input);
+            }
+
+            let rs1 = cycle.rs1_read();
+            let rs2 = cycle.rs2_read();
+            let rd = cycle.rd_write();
+            let (ram_kind, ram_address, ram_read_value, ram_write_value) = match cycle.ram_access()
+            {
+                tracer::instruction::RAMAccess::Read(read) => {
+                    (1, read.address, read.value, read.value)
+                }
+                tracer::instruction::RAMAccess::Write(write) => {
+                    (2, write.address, write.pre_value, write.post_value)
+                }
+                tracer::instruction::RAMAccess::NoOp => (0, 0, 0, 0),
+            };
+            let lookup_index = LookupQuery::<XLEN>::to_lookup_index(cycle);
+            let (left_lookup_operand, right_lookup_operand) =
+                LookupQuery::<XLEN>::to_lookup_operands(cycle);
+            cycles.push(RecursiveJoltCycleWitness {
+                active: true,
+                global_cycle: block.global_cycle_start + local_cycle,
+                rs1_present: rs1.is_some(),
+                rs1_index: rs1.map(|(index, _)| index).unwrap_or(0),
+                rs1_value: rs1.map(|(_, value)| value).unwrap_or(0),
+                rs2_present: rs2.is_some(),
+                rs2_index: rs2.map(|(index, _)| index).unwrap_or(0),
+                rs2_value: rs2.map(|(_, value)| value).unwrap_or(0),
+                rd_present: rd.is_some(),
+                rd_index: rd.map(|(index, _, _)| index).unwrap_or(0),
+                rd_pre_value: rd.map(|(_, value, _)| value).unwrap_or(0),
+                rd_post_value: rd.map(|(_, _, value)| value).unwrap_or(0),
+                ram_kind,
+                ram_address,
+                ram_read_value,
+                ram_write_value,
+                lookup_index,
+                left_lookup_operand,
+                right_lookup_operand,
+                lookup_output: LookupQuery::<XLEN>::to_lookup_output(cycle),
+                cpu_r1cs_inputs,
+            });
+        }
+        cycles.resize(cycle_capacity, RecursiveJoltCycleWitness::default());
+
+        let register = RecursiveJoltRegisterOpeningWitness {
+            value_opening_point: encode_recursive_jolt_opening_point::<F>(
+                block.block_index,
+                register_value_opening_point,
+            )?,
+            value_claims: encode_recursive_jolt_field_array(
+                block.block_index,
+                expected_register_value_claims,
+            )?,
+            value_block_contributions: encode_recursive_jolt_field_array(
+                block.block_index,
+                block_register_value_contributions[block_position],
+            )?,
+            address_opening_point: encode_recursive_jolt_opening_point::<F>(
+                block.block_index,
+                register_address_opening_point,
+            )?,
+            address_claims: encode_recursive_jolt_field_array(
+                block.block_index,
+                expected_register_address_claims,
+            )?,
+            address_block_contributions: encode_recursive_jolt_field_array(
+                block.block_index,
+                block_register_address_contributions[block_position],
+            )?,
+            inc_opening_point: encode_recursive_jolt_opening_point::<F>(
+                block.block_index,
+                rd_inc_opening_point,
+            )?,
+            inc_claim: encode_recursive_jolt_field(block.block_index, expected_rd_inc_claim)?,
+            inc_block_contribution: encode_recursive_jolt_field(
+                block.block_index,
+                block_rd_inc_contributions[block_position],
+            )?,
+        };
+        let ram = RecursiveJoltRamOpeningWitness {
+            ram_start_address,
+            ram_k,
+            log_k_chunk,
+            ra_opening_points: ram_opening_points
+                .iter()
+                .map(|point| encode_recursive_jolt_opening_point::<F>(block.block_index, point))
+                .collect::<Result<Vec<_>, _>>()?,
+            ra_claims: encode_recursive_jolt_field_vec(block.block_index, ram_opening_claims)?,
+            ra_block_contributions: encode_recursive_jolt_field_vec(
+                block.block_index,
+                &block_ram_ra_contributions[block_position],
+            )?,
+            tuple_opening_point: encode_recursive_jolt_opening_point::<F>(
+                block.block_index,
+                ram_tuple_opening_point,
+            )?,
+            tuple_claims: encode_recursive_jolt_field_array(
+                block.block_index,
+                expected_ram_tuple_claims,
+            )?,
+            tuple_block_contributions: encode_recursive_jolt_field_array(
+                block.block_index,
+                block_ram_tuple_contributions[block_position],
+            )?,
+            inc_opening_point: encode_recursive_jolt_opening_point::<F>(
+                block.block_index,
+                ram_inc_opening_point,
+            )?,
+            inc_claim: encode_recursive_jolt_field(block.block_index, expected_ram_inc_claim)?,
+            inc_block_contribution: encode_recursive_jolt_field(
+                block.block_index,
+                block_ram_inc_contributions[block_position],
+            )?,
+        };
+        let cpu = RecursiveJoltCpuOpeningWitness {
+            opening_point: encode_recursive_jolt_opening_point::<F>(
+                block.block_index,
+                cpu_opening_point,
+            )?,
+            claims: encode_recursive_jolt_field_vec(block.block_index, expected_cpu_claims)?,
+            block_contributions: encode_recursive_jolt_field_vec(
+                block.block_index,
+                &block_cpu_contributions[block_position],
+            )?,
+        };
+        let recursive_opening_witness = RecursiveJoltBlockOpeningWitness {
+            version: RecursiveJoltBlockOpeningWitness::VERSION,
+            block_index: block.block_index,
+            active_cycles: block.active_cycles,
+            cycle_capacity,
+            cycles,
+            register,
+            ram,
+            cpu,
+            witness_digest: [0; 32],
+        }
+        .seal();
+        recursive_opening_witness
+            .validate_shape()
+            .map_err(
+                |reason| BlockTraceError::VerifiedJoltLookupReceiptMismatch {
+                    block_index: block.block_index,
+                    reason,
+                },
+            )?;
         let binding_digest = digest_verified_jolt_lookup_opening_block(
             opening_receipt.digest(),
             public_input,
             lookup_claims_digest,
             contribution_digest,
+            recursive_opening_witness.witness_digest,
         );
+
         receipt_blocks.push(VerifiedJoltLookupBlockOpening {
             block_index: block.block_index,
             global_cycle_start: block.global_cycle_start,
@@ -11100,6 +11354,7 @@ where
             lasso_instruction_contribution_digest,
             lasso_tuple_contribution_digest,
             lasso_claim_digest,
+            recursive_opening_witness,
             binding_digest,
         });
     }
@@ -11290,6 +11545,7 @@ where
         state.verified_jolt_lasso_instruction_opening_count = receipt.instruction_opening_count();
         state.verified_jolt_lasso_tuple_claim_count = 3;
         state.state_digest = digest_foldable_block_state(state);
+        fold_input.recursive_opening_witness = Some(opening.recursive_opening_witness.clone());
     }
     Ok(())
 }
@@ -11316,6 +11572,7 @@ where
     let mut base_only = fold_inputs.to_vec();
     for fold_input in &mut base_only {
         clear_verified_jolt_lookup_opening_binding(&mut fold_input.state);
+        fold_input.recursive_opening_witness = None;
     }
     verify_verified_jolt_lookup_receipt_bindings(&base_only, &receipt.lookup_receipt)?;
 
@@ -11355,6 +11612,26 @@ where
             return Err(BlockTraceError::VerifiedJoltLookupReceiptMismatch {
                 block_index: state.block_index,
                 reason: "verified lookup opening block binding mismatch",
+            });
+        }
+        let recursive_opening_witness = fold_input.recursive_opening_witness.as_ref().ok_or(
+            BlockTraceError::VerifiedJoltLookupReceiptMismatch {
+                block_index: state.block_index,
+                reason: "recursive Jolt opening witness is missing",
+            },
+        )?;
+        recursive_opening_witness
+            .validate_shape()
+            .map_err(
+                |reason| BlockTraceError::VerifiedJoltLookupReceiptMismatch {
+                    block_index: state.block_index,
+                    reason,
+                },
+            )?;
+        if recursive_opening_witness != &opening.recursive_opening_witness {
+            return Err(BlockTraceError::VerifiedJoltLookupReceiptMismatch {
+                block_index: state.block_index,
+                reason: "recursive Jolt opening witness does not match authenticated receipt",
             });
         }
         if state.state_digest != digest_foldable_block_state(state) {
@@ -11417,7 +11694,16 @@ where
     verify_block_proof_bundle(bytecode_preprocessing, block, lookahead_cycle, bundle)?;
 
     let expected = build_block_fold_input(bundle);
-    if fold_input != &expected {
+    let mut base_fold_input = fold_input.clone();
+    #[cfg(not(feature = "zk"))]
+    {
+        // The full recursive opening witness is attached only after the base
+        // block proof bundle has been built. It is authenticated separately by
+        // `verify_verified_jolt_lookup_block_opening_bindings` and must not make
+        // the underlying bundle-to-fold-input equality check fail.
+        base_fold_input.recursive_opening_witness = None;
+    }
+    if base_fold_input != expected {
         return Err(BlockTraceError::BlockFoldInputMismatch {
             block_index: block.block_index,
         });
@@ -12192,15 +12478,17 @@ fn digest_verified_jolt_lookup_opening_block<Digest>(
     public_input: &BlockPublicInput<Digest>,
     lookup_claims_digest: [u8; 32],
     contribution_digest: [u8; 32],
+    recursive_opening_witness_digest: [u8; 32],
 ) -> [u8; 32] {
     let mut hasher = Sha3_256::new();
-    hasher.update(b"JOLT_NOVA_VERIFIED_EXECUTION_OPENING_BLOCK_V5");
+    hasher.update(b"JOLT_NOVA_VERIFIED_EXECUTION_OPENING_BLOCK_V6");
     hasher.update(opening_receipt_digest);
     update_usize(&mut hasher, public_input.block_index);
     update_usize(&mut hasher, public_input.global_cycle_start);
     update_usize(&mut hasher, public_input.global_cycle_end());
     hasher.update(lookup_claims_digest);
     hasher.update(contribution_digest);
+    hasher.update(recursive_opening_witness_digest);
     finalize_digest(hasher)
 }
 
@@ -12209,7 +12497,7 @@ fn digest_verified_jolt_lookup_block_opening_receipt(
     receipt: &VerifiedJoltLookupBlockOpeningReceipt,
 ) -> [u8; 32] {
     let mut hasher = Sha3_256::new();
-    hasher.update(b"JOLT_NOVA_VERIFIED_EXECUTION_BLOCK_OPENING_RECEIPT_V6");
+    hasher.update(b"JOLT_NOVA_VERIFIED_EXECUTION_BLOCK_OPENING_RECEIPT_V7");
     hasher.update(receipt.version.to_le_bytes());
     hasher.update(receipt.lookup_receipt.digest());
     hasher.update(receipt.global_opening_receipt_digest);
@@ -12228,6 +12516,7 @@ fn digest_verified_jolt_lookup_block_opening_receipt(
         hasher.update(block.lasso_instruction_contribution_digest);
         hasher.update(block.lasso_tuple_contribution_digest);
         hasher.update(block.lasso_claim_digest);
+        hasher.update(block.recursive_opening_witness.witness_digest);
         hasher.update(block.binding_digest);
     }
     finalize_digest(hasher)
@@ -19828,6 +20117,100 @@ mod tests {
             verify_jolt_lookup_block_openings(&bytecode, &blocks, &corrupt_cpu_receipt),
             Err(BlockTraceError::VerifiedJoltLookupReceiptMismatch {
                 reason: "block CPU/R1CS rows do not reconstruct authenticated Spartan claims",
+                ..
+            })
+        ));
+    }
+
+    #[cfg(not(feature = "zk"))]
+    #[test]
+    fn recursive_native_opening_witness_retains_full_data_and_rejects_tampering() {
+        let blocks = [trace_block(0, boundary(0, 0), boundary(2, 0))];
+        let bytecode = bytecode_for_blocks(&blocks);
+        let opening_receipt =
+            test_lookup_opening_receipt(&bytecode, &blocks, 8, false, false, false, false, false);
+        let receipt =
+            verify_jolt_lookup_block_openings(&bytecode, &blocks, &opening_receipt).unwrap();
+
+        let expected_value_claims = opening_receipt.register_value_opening_claims();
+        let expected_claim_bytes = expected_value_claims.map(|claim| {
+            RecursiveJoltFieldElement::from_field(claim)
+                .unwrap()
+                .canonical_le_bytes
+        });
+        let cycle_capacity = blocks
+            .iter()
+            .map(|block| block.active_cycles)
+            .max()
+            .unwrap();
+        for block in &blocks {
+            let witness = receipt
+                .recursive_block_opening_witness(block.block_index)
+                .unwrap();
+            witness.validate_shape().unwrap();
+            assert_eq!(witness.active_cycles, block.active_cycles);
+            assert_eq!(witness.cycle_capacity, cycle_capacity);
+            assert_eq!(witness.cycles.len(), cycle_capacity);
+            assert_eq!(
+                witness
+                    .register
+                    .value_claims
+                    .map(|claim| claim.canonical_le_bytes),
+                expected_claim_bytes
+            );
+            assert_eq!(witness.cpu.claims.len(), ALL_R1CS_INPUTS.len());
+            assert!(witness.cycles[..block.active_cycles]
+                .iter()
+                .all(|cycle| cycle.active));
+            assert!(witness.cycles[block.active_cycles..]
+                .iter()
+                .all(|cycle| cycle == &RecursiveJoltCycleWitness::default()));
+        }
+
+        let pipeline =
+            BlockProofPipeline::<_, ark_bn254::Fr, MockFoldingBackend>::
+                with_backend_and_verified_jolt_lookup_block_opening_receipt(
+                    [9u8; 32],
+                    MockFoldingBackend,
+                    receipt.clone(),
+                );
+        let output = pipeline.prove_blocks(&bytecode, &blocks).unwrap();
+        assert!(output
+            .fold_inputs
+            .iter()
+            .all(|input| input.recursive_opening_witness.is_some()));
+
+        let mut stale_digest = output.clone();
+        stale_digest.fold_inputs[0]
+            .recursive_opening_witness
+            .as_mut()
+            .unwrap()
+            .register
+            .inc_claim
+            .canonical_le_bytes[0] ^= 1;
+        assert!(matches!(
+            verify_verified_jolt_lookup_block_opening_bindings(&stale_digest.fold_inputs, &receipt,),
+            Err(BlockTraceError::VerifiedJoltLookupReceiptMismatch {
+                reason: "recursive Jolt opening witness digest mismatch",
+                ..
+            })
+        ));
+
+        let mut resealed_tamper = output.clone();
+        let witness = resealed_tamper.fold_inputs[0]
+            .recursive_opening_witness
+            .take()
+            .unwrap();
+        let mut tampered = witness;
+        tampered.register.inc_claim.canonical_le_bytes[0] ^= 1;
+        resealed_tamper.fold_inputs[0].recursive_opening_witness = Some(tampered.seal());
+        assert!(matches!(
+            verify_verified_jolt_lookup_block_opening_bindings(
+                &resealed_tamper.fold_inputs,
+                &receipt,
+            ),
+            Err(BlockTraceError::VerifiedJoltLookupReceiptMismatch {
+                reason: "recursive Jolt opening witness does not match authenticated receipt",
                 ..
             })
         ));
