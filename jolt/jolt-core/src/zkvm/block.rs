@@ -738,6 +738,8 @@ pub struct BlockFoldAccumulator<Digest = [u8; 32]> {
     pub global_cycle_end: Option<usize>,
     pub initial_machine_state_digest: Option<[u8; 32]>,
     pub initial_register_digest: Option<[u8; 32]>,
+    pub verified_jolt_lookup_receipt_digest: Option<[u8; 32]>,
+    pub verified_jolt_lookup_opening_receipt_digest: Option<[u8; 32]>,
     pub latest_state_digest: Option<[u8; 32]>,
     pub latest_machine_state_digest: Option<[u8; 32]>,
     pub latest_register_digest: Option<[u8; 32]>,
@@ -760,6 +762,8 @@ impl<Digest> Default for BlockFoldAccumulator<Digest> {
             global_cycle_end: None,
             initial_machine_state_digest: None,
             initial_register_digest: None,
+            verified_jolt_lookup_receipt_digest: None,
+            verified_jolt_lookup_opening_receipt_digest: None,
             latest_state_digest: None,
             latest_machine_state_digest: None,
             latest_register_digest: None,
@@ -842,12 +846,46 @@ where
                     reason: "register boundary digest mismatch",
                 });
             }
+
+            if self.verified_jolt_lookup_receipt_digest.is_some()
+                != state.verified_jolt_lookup_receipt_present
+                || self
+                    .verified_jolt_lookup_receipt_digest
+                    .is_some_and(|digest| digest != state.verified_jolt_lookup_receipt_digest)
+            {
+                return Err(BlockTraceError::BlockFoldAccumulatorBoundaryMismatch {
+                    current_block,
+                    next_block: state.block_index,
+                    reason: "verified Jolt lookup receipt continuity mismatch",
+                });
+            }
+
+            if self.verified_jolt_lookup_opening_receipt_digest.is_some()
+                != state.verified_jolt_lookup_opening_present
+                || self
+                    .verified_jolt_lookup_opening_receipt_digest
+                    .is_some_and(|digest| {
+                        digest != state.verified_jolt_lookup_opening_receipt_digest
+                    })
+            {
+                return Err(BlockTraceError::BlockFoldAccumulatorBoundaryMismatch {
+                    current_block,
+                    next_block: state.block_index,
+                    reason: "verified Jolt lookup opening receipt continuity mismatch",
+                });
+            }
         } else {
             self.program_digest = Some(fold_input.program_digest.clone());
             self.first_block_index = Some(state.block_index);
             self.global_cycle_start = Some(state.global_cycle_start);
             self.initial_machine_state_digest = Some(state.start_state_digest);
             self.initial_register_digest = Some(state.start_register_digest);
+            self.verified_jolt_lookup_receipt_digest = state
+                .verified_jolt_lookup_receipt_present
+                .then_some(state.verified_jolt_lookup_receipt_digest);
+            self.verified_jolt_lookup_opening_receipt_digest = state
+                .verified_jolt_lookup_opening_present
+                .then_some(state.verified_jolt_lookup_opening_receipt_digest);
         }
 
         self.accumulator_digest = digest_fold_accumulator_step(self.accumulator_digest, fold_input);
@@ -963,11 +1001,11 @@ pub struct NovaFoldConfig {
     pub use_zero_knowledge: bool,
 }
 
-pub const NOVA_BLOCK_FOLD_RELATION_NAME: &str = "jolt-nova-block-fold-v2";
+pub const NOVA_BLOCK_FOLD_RELATION_NAME: &str = "jolt-nova-block-fold-v3";
 pub const NOVA_JOLT_LASSO_SUBCLAIM_BACKEND_NAME: &str = "jolt-lasso-subclaim-v1";
 pub const NOVA_TRANSCRIPT_SUBCLAIM_BACKEND_NAME: &str = "transcript-subclaim-fingerprints";
 pub const NOVA_LOGUP_SUBCLAIM_BACKEND_NAME: &str = "logup-subclaim-v1";
-pub const JOLT_NOVA_STEP_RELATION_VERSION: &str = "jolt-nova-step-relation-v1";
+pub const JOLT_NOVA_STEP_RELATION_VERSION: &str = "jolt-nova-step-relation-v2";
 pub const NOVA_CPU_R1CS_RELATION_NAME: &str = "jolt-nova-cpu-r1cs-v1";
 pub const JOLT_NOVA_CPU_R1CS_RELATION_VERSION: &str = "jolt-nova-cpu-r1cs-relation-v1";
 pub const NOVA_EXECUTION_SUBCLAIM_RELATION_NAME: &str = "jolt-nova-execution-subclaims-v1";
@@ -1002,8 +1040,10 @@ impl Default for NovaFoldConfig {
 ///
 /// The first seven entries retain the Stage 9 accumulators. Entries 7--10
 /// make the program and cross-block execution boundaries part of Nova's public
-/// recursive state instead of relying only on host-side metadata checks.
-pub const NOVA_Z_ARITY: usize = 11;
+/// recursive state. Entries 11--12 carry the global verified Jolt proof and
+/// opening-receipt digests so every folded block is constrained to the same
+/// authenticated Lasso execution.
+pub const NOVA_Z_ARITY: usize = 13;
 pub const NOVA_SEMANTIC_ACCUMULATOR_INDEX: usize = 0;
 pub const NOVA_NEXT_BLOCK_INDEX_INDEX: usize = 1;
 pub const NOVA_TOTAL_ACTIVE_CYCLES_INDEX: usize = 2;
@@ -1015,6 +1055,8 @@ pub const NOVA_PROGRAM_DIGEST_INDEX: usize = 7;
 pub const NOVA_NEXT_GLOBAL_CYCLE_INDEX: usize = 8;
 pub const NOVA_MACHINE_STATE_INDEX: usize = 9;
 pub const NOVA_REGISTER_STATE_INDEX: usize = 10;
+pub const NOVA_JOLT_LOOKUP_RECEIPT_DIGEST_INDEX: usize = 11;
+pub const NOVA_JOLT_LOOKUP_OPENING_RECEIPT_DIGEST_INDEX: usize = 12;
 pub type NovaFoldZState = [[u8; 32]; NOVA_Z_ARITY];
 
 /// Named, storage-level view of Nova's public input/output state.
@@ -1035,6 +1077,8 @@ pub struct JoltNovaStepPublicState {
     pub next_global_cycle: [u8; 32],
     pub machine_state_digest: [u8; 32],
     pub register_state_digest: [u8; 32],
+    pub verified_jolt_lookup_receipt_digest: [u8; 32],
+    pub verified_jolt_lookup_opening_receipt_digest: [u8; 32],
 }
 
 impl JoltNovaStepPublicState {
@@ -1051,6 +1095,9 @@ impl JoltNovaStepPublicState {
             next_global_cycle: state[NOVA_NEXT_GLOBAL_CYCLE_INDEX],
             machine_state_digest: state[NOVA_MACHINE_STATE_INDEX],
             register_state_digest: state[NOVA_REGISTER_STATE_INDEX],
+            verified_jolt_lookup_receipt_digest: state[NOVA_JOLT_LOOKUP_RECEIPT_DIGEST_INDEX],
+            verified_jolt_lookup_opening_receipt_digest: state
+                [NOVA_JOLT_LOOKUP_OPENING_RECEIPT_DIGEST_INDEX],
         }
     }
 
@@ -1067,6 +1114,8 @@ impl JoltNovaStepPublicState {
             self.next_global_cycle,
             self.machine_state_digest,
             self.register_state_digest,
+            self.verified_jolt_lookup_receipt_digest,
+            self.verified_jolt_lookup_opening_receipt_digest,
         ]
     }
 }
@@ -2003,9 +2052,9 @@ pub const JOLT_NOVA_REPORT_CANONICAL_OUTPUT_FORMAT: JoltNovaReportOutputFormat =
     JoltNovaReportOutputFormat::Json;
 pub const JOLT_NOVA_FINAL_PROOF_SIZE_SCALING_REPORT_KIND: &str = "final-proof-size-scaling";
 
-pub const FINAL_FOLDED_INSTANCE_VERSION: &str = "jolt-nova-final-folded-instance-v2";
+pub const FINAL_FOLDED_INSTANCE_VERSION: &str = "jolt-nova-final-folded-instance-v3";
 pub const SPARTAN_FINAL_INSTANCE_ENCODING_VERSION: &str =
-    "jolt-nova-spartan-final-instance-encoding-v2";
+    "jolt-nova-spartan-final-instance-encoding-v3";
 pub const SPARTAN_PLACEHOLDER_PROOF_SYSTEM_NAME: &str = "spartan-placeholder";
 pub const SPARTAN_FINAL_PROOF_SYSTEM_NAME: &str = "spartan-final-proof";
 
@@ -5105,6 +5154,9 @@ impl nova_snark::traits::circuit::StepCircuit<NovaScalar> for JoltNovaStepCircui
         let next_global_cycle = &z[NOVA_NEXT_GLOBAL_CYCLE_INDEX];
         let machine_state_digest = &z[NOVA_MACHINE_STATE_INDEX];
         let register_state_digest = &z[NOVA_REGISTER_STATE_INDEX];
+        let verified_jolt_lookup_receipt_digest_binding = &z[NOVA_JOLT_LOOKUP_RECEIPT_DIGEST_INDEX];
+        let verified_jolt_lookup_opening_receipt_digest_binding =
+            &z[NOVA_JOLT_LOOKUP_OPENING_RECEIPT_DIGEST_INDEX];
 
         let statement_digest =
             alloc_nova_witness(cs, "statement digest", self.witness.statement_digest)?;
@@ -5506,6 +5558,24 @@ impl nova_snark::traits::circuit::StepCircuit<NovaScalar> for JoltNovaStepCircui
                     .ok_or(nova_snark::frontend::SynthesisError::AssignmentMissing)
             },
         )?;
+        let output_verified_jolt_lookup_receipt_digest =
+            nova_snark::frontend::num::AllocatedNum::alloc(
+                cs.namespace(|| "carried verified Jolt lookup receipt digest"),
+                || {
+                    verified_jolt_lookup_receipt_digest_binding
+                        .get_value()
+                        .ok_or(nova_snark::frontend::SynthesisError::AssignmentMissing)
+                },
+            )?;
+        let output_verified_jolt_lookup_opening_receipt_digest =
+            nova_snark::frontend::num::AllocatedNum::alloc(
+                cs.namespace(|| "carried verified Jolt lookup opening receipt digest"),
+                || {
+                    verified_jolt_lookup_opening_receipt_digest_binding
+                        .get_value()
+                        .ok_or(nova_snark::frontend::SynthesisError::AssignmentMissing)
+                },
+            )?;
 
         cs.enforce(
             || "block index matches running state",
@@ -6369,6 +6439,20 @@ impl nova_snark::traits::circuit::StepCircuit<NovaScalar> for JoltNovaStepCircui
         );
 
         cs.enforce(
+            || "verified Jolt lookup receipt digest binding is carried forward",
+            |lc| lc + verified_jolt_lookup_receipt_digest_binding.get_variable(),
+            |lc| lc + CS::one(),
+            |lc| lc + output_verified_jolt_lookup_receipt_digest.get_variable(),
+        );
+
+        cs.enforce(
+            || "verified Jolt lookup opening receipt digest binding is carried forward",
+            |lc| lc + verified_jolt_lookup_opening_receipt_digest_binding.get_variable(),
+            |lc| lc + CS::one(),
+            |lc| lc + output_verified_jolt_lookup_opening_receipt_digest.get_variable(),
+        );
+
+        cs.enforce(
             || "register claim fingerprint binds register fields",
             |lc| {
                 lc + (
@@ -6566,6 +6650,40 @@ impl nova_snark::traits::circuit::StepCircuit<NovaScalar> for JoltNovaStepCircui
             || "verified Jolt lookup opening requires base receipt",
             |lc| lc + verified_jolt_lookup_opening_present.get_variable(),
             |lc| lc + CS::one() - verified_jolt_lookup_receipt_present.get_variable(),
+            |lc| lc,
+        );
+
+        cs.enforce(
+            || "verified Jolt lookup receipt digest matches recursive continuity binding",
+            |lc| lc + verified_jolt_lookup_receipt_present.get_variable(),
+            |lc| {
+                lc + verified_jolt_lookup_receipt_digest_binding.get_variable()
+                    - verified_jolt_lookup_receipt_digest.get_variable()
+            },
+            |lc| lc,
+        );
+
+        cs.enforce(
+            || "absent verified Jolt lookup receipt has zero recursive continuity binding",
+            |lc| lc + CS::one() - verified_jolt_lookup_receipt_present.get_variable(),
+            |lc| lc + verified_jolt_lookup_receipt_digest_binding.get_variable(),
+            |lc| lc,
+        );
+
+        cs.enforce(
+            || "verified Jolt lookup opening receipt digest matches recursive continuity binding",
+            |lc| lc + verified_jolt_lookup_opening_present.get_variable(),
+            |lc| {
+                lc + verified_jolt_lookup_opening_receipt_digest_binding.get_variable()
+                    - verified_jolt_lookup_opening_receipt_digest.get_variable()
+            },
+            |lc| lc,
+        );
+
+        cs.enforce(
+            || "absent verified Jolt lookup opening has zero recursive continuity binding",
+            |lc| lc + CS::one() - verified_jolt_lookup_opening_present.get_variable(),
+            |lc| lc + verified_jolt_lookup_opening_receipt_digest_binding.get_variable(),
             |lc| lc,
         );
 
@@ -7699,6 +7817,8 @@ impl nova_snark::traits::circuit::StepCircuit<NovaScalar> for JoltNovaStepCircui
             output_next_global_cycle,
             output_machine_state_digest,
             output_register_state_digest,
+            output_verified_jolt_lookup_receipt_digest,
+            output_verified_jolt_lookup_opening_receipt_digest,
         ])
     }
 }
@@ -7806,6 +7926,9 @@ fn nova_initial_z_state_for_witness(witness: &JoltNovaStepWitness) -> NovaZState
     state[NOVA_NEXT_GLOBAL_CYCLE_INDEX] = witness.global_cycle_start;
     state[NOVA_MACHINE_STATE_INDEX] = witness.start_state_digest;
     state[NOVA_REGISTER_STATE_INDEX] = witness.start_register_digest;
+    state[NOVA_JOLT_LOOKUP_RECEIPT_DIGEST_INDEX] = witness.verified_jolt_lookup_receipt_digest;
+    state[NOVA_JOLT_LOOKUP_OPENING_RECEIPT_DIGEST_INDEX] =
+        witness.verified_jolt_lookup_opening_receipt_digest;
     state
 }
 
@@ -7881,6 +8004,26 @@ where
         "start_register_digest",
         &initial_register_digest,
     );
+    state[NOVA_JOLT_LOOKUP_RECEIPT_DIGEST_INDEX] = metadata
+        .verified_jolt_lookup_receipt_digest
+        .map(|digest| {
+            nova_hash_bytes_to_scalar(
+                "statement-field",
+                "verified_jolt_lookup_receipt_digest",
+                &digest,
+            )
+        })
+        .unwrap_or_else(NovaScalar::zero);
+    state[NOVA_JOLT_LOOKUP_OPENING_RECEIPT_DIGEST_INDEX] = metadata
+        .verified_jolt_lookup_opening_receipt_digest
+        .map(|digest| {
+            nova_hash_bytes_to_scalar(
+                "statement-field",
+                "verified_jolt_lookup_opening_receipt_digest",
+                &digest,
+            )
+        })
+        .unwrap_or_else(NovaScalar::zero);
     Ok(state)
 }
 
@@ -7924,6 +8067,8 @@ fn nova_z_state_from_storage(
         nova_scalar_from_storage(&storage[8], block_index)?,
         nova_scalar_from_storage(&storage[9], block_index)?,
         nova_scalar_from_storage(&storage[10], block_index)?,
+        nova_scalar_from_storage(&storage[11], block_index)?,
+        nova_scalar_from_storage(&storage[12], block_index)?,
     ])
 }
 
@@ -7974,6 +8119,8 @@ where
         witness.global_cycle_end,
         witness.end_state_digest,
         witness.end_register_digest,
+        current_z_state[NOVA_JOLT_LOOKUP_RECEIPT_DIGEST_INDEX],
+        current_z_state[NOVA_JOLT_LOOKUP_OPENING_RECEIPT_DIGEST_INDEX],
     ]
 }
 
@@ -7991,6 +8138,8 @@ fn nova_step_delta_vector(witness: &JoltNovaStepWitness) -> NovaZState {
         witness.active_cycles,
         witness.end_state_digest - witness.start_state_digest,
         witness.end_register_digest - witness.start_register_digest,
+        NovaScalar::zero(),
+        NovaScalar::zero(),
     ]
 }
 
@@ -8054,6 +8203,16 @@ fn validate_nova_step_relation_input(
         (
             witness.global_cycle_start + witness.active_cycles == witness.global_cycle_end,
             "Nova step active-cycle range mismatch",
+        ),
+        (
+            public_input[NOVA_JOLT_LOOKUP_RECEIPT_DIGEST_INDEX]
+                == witness.verified_jolt_lookup_receipt_digest,
+            "Nova step verified Jolt lookup receipt continuity mismatch",
+        ),
+        (
+            public_input[NOVA_JOLT_LOOKUP_OPENING_RECEIPT_DIGEST_INDEX]
+                == witness.verified_jolt_lookup_opening_receipt_digest,
+            "Nova step verified Jolt lookup opening receipt continuity mismatch",
         ),
     ];
 
@@ -12110,7 +12269,7 @@ where
 
 fn digest_nova_z_state(state: &NovaFoldZState) -> [u8; 32] {
     let mut hasher = Sha3_256::new();
-    hasher.update(b"JOLT_NOVA_Z_STATE_V2");
+    hasher.update(b"JOLT_NOVA_Z_STATE_V3");
     update_usize(&mut hasher, NOVA_Z_ARITY);
     for (index, scalar_bytes) in state.iter().enumerate() {
         update_usize(&mut hasher, index);
@@ -12689,6 +12848,8 @@ where
     append_optional_usize(output, metadata.global_cycle_end);
     append_optional_digest(output, metadata.initial_machine_state_digest);
     append_optional_digest(output, metadata.initial_register_digest);
+    append_optional_digest(output, metadata.verified_jolt_lookup_receipt_digest);
+    append_optional_digest(output, metadata.verified_jolt_lookup_opening_receipt_digest);
     append_optional_digest(output, metadata.latest_state_digest);
     append_optional_digest(output, metadata.latest_machine_state_digest);
     append_optional_digest(output, metadata.latest_register_digest);
@@ -12767,6 +12928,8 @@ fn update_block_fold_metadata<Digest>(
     update_optional_usize(hasher, metadata.global_cycle_end);
     update_optional_digest(hasher, metadata.initial_machine_state_digest);
     update_optional_digest(hasher, metadata.initial_register_digest);
+    update_optional_digest(hasher, metadata.verified_jolt_lookup_receipt_digest);
+    update_optional_digest(hasher, metadata.verified_jolt_lookup_opening_receipt_digest);
     update_optional_digest(hasher, metadata.latest_state_digest);
     update_optional_digest(hasher, metadata.latest_machine_state_digest);
     update_optional_digest(hasher, metadata.latest_register_digest);
@@ -16994,6 +17157,87 @@ mod tests {
         assert_eq!(
             cs.which_is_unsatisfied(),
             Some("verified Jolt Lasso tuple claim count is three when present")
+        );
+    }
+
+    #[cfg(all(feature = "nova", not(feature = "zk")))]
+    #[test]
+    fn nova_step_circuit_rejects_cross_block_jolt_lasso_receipt_switches() {
+        let block0 = trace_block(0, boundary(0, 0), boundary(2, 0));
+        let block1 = trace_block(1, block0.end_state.clone(), boundary(4, 0));
+        let blocks = [block0, block1];
+        let bytecode = bytecode_for_blocks(&blocks);
+        let opening_receipt =
+            test_lookup_opening_receipt(&bytecode, &blocks, 8, false, false, false, false, false);
+        let receipt =
+            verify_jolt_lookup_block_openings(&bytecode, &blocks, &opening_receipt).unwrap();
+        let pipeline =
+            BlockProofPipeline::<_, ark_bn254::Fr, MockFoldingBackend>::
+                with_backend_and_verified_jolt_lookup_block_opening_receipt(
+                    [9u8; 32],
+                    MockFoldingBackend,
+                    receipt,
+                );
+        let output = pipeline.prove_blocks(&bytecode, &blocks).unwrap();
+        let initial_z = nova_initial_z_state_for_fold_input(&output.fold_inputs[0]);
+        let after_first = nova_next_z_state(initial_z, &output.fold_inputs[0]);
+
+        let mut switched_proof_receipt = output.fold_inputs[1].clone();
+        switched_proof_receipt
+            .state
+            .verified_jolt_lookup_receipt_digest[0] ^= 1;
+        switched_proof_receipt.state.state_digest =
+            digest_foldable_block_state(&switched_proof_receipt.state);
+        let mut proof_receipt_accumulator = BlockFoldAccumulator::new();
+        proof_receipt_accumulator
+            .absorb(&output.fold_inputs[0])
+            .unwrap();
+        assert_eq!(
+            proof_receipt_accumulator
+                .absorb(&switched_proof_receipt)
+                .unwrap_err(),
+            BlockTraceError::BlockFoldAccumulatorBoundaryMismatch {
+                current_block: 0,
+                next_block: 1,
+                reason: "verified Jolt lookup receipt continuity mismatch",
+            }
+        );
+        let proof_receipt_circuit = nova_step_circuit_for_fold_input(&switched_proof_receipt);
+        let proof_receipt_cs =
+            synthesize_nova_step_circuit_with_input_for_test(&proof_receipt_circuit, after_first);
+        assert_eq!(
+            proof_receipt_cs.which_is_unsatisfied(),
+            Some("verified Jolt lookup receipt digest matches recursive continuity binding")
+        );
+
+        let mut switched_opening_receipt = output.fold_inputs[1].clone();
+        switched_opening_receipt
+            .state
+            .verified_jolt_lookup_opening_receipt_digest[0] ^= 1;
+        switched_opening_receipt.state.state_digest =
+            digest_foldable_block_state(&switched_opening_receipt.state);
+        let mut opening_receipt_accumulator = BlockFoldAccumulator::new();
+        opening_receipt_accumulator
+            .absorb(&output.fold_inputs[0])
+            .unwrap();
+        assert_eq!(
+            opening_receipt_accumulator
+                .absorb(&switched_opening_receipt)
+                .unwrap_err(),
+            BlockTraceError::BlockFoldAccumulatorBoundaryMismatch {
+                current_block: 0,
+                next_block: 1,
+                reason: "verified Jolt lookup opening receipt continuity mismatch",
+            }
+        );
+        let opening_receipt_circuit = nova_step_circuit_for_fold_input(&switched_opening_receipt);
+        let opening_receipt_cs =
+            synthesize_nova_step_circuit_with_input_for_test(&opening_receipt_circuit, after_first);
+        assert_eq!(
+            opening_receipt_cs.which_is_unsatisfied(),
+            Some(
+                "verified Jolt lookup opening receipt digest matches recursive continuity binding"
+            )
         );
     }
 
