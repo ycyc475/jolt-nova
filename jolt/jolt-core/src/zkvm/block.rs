@@ -1932,6 +1932,19 @@ pub struct FinalFoldedInstance<Digest = [u8; 32]> {
     pub instance_digest: [u8; 32],
 }
 
+/// Auditable final binding between the global Jolt Lasso receipts and Nova's
+/// recursive public state.
+#[cfg(feature = "nova")]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct JoltLassoFinalBinding {
+    pub verified_jolt_lookup_receipt_digest: Option<[u8; 32]>,
+    pub verified_jolt_lookup_opening_receipt_digest: Option<[u8; 32]>,
+    pub recursive_lookup_receipt_digest_binding: [u8; 32],
+    pub recursive_lookup_opening_receipt_digest_binding: [u8; 32],
+    pub lookup_claim_accumulator: [u8; 32],
+    pub authenticated_lasso_openings: bool,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct FinalFoldedProof<Digest = [u8; 32]> {
     pub proof_system: &'static str,
@@ -2232,6 +2245,82 @@ impl Default for NovaFoldingBackend {
     }
 }
 
+#[cfg(feature = "nova")]
+impl<Digest> FinalFoldedInstance<Digest> {
+    pub fn jolt_lasso_final_binding(&self) -> Result<JoltLassoFinalBinding, BlockTraceError> {
+        let block_index = self.metadata.last_block_index.unwrap_or(0);
+        if self
+            .metadata
+            .verified_jolt_lookup_opening_receipt_digest
+            .is_some()
+            && self.metadata.verified_jolt_lookup_receipt_digest.is_none()
+        {
+            return Err(BlockTraceError::NovaFoldingBackendError {
+                block_index,
+                reason: "final Lasso opening receipt is missing its base Jolt proof receipt",
+            });
+        }
+
+        let expected_lookup_receipt_binding = self
+            .metadata
+            .verified_jolt_lookup_receipt_digest
+            .map(|digest| {
+                nova_hash_bytes_to_scalar(
+                    "statement-field",
+                    "verified_jolt_lookup_receipt_digest",
+                    &digest,
+                )
+            })
+            .unwrap_or_else(NovaScalar::zero);
+        let expected_opening_receipt_binding = self
+            .metadata
+            .verified_jolt_lookup_opening_receipt_digest
+            .map(|digest| {
+                nova_hash_bytes_to_scalar(
+                    "statement-field",
+                    "verified_jolt_lookup_opening_receipt_digest",
+                    &digest,
+                )
+            })
+            .unwrap_or_else(NovaScalar::zero);
+        let recursive_lookup_receipt_digest_binding =
+            self.recursive_z_state[NOVA_JOLT_LOOKUP_RECEIPT_DIGEST_INDEX];
+        let recursive_lookup_opening_receipt_digest_binding =
+            self.recursive_z_state[NOVA_JOLT_LOOKUP_OPENING_RECEIPT_DIGEST_INDEX];
+
+        if recursive_lookup_receipt_digest_binding
+            != nova_scalar_to_storage(expected_lookup_receipt_binding)
+        {
+            return Err(BlockTraceError::NovaFoldingBackendError {
+                block_index,
+                reason: "final Lasso proof receipt binding does not match Nova public state",
+            });
+        }
+        if recursive_lookup_opening_receipt_digest_binding
+            != nova_scalar_to_storage(expected_opening_receipt_binding)
+        {
+            return Err(BlockTraceError::NovaFoldingBackendError {
+                block_index,
+                reason: "final Lasso opening receipt binding does not match Nova public state",
+            });
+        }
+
+        Ok(JoltLassoFinalBinding {
+            verified_jolt_lookup_receipt_digest: self.metadata.verified_jolt_lookup_receipt_digest,
+            verified_jolt_lookup_opening_receipt_digest: self
+                .metadata
+                .verified_jolt_lookup_opening_receipt_digest,
+            recursive_lookup_receipt_digest_binding,
+            recursive_lookup_opening_receipt_digest_binding,
+            lookup_claim_accumulator: self.recursive_z_state[NOVA_LOOKUP_ACCUMULATOR_INDEX],
+            authenticated_lasso_openings: self
+                .metadata
+                .verified_jolt_lookup_opening_receipt_digest
+                .is_some(),
+        })
+    }
+}
+
 pub fn build_final_folded_instance<Digest>(
     accumulator: &NovaFoldAccumulator<Digest>,
 ) -> Result<FinalFoldedInstance<Digest>, BlockTraceError>
@@ -2267,6 +2356,8 @@ where
         recursive_z_state,
         instance_digest: [0u8; 32],
     };
+    #[cfg(feature = "nova")]
+    instance.jolt_lasso_final_binding()?;
     instance.instance_digest = digest_final_folded_instance(&instance);
     Ok(instance)
 }
@@ -2295,6 +2386,8 @@ pub fn encode_final_folded_instance_for_spartan<Digest>(
 where
     Digest: AsRef<[u8]>,
 {
+    #[cfg(feature = "nova")]
+    instance.jolt_lasso_final_binding()?;
     let expected_instance_digest = digest_final_folded_instance(instance);
     if instance.instance_digest != expected_instance_digest {
         return Err(BlockTraceError::NovaFoldingBackendError {
@@ -19862,6 +19955,48 @@ mod tests {
             &receipt,
         )
         .unwrap();
+
+        let final_instance = &output.final_proof.as_ref().unwrap().instance;
+        let lasso_binding = final_instance.jolt_lasso_final_binding().unwrap();
+        assert_eq!(
+            lasso_binding.verified_jolt_lookup_receipt_digest,
+            Some(receipt.lookup_receipt().digest())
+        );
+        assert_eq!(
+            lasso_binding.verified_jolt_lookup_opening_receipt_digest,
+            Some(receipt.digest())
+        );
+        assert!(lasso_binding.authenticated_lasso_openings);
+        assert_ne!(lasso_binding.lookup_claim_accumulator, [0; 32]);
+
+        let mut tampered_recursive_binding = final_instance.clone();
+        tampered_recursive_binding.recursive_z_state
+            [NOVA_JOLT_LOOKUP_OPENING_RECEIPT_DIGEST_INDEX][0] ^= 1;
+        tampered_recursive_binding.instance_digest =
+            digest_final_folded_instance(&tampered_recursive_binding);
+        assert!(matches!(
+            encode_final_folded_instance_for_spartan(&tampered_recursive_binding),
+            Err(BlockTraceError::NovaFoldingBackendError {
+                reason: "final Lasso opening receipt binding does not match Nova public state",
+                ..
+            })
+        ));
+
+        let mut tampered_metadata_binding = final_instance.clone();
+        tampered_metadata_binding
+            .metadata
+            .verified_jolt_lookup_receipt_digest
+            .as_mut()
+            .unwrap()[0] ^= 1;
+        tampered_metadata_binding.instance_digest =
+            digest_final_folded_instance(&tampered_metadata_binding);
+        assert!(matches!(
+            encode_final_folded_instance_for_spartan(&tampered_metadata_binding),
+            Err(BlockTraceError::NovaFoldingBackendError {
+                reason: "final Lasso proof receipt binding does not match Nova public state",
+                ..
+            })
+        ));
     }
 
     #[cfg(feature = "nova")]
