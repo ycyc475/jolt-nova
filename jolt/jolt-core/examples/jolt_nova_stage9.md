@@ -1055,3 +1055,35 @@ make the capsule components public Nova state. The capsule is bound inside the
 step circuit and recorded in the external recursive-verifier boundary digest,
 but native SHA3, Dory, Spartan, register, RAM, lookup, and CPU verifier gadgets
 remain future work.
+
+## Stage 10.9: lookup verifier transcript capsule
+
+Stage 10.9 refines the Stage 10.7 lookup verifier gadget root into a nested
+transcript capsule. Instead of treating the lookup verifier surface as one flat
+root over all LogUp fields, the step circuit now computes three subroots:
+
+- `claim_proof_root`, over the lookup backend selector, the folded lookup
+  claim fingerprint, and the LogUp proof digest;
+- `challenge_root`, over the LogUp tuple challenge, denominator challenge, and
+  denominator retry count;
+- `sum_balance_root`, over the LogUp query/table fractional sums and their
+  balance delta.
+
+The lookup verifier gadget root is now computed from these three subroots, and
+the recursive verifier capsule continues to absorb that lookup gadget root. The
+semantic fold accumulator still expands the nested formula down to the
+underlying statement fields, so the newly introduced subroots are constrained
+witnesses rather than trusted shortcuts.
+
+The public `JoltRecursiveVerifierRelationBoundary` now records a
+`JoltLookupVerifierTranscriptCapsule` inside the recursive verifier capsule.
+The boundary digest commits to both the top-level capsule roots and the nested
+lookup transcript capsule, which gives later verifier-internalization stages a
+stable place to replace each subroot with a real verifier gadget.
+
+### Security boundary
+
+Stage 10.9 is still structural verifier internalization. It creates and
+constrains a recursively consumable lookup verifier transcript object, but it
+does not yet implement native Fiat-Shamir hashing, Dory commitment opening
+verification, or the full LogUp verifier equations inside Nova.
