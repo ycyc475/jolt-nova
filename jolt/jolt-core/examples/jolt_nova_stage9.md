@@ -1123,3 +1123,34 @@ Stage 10.10 internalizes only the selector-gated sum-balance equation. It still
 does not verify the complete LogUp protocol, native Fiat-Shamir hashing,
 polynomial commitment openings, Dory proofs, or table-membership equations
 inside Nova.
+
+## Stage 10.11: lookup claim/proof verifier subrelation
+
+Stage 10.11 applies the same object boundary used for sum-balance to the lookup
+claim/proof part of the recursive lookup verifier transcript. The public
+lookup transcript capsule now stores a nested `JoltLookupClaimProofRelation`
+containing:
+
+- `lookup_backend_selector`;
+- `lookup_claim_fingerprint`;
+- `lookup_logup_proof_digest`;
+- `relation_root`.
+
+The existing Nova step circuit constraint
+`recursive lookup claim proof root binds selector, fingerprint, and proof
+digest` is now backed by the same typed scalar relation used to populate the
+public boundary object. The recursive verifier boundary digest also absorbs
+the nested relation, so tampering with the explicit claim/proof relation changes
+the boundary digest even if the old top-level `claim_proof_root` field is left
+untouched.
+
+This makes the lookup verifier transcript capsule less flat: the claim/proof
+subroot is now a named verifier-stage object that can later be replaced by a
+native commitment-opening or Dory verification gadget without reshaping the
+outer recursive verifier capsule.
+
+### Security boundary
+
+Stage 10.11 still binds a digest-level proof surface. It does not yet verify
+the LogUp proof bytes, polynomial openings, Dory transcript, or native
+Fiat-Shamir sponge inside Nova.

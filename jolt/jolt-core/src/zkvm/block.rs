@@ -1160,6 +1160,16 @@ pub struct JoltExecutionSubclaimRelationBoundary {
     pub witness_subclaim_fingerprints: JoltExecutionSubclaimFingerprints,
 }
 
+/// Explicit lookup claim/proof subrelation consumed by the lookup verifier capsule.
+#[cfg(feature = "nova")]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct JoltLookupClaimProofRelation {
+    pub lookup_backend_selector: [u8; 32],
+    pub lookup_claim_fingerprint: [u8; 32],
+    pub lookup_logup_proof_digest: [u8; 32],
+    pub relation_root: [u8; 32],
+}
+
 /// Explicit LogUp sum-balance subrelation consumed by the lookup verifier capsule.
 #[cfg(feature = "nova")]
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1185,6 +1195,7 @@ pub struct JoltLookupVerifierTranscriptCapsule {
     pub lookup_logup_query_sum: [u8; 32],
     pub lookup_logup_table_sum: [u8; 32],
     pub lookup_logup_balance_delta: [u8; 32],
+    pub claim_proof_relation: JoltLookupClaimProofRelation,
     pub claim_proof_root: [u8; 32],
     pub challenge_root: [u8; 32],
     pub sum_balance_relation: JoltLookupSumBalanceRelation,
@@ -1383,6 +1394,27 @@ impl JoltExecutionSubclaimFingerprints {
 }
 
 #[cfg(feature = "nova")]
+impl JoltLookupClaimProofRelation {
+    fn from_scalars(relation: RecursiveLookupClaimProofRelationScalars) -> Self {
+        Self {
+            lookup_backend_selector: nova_scalar_to_storage(relation.lookup_backend_selector),
+            lookup_claim_fingerprint: nova_scalar_to_storage(relation.lookup_claim_fingerprint),
+            lookup_logup_proof_digest: nova_scalar_to_storage(relation.lookup_logup_proof_digest),
+            relation_root: nova_scalar_to_storage(relation.root()),
+        }
+    }
+
+    fn storage_words(&self) -> [[u8; 32]; 4] {
+        [
+            self.lookup_backend_selector,
+            self.lookup_claim_fingerprint,
+            self.lookup_logup_proof_digest,
+            self.relation_root,
+        ]
+    }
+}
+
+#[cfg(feature = "nova")]
 impl JoltLookupSumBalanceRelation {
     fn from_scalars(relation: RecursiveLookupSumBalanceRelationScalars) -> Self {
         Self {
@@ -1414,6 +1446,8 @@ impl JoltLookupSumBalanceRelation {
 #[cfg(feature = "nova")]
 impl JoltLookupVerifierTranscriptCapsule {
     fn from_scalars(transcript: RecursiveLookupVerifierTranscriptScalars) -> Self {
+        let claim_proof_relation =
+            JoltLookupClaimProofRelation::from_scalars(transcript.claim_proof_relation());
         let sum_balance_relation =
             JoltLookupSumBalanceRelation::from_scalars(transcript.sum_balance_relation());
         Self {
@@ -1434,7 +1468,8 @@ impl JoltLookupVerifierTranscriptCapsule {
             lookup_logup_balance_delta: nova_scalar_to_storage(
                 transcript.lookup_logup_balance_delta(),
             ),
-            claim_proof_root: nova_scalar_to_storage(transcript.claim_proof_root()),
+            claim_proof_root: claim_proof_relation.relation_root,
+            claim_proof_relation,
             challenge_root: nova_scalar_to_storage(transcript.challenge_root()),
             sum_balance_root: sum_balance_relation.relation_root,
             sum_balance_relation,
@@ -2579,6 +2614,28 @@ struct RecursiveLookupVerifierTranscriptScalars {
 
 #[cfg(feature = "nova")]
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct RecursiveLookupClaimProofRelationScalars {
+    lookup_backend_selector: NovaScalar,
+    lookup_claim_fingerprint: NovaScalar,
+    lookup_logup_proof_digest: NovaScalar,
+}
+
+#[cfg(feature = "nova")]
+impl RecursiveLookupClaimProofRelationScalars {
+    fn root(&self) -> NovaScalar {
+        nova_transcript_delta(
+            NOVA_TRANSCRIPT_DOMAIN_RECURSIVE_VERIFIER_LOOKUP_CLAIM_PROOF,
+            [
+                ("lookup_backend_selector", self.lookup_backend_selector),
+                ("lookup_claim_fingerprint", self.lookup_claim_fingerprint),
+                ("lookup_logup_proof_digest", self.lookup_logup_proof_digest),
+            ],
+        )
+    }
+}
+
+#[cfg(feature = "nova")]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 struct RecursiveLookupSumBalanceRelationScalars {
     lookup_backend_selector: NovaScalar,
     lookup_logup_query_sum: NovaScalar,
@@ -2621,6 +2678,14 @@ impl RecursiveLookupVerifierTranscriptScalars {
         self.lookup_logup_query_sum - self.lookup_logup_table_sum
     }
 
+    fn claim_proof_relation(&self) -> RecursiveLookupClaimProofRelationScalars {
+        RecursiveLookupClaimProofRelationScalars {
+            lookup_backend_selector: self.lookup_backend_selector,
+            lookup_claim_fingerprint: self.lookup_claim_fingerprint,
+            lookup_logup_proof_digest: self.lookup_logup_proof_digest,
+        }
+    }
+
     fn sum_balance_relation(&self) -> RecursiveLookupSumBalanceRelationScalars {
         RecursiveLookupSumBalanceRelationScalars {
             lookup_backend_selector: self.lookup_backend_selector,
@@ -2630,14 +2695,7 @@ impl RecursiveLookupVerifierTranscriptScalars {
     }
 
     fn claim_proof_root(&self) -> NovaScalar {
-        nova_transcript_delta(
-            NOVA_TRANSCRIPT_DOMAIN_RECURSIVE_VERIFIER_LOOKUP_CLAIM_PROOF,
-            [
-                ("lookup_backend_selector", self.lookup_backend_selector),
-                ("lookup_claim_fingerprint", self.lookup_claim_fingerprint),
-                ("lookup_logup_proof_digest", self.lookup_logup_proof_digest),
-            ],
-        )
+        self.claim_proof_relation().root()
     }
 
     fn challenge_root(&self) -> NovaScalar {
@@ -4095,9 +4153,13 @@ impl JoltNovaStepWitness {
             )
     }
 
-    fn recursive_lookup_claim_proof_root_scalar(&self) -> NovaScalar {
+    fn recursive_lookup_claim_proof_relation(&self) -> RecursiveLookupClaimProofRelationScalars {
         self.recursive_lookup_verifier_transcript()
-            .claim_proof_root()
+            .claim_proof_relation()
+    }
+
+    fn recursive_lookup_claim_proof_root_scalar(&self) -> NovaScalar {
+        self.recursive_lookup_claim_proof_relation().root()
     }
 
     fn recursive_lookup_challenge_root_scalar(&self) -> NovaScalar {
@@ -11301,6 +11363,14 @@ fn update_jolt_execution_subclaim_fingerprints(
 }
 
 #[cfg(feature = "nova")]
+fn update_jolt_lookup_claim_proof_relation(
+    hasher: &mut Sha3_256,
+    relation: &JoltLookupClaimProofRelation,
+) {
+    update_storage_words(hasher, &relation.storage_words());
+}
+
+#[cfg(feature = "nova")]
 fn update_jolt_lookup_sum_balance_relation(
     hasher: &mut Sha3_256,
     relation: &JoltLookupSumBalanceRelation,
@@ -11314,6 +11384,7 @@ fn update_jolt_lookup_verifier_transcript_capsule(
     capsule: &JoltLookupVerifierTranscriptCapsule,
 ) {
     update_storage_words(hasher, &capsule.storage_words());
+    update_jolt_lookup_claim_proof_relation(hasher, &capsule.claim_proof_relation);
     update_jolt_lookup_sum_balance_relation(hasher, &capsule.sum_balance_relation);
 }
 
@@ -14837,6 +14908,28 @@ mod tests {
             first_boundary
                 .verifier_capsule
                 .lookup_verifier_transcript
+                .claim_proof_root,
+            first_boundary
+                .verifier_capsule
+                .lookup_verifier_transcript
+                .claim_proof_relation
+                .relation_root
+        );
+        assert_eq!(
+            first_boundary
+                .verifier_capsule
+                .lookup_verifier_transcript
+                .claim_proof_relation
+                .lookup_claim_fingerprint,
+            first_boundary
+                .verifier_capsule
+                .lookup_verifier_transcript
+                .lookup_claim_fingerprint
+        );
+        assert_eq!(
+            first_boundary
+                .verifier_capsule
+                .lookup_verifier_transcript
                 .sum_balance_root,
             first_boundary
                 .verifier_capsule
@@ -14902,6 +14995,15 @@ mod tests {
             .sum_balance_root[0] ^= 1;
         assert_ne!(digest, tampered_lookup_transcript.digest());
         assert!(!tampered_lookup_transcript.verify_digest());
+
+        let mut tampered_claim_proof_relation = first_boundary.clone();
+        tampered_claim_proof_relation
+            .verifier_capsule
+            .lookup_verifier_transcript
+            .claim_proof_relation
+            .lookup_logup_proof_digest[0] ^= 1;
+        assert_ne!(digest, tampered_claim_proof_relation.digest());
+        assert!(!tampered_claim_proof_relation.verify_digest());
 
         let mut tampered_sum_balance_relation = first_boundary.clone();
         tampered_sum_balance_relation
@@ -16203,6 +16305,10 @@ mod tests {
             witness.recursive_lookup_claim_proof_root_scalar()
         );
         assert_eq!(
+            witness.recursive_lookup_claim_proof_relation().root(),
+            witness.recursive_lookup_claim_proof_root_scalar()
+        );
+        assert_eq!(
             witness.recursive_lookup_challenge_root,
             witness.recursive_lookup_challenge_root_scalar()
         );
@@ -16266,6 +16372,31 @@ mod tests {
         assert_eq!(
             cs.which_is_unsatisfied(),
             Some("lookup backend selector is boolean")
+        );
+    }
+
+    #[cfg(feature = "nova")]
+    #[test]
+    fn nova_step_circuit_rejects_tampered_recursive_lookup_claim_proof_root_witness() {
+        let bytecode = BytecodePreprocessing::default();
+        let block = trace_block(0, boundary(0, 0), boundary(4, 0));
+        let prover = BlockProofBundleProver::<_, ark_bn254::Fr>::new([9u8; 32]);
+        let bundle = prover.prove_block(&bytecode, &block, None).unwrap();
+        let fold_input = build_block_fold_input(&bundle);
+        let mut circuit = nova_step_circuit_for_fold_input(&fold_input);
+        circuit.witness.recursive_lookup_claim_proof_root =
+            circuit.witness.recursive_lookup_claim_proof_root + NovaScalar::from(1);
+        circuit.witness.recursive_verifier_lookup_gadget_root = circuit
+            .witness
+            .recursive_verifier_lookup_gadget_root_scalar();
+        circuit.witness.recursive_verifier_capsule_root =
+            circuit.witness.recursive_verifier_capsule_root_scalar();
+
+        let cs = synthesize_nova_step_circuit_for_test(&circuit);
+
+        assert_eq!(
+            cs.which_is_unsatisfied(),
+            Some("recursive lookup claim proof root binds selector, fingerprint, and proof digest")
         );
     }
 
