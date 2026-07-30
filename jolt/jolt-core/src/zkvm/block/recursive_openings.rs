@@ -1,3 +1,4 @@
+use num::{BigUint, Num};
 use sha3::{Digest as ShaDigest, Sha3_256};
 
 use crate::field::JoltField;
@@ -252,6 +253,7 @@ pub struct RecursiveJoltBlockOpeningWitness {
     pub active_cycles: usize,
     pub cycle_capacity: usize,
     pub cycles: Vec<RecursiveJoltCycleWitness>,
+    pub claim_aggregation_challenges: [RecursiveJoltFieldElement; 4],
     pub lookup: RecursiveJoltLookupOpeningWitness,
     pub register: RecursiveJoltRegisterOpeningWitness,
     pub ram: RecursiveJoltRamOpeningWitness,
@@ -308,11 +310,11 @@ impl RecursiveJoltOpeningCircuitShape {
 }
 
 impl RecursiveJoltBlockOpeningWitness {
-    pub const VERSION: u16 = 1;
+    pub const VERSION: u16 = 2;
 
     pub(crate) fn compute_digest(&self) -> [u8; 32] {
         let mut hasher = Sha3_256::new();
-        hasher.update(b"JOLT_NOVA_RECURSIVE_NATIVE_OPENING_WITNESS_V1");
+        hasher.update(b"JOLT_NOVA_RECURSIVE_NATIVE_OPENING_WITNESS_V2");
         hasher.update(self.version.to_le_bytes());
         update_usize(&mut hasher, self.block_index);
         update_usize(&mut hasher, self.active_cycles);
@@ -321,6 +323,7 @@ impl RecursiveJoltBlockOpeningWitness {
         for cycle in &self.cycles {
             cycle.update_digest(&mut hasher);
         }
+        update_field_elements(&mut hasher, &self.claim_aggregation_challenges);
         self.lookup.update_digest(&mut hasher);
         self.register.update_digest(&mut hasher);
         self.ram.update_digest(&mut hasher);
@@ -386,6 +389,60 @@ impl RecursiveJoltBlockOpeningWitness {
         }
         Ok(())
     }
+
+    pub(crate) fn claim_aggregation_challenges(
+        &self,
+    ) -> Result<[RecursiveJoltFieldElement; 4], &'static str> {
+        Ok(self.claim_aggregation_challenges)
+    }
+
+    pub(crate) fn block_claim_aggregates(
+        &self,
+    ) -> Result<[RecursiveJoltFieldElement; 4], &'static str> {
+        let challenges = self.claim_aggregation_challenges()?;
+        let register_values = self
+            .register
+            .value_block_contributions
+            .iter()
+            .chain(self.register.address_block_contributions.iter())
+            .chain(core::iter::once(&self.register.inc_block_contribution));
+        let ram_values = self
+            .ram
+            .ra_block_contributions
+            .iter()
+            .chain(self.ram.tuple_block_contributions.iter())
+            .chain(core::iter::once(&self.ram.inc_block_contribution));
+        let lookup_values = self
+            .lookup
+            .instruction_block_contributions
+            .iter()
+            .chain(self.lookup.tuple_block_contributions.iter());
+        Ok([
+            aggregate_claim_values(register_values, &challenges[0])?,
+            aggregate_claim_values(ram_values, &challenges[1])?,
+            aggregate_claim_values(lookup_values, &challenges[2])?,
+            aggregate_claim_values(self.cpu.block_contributions.iter(), &challenges[3])?,
+        ])
+    }
+}
+
+fn aggregate_claim_values<'a>(
+    values: impl IntoIterator<Item = &'a RecursiveJoltFieldElement>,
+    challenge: &RecursiveJoltFieldElement,
+) -> Result<RecursiveJoltFieldElement, &'static str> {
+    let modulus = BigUint::from_str_radix(
+        "21888242871839275222246405745257275088548364400416034343698204186575808495617",
+        10,
+    )
+    .map_err(|_| "failed to parse the native Jolt field modulus")?;
+    let challenge = BigUint::from_bytes_le(&challenge.canonical_le_bytes);
+    let aggregate = values.into_iter().fold(BigUint::default(), |acc, value| {
+        (acc * &challenge + BigUint::from_bytes_le(&value.canonical_le_bytes)) % &modulus
+    });
+    let bytes = aggregate.to_bytes_le();
+    let mut canonical_le_bytes = [0u8; 32];
+    canonical_le_bytes[..bytes.len()].copy_from_slice(&bytes);
+    Ok(RecursiveJoltFieldElement { canonical_le_bytes })
 }
 
 fn update_usize(hasher: &mut Sha3_256, value: usize) {

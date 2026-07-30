@@ -1,5 +1,7 @@
 #[cfg(feature = "nova")]
 use nova_snark::traits::PrimeFieldExt;
+#[cfg(all(feature = "nova", not(feature = "zk")))]
+use num::{BigUint, Num};
 #[cfg(feature = "nova")]
 use std::sync::OnceLock;
 use std::{collections::HashMap, error::Error, fmt, marker::PhantomData};
@@ -21,8 +23,9 @@ pub use recursive_openings::{
 };
 #[cfg(all(feature = "nova", not(feature = "zk")))]
 use recursive_relations::{
-    synthesize_recursive_cpu_opening_relation, synthesize_recursive_lookup_opening_relation,
-    synthesize_recursive_ram_opening_relation, synthesize_recursive_register_opening_relation,
+    accumulate_recursive_native_claim, synthesize_recursive_cpu_opening_relation,
+    synthesize_recursive_lookup_opening_relation, synthesize_recursive_ram_opening_relation,
+    synthesize_recursive_register_opening_relation,
 };
 
 use crate::{
@@ -772,6 +775,7 @@ pub struct BlockFoldAccumulator<Digest = [u8; 32]> {
     pub initial_register_digest: Option<[u8; 32]>,
     pub verified_jolt_lookup_receipt_digest: Option<[u8; 32]>,
     pub verified_jolt_lookup_opening_receipt_digest: Option<[u8; 32]>,
+    pub native_claim_aggregation_challenges: Option<[[u8; 32]; 4]>,
     pub latest_state_digest: Option<[u8; 32]>,
     pub latest_machine_state_digest: Option<[u8; 32]>,
     pub latest_register_digest: Option<[u8; 32]>,
@@ -796,6 +800,7 @@ impl<Digest> Default for BlockFoldAccumulator<Digest> {
             initial_register_digest: None,
             verified_jolt_lookup_receipt_digest: None,
             verified_jolt_lookup_opening_receipt_digest: None,
+            native_claim_aggregation_challenges: None,
             latest_state_digest: None,
             latest_machine_state_digest: None,
             latest_register_digest: None,
@@ -906,6 +911,25 @@ where
                     reason: "verified Jolt lookup opening receipt continuity mismatch",
                 });
             }
+
+            #[cfg(not(feature = "zk"))]
+            if self.native_claim_aggregation_challenges
+                != fold_input
+                    .recursive_opening_witness
+                    .as_ref()
+                    .map(|witness| {
+                        witness
+                            .claim_aggregation_challenges()
+                            .expect("validated recursive opening witness has challenges")
+                            .map(|challenge| challenge.canonical_le_bytes)
+                    })
+            {
+                return Err(BlockTraceError::BlockFoldAccumulatorBoundaryMismatch {
+                    current_block,
+                    next_block: state.block_index,
+                    reason: "native claim aggregation challenge continuity mismatch",
+                });
+            }
         } else {
             self.program_digest = Some(fold_input.program_digest.clone());
             self.first_block_index = Some(state.block_index);
@@ -918,6 +942,18 @@ where
             self.verified_jolt_lookup_opening_receipt_digest = state
                 .verified_jolt_lookup_opening_present
                 .then_some(state.verified_jolt_lookup_opening_receipt_digest);
+            #[cfg(not(feature = "zk"))]
+            {
+                self.native_claim_aggregation_challenges = fold_input
+                    .recursive_opening_witness
+                    .as_ref()
+                    .map(|witness| {
+                        witness
+                            .claim_aggregation_challenges()
+                            .expect("validated recursive opening witness has challenges")
+                            .map(|challenge| challenge.canonical_le_bytes)
+                    });
+            }
         }
 
         self.accumulator_digest = digest_fold_accumulator_step(self.accumulator_digest, fold_input);
@@ -1075,7 +1111,7 @@ impl Default for NovaFoldConfig {
 /// recursive state. Entries 11--12 carry the global verified Jolt proof and
 /// opening-receipt digests so every folded block is constrained to the same
 /// authenticated Lasso execution.
-pub const NOVA_Z_ARITY: usize = 13;
+pub const NOVA_Z_ARITY: usize = 21;
 pub const NOVA_SEMANTIC_ACCUMULATOR_INDEX: usize = 0;
 pub const NOVA_NEXT_BLOCK_INDEX_INDEX: usize = 1;
 pub const NOVA_TOTAL_ACTIVE_CYCLES_INDEX: usize = 2;
@@ -1089,6 +1125,16 @@ pub const NOVA_MACHINE_STATE_INDEX: usize = 9;
 pub const NOVA_REGISTER_STATE_INDEX: usize = 10;
 pub const NOVA_JOLT_LOOKUP_RECEIPT_DIGEST_INDEX: usize = 11;
 pub const NOVA_JOLT_LOOKUP_OPENING_RECEIPT_DIGEST_INDEX: usize = 12;
+pub const NOVA_NATIVE_REGISTER_CLAIM_ACCUMULATOR_INDEX: usize = 13;
+pub const NOVA_NATIVE_RAM_CLAIM_ACCUMULATOR_INDEX: usize = 14;
+pub const NOVA_NATIVE_LOOKUP_CLAIM_ACCUMULATOR_INDEX: usize = 15;
+pub const NOVA_NATIVE_CPU_CLAIM_ACCUMULATOR_INDEX: usize = 16;
+pub const NOVA_NATIVE_REGISTER_CLAIM_CHALLENGE_INDEX: usize = 17;
+pub const NOVA_NATIVE_RAM_CLAIM_CHALLENGE_INDEX: usize = 18;
+pub const NOVA_NATIVE_LOOKUP_CLAIM_CHALLENGE_INDEX: usize = 19;
+pub const NOVA_NATIVE_CPU_CLAIM_CHALLENGE_INDEX: usize = 20;
+#[cfg(not(feature = "zk"))]
+const NATIVE_CLAIM_CHALLENGE_LABELS: [&[u8]; 4] = [b"register", b"ram", b"lookup", b"cpu"];
 pub type NovaFoldZState = [[u8; 32]; NOVA_Z_ARITY];
 
 /// Named, storage-level view of Nova's public input/output state.
@@ -1111,6 +1157,14 @@ pub struct JoltNovaStepPublicState {
     pub register_state_digest: [u8; 32],
     pub verified_jolt_lookup_receipt_digest: [u8; 32],
     pub verified_jolt_lookup_opening_receipt_digest: [u8; 32],
+    pub native_register_claim_accumulator: [u8; 32],
+    pub native_ram_claim_accumulator: [u8; 32],
+    pub native_lookup_claim_accumulator: [u8; 32],
+    pub native_cpu_claim_accumulator: [u8; 32],
+    pub native_register_claim_challenge: [u8; 32],
+    pub native_ram_claim_challenge: [u8; 32],
+    pub native_lookup_claim_challenge: [u8; 32],
+    pub native_cpu_claim_challenge: [u8; 32],
 }
 
 impl JoltNovaStepPublicState {
@@ -1130,6 +1184,14 @@ impl JoltNovaStepPublicState {
             verified_jolt_lookup_receipt_digest: state[NOVA_JOLT_LOOKUP_RECEIPT_DIGEST_INDEX],
             verified_jolt_lookup_opening_receipt_digest: state
                 [NOVA_JOLT_LOOKUP_OPENING_RECEIPT_DIGEST_INDEX],
+            native_register_claim_accumulator: state[NOVA_NATIVE_REGISTER_CLAIM_ACCUMULATOR_INDEX],
+            native_ram_claim_accumulator: state[NOVA_NATIVE_RAM_CLAIM_ACCUMULATOR_INDEX],
+            native_lookup_claim_accumulator: state[NOVA_NATIVE_LOOKUP_CLAIM_ACCUMULATOR_INDEX],
+            native_cpu_claim_accumulator: state[NOVA_NATIVE_CPU_CLAIM_ACCUMULATOR_INDEX],
+            native_register_claim_challenge: state[NOVA_NATIVE_REGISTER_CLAIM_CHALLENGE_INDEX],
+            native_ram_claim_challenge: state[NOVA_NATIVE_RAM_CLAIM_CHALLENGE_INDEX],
+            native_lookup_claim_challenge: state[NOVA_NATIVE_LOOKUP_CLAIM_CHALLENGE_INDEX],
+            native_cpu_claim_challenge: state[NOVA_NATIVE_CPU_CLAIM_CHALLENGE_INDEX],
         }
     }
 
@@ -1148,6 +1210,14 @@ impl JoltNovaStepPublicState {
             self.register_state_digest,
             self.verified_jolt_lookup_receipt_digest,
             self.verified_jolt_lookup_opening_receipt_digest,
+            self.native_register_claim_accumulator,
+            self.native_ram_claim_accumulator,
+            self.native_lookup_claim_accumulator,
+            self.native_cpu_claim_accumulator,
+            self.native_register_claim_challenge,
+            self.native_ram_claim_challenge,
+            self.native_lookup_claim_challenge,
+            self.native_cpu_claim_challenge,
         ]
     }
 }
@@ -5334,6 +5404,14 @@ impl nova_snark::traits::circuit::StepCircuit<NovaScalar> for JoltNovaStepCircui
         let verified_jolt_lookup_receipt_digest_binding = &z[NOVA_JOLT_LOOKUP_RECEIPT_DIGEST_INDEX];
         let verified_jolt_lookup_opening_receipt_digest_binding =
             &z[NOVA_JOLT_LOOKUP_OPENING_RECEIPT_DIGEST_INDEX];
+        let native_register_claim_accumulator = &z[NOVA_NATIVE_REGISTER_CLAIM_ACCUMULATOR_INDEX];
+        let native_ram_claim_accumulator = &z[NOVA_NATIVE_RAM_CLAIM_ACCUMULATOR_INDEX];
+        let native_lookup_claim_accumulator = &z[NOVA_NATIVE_LOOKUP_CLAIM_ACCUMULATOR_INDEX];
+        let native_cpu_claim_accumulator = &z[NOVA_NATIVE_CPU_CLAIM_ACCUMULATOR_INDEX];
+        let native_register_claim_challenge = &z[NOVA_NATIVE_REGISTER_CLAIM_CHALLENGE_INDEX];
+        let native_ram_claim_challenge = &z[NOVA_NATIVE_RAM_CLAIM_CHALLENGE_INDEX];
+        let native_lookup_claim_challenge = &z[NOVA_NATIVE_LOOKUP_CLAIM_CHALLENGE_INDEX];
+        let native_cpu_claim_challenge = &z[NOVA_NATIVE_CPU_CLAIM_CHALLENGE_INDEX];
 
         let statement_digest =
             alloc_nova_witness(cs, "statement digest", self.witness.statement_digest)?;
@@ -5640,35 +5718,65 @@ impl nova_snark::traits::circuit::StepCircuit<NovaScalar> for JoltNovaStepCircui
             self.witness.recursive_verifier_capsule_root,
         )?;
 
+        let mut output_native_register_claim_accumulator =
+            native_register_claim_accumulator.clone();
+        let mut output_native_ram_claim_accumulator = native_ram_claim_accumulator.clone();
+        let mut output_native_lookup_claim_accumulator = native_lookup_claim_accumulator.clone();
+        let mut output_native_cpu_claim_accumulator = native_cpu_claim_accumulator.clone();
+
         #[cfg(not(feature = "zk"))]
         if let Some(recursive_opening_witness) = &self.witness.recursive_opening_witness {
-            synthesize_recursive_lookup_opening_relation(
+            let lookup_contribution = synthesize_recursive_lookup_opening_relation(
                 cs.namespace(|| "native Jolt lookup opening relation"),
                 recursive_opening_witness,
                 &global_cycle_start,
                 &active_cycles,
                 &verified_jolt_lookup_opening_present,
             )?;
-            synthesize_recursive_register_opening_relation(
+            let register_contribution = synthesize_recursive_register_opening_relation(
                 cs.namespace(|| "native Jolt register opening relation"),
                 recursive_opening_witness,
                 &global_cycle_start,
                 &active_cycles,
                 &verified_jolt_lookup_opening_present,
             )?;
-            synthesize_recursive_ram_opening_relation(
+            let ram_contribution = synthesize_recursive_ram_opening_relation(
                 cs.namespace(|| "native Jolt RAM opening relation"),
                 recursive_opening_witness,
                 &global_cycle_start,
                 &active_cycles,
                 &verified_jolt_lookup_opening_present,
             )?;
-            synthesize_recursive_cpu_opening_relation(
+            let cpu_contribution = synthesize_recursive_cpu_opening_relation(
                 cs.namespace(|| "native Jolt CPU R1CS opening relation"),
                 recursive_opening_witness,
                 &global_cycle_start,
                 &active_cycles,
                 &verified_jolt_lookup_opening_present,
+            )?;
+            output_native_register_claim_accumulator = accumulate_recursive_native_claim(
+                cs.namespace(|| "recursive native register claim accumulation"),
+                native_register_claim_accumulator,
+                native_register_claim_challenge,
+                &register_contribution,
+            )?;
+            output_native_ram_claim_accumulator = accumulate_recursive_native_claim(
+                cs.namespace(|| "recursive native RAM claim accumulation"),
+                native_ram_claim_accumulator,
+                native_ram_claim_challenge,
+                &ram_contribution,
+            )?;
+            output_native_lookup_claim_accumulator = accumulate_recursive_native_claim(
+                cs.namespace(|| "recursive native lookup claim accumulation"),
+                native_lookup_claim_accumulator,
+                native_lookup_claim_challenge,
+                &lookup_contribution,
+            )?;
+            output_native_cpu_claim_accumulator = accumulate_recursive_native_claim(
+                cs.namespace(|| "recursive native CPU claim accumulation"),
+                native_cpu_claim_accumulator,
+                native_cpu_claim_challenge,
+                &cpu_contribution,
             )?;
         }
 
@@ -8028,6 +8136,14 @@ impl nova_snark::traits::circuit::StepCircuit<NovaScalar> for JoltNovaStepCircui
             output_register_state_digest,
             output_verified_jolt_lookup_receipt_digest,
             output_verified_jolt_lookup_opening_receipt_digest,
+            output_native_register_claim_accumulator,
+            output_native_ram_claim_accumulator,
+            output_native_lookup_claim_accumulator,
+            output_native_cpu_claim_accumulator,
+            native_register_claim_challenge.clone(),
+            native_ram_claim_challenge.clone(),
+            native_lookup_claim_challenge.clone(),
+            native_cpu_claim_challenge.clone(),
         ])
     }
 }
@@ -8138,6 +8254,23 @@ fn nova_initial_z_state_for_witness(witness: &JoltNovaStepWitness) -> NovaZState
     state[NOVA_JOLT_LOOKUP_RECEIPT_DIGEST_INDEX] = witness.verified_jolt_lookup_receipt_digest;
     state[NOVA_JOLT_LOOKUP_OPENING_RECEIPT_DIGEST_INDEX] =
         witness.verified_jolt_lookup_opening_receipt_digest;
+    #[cfg(not(feature = "zk"))]
+    if let Some(recursive_opening_witness) = &witness.recursive_opening_witness {
+        let challenges = recursive_opening_witness
+            .claim_aggregation_challenges()
+            .expect("validated recursive opening witness has aggregation challenges");
+        for (index, challenge) in [
+            NOVA_NATIVE_REGISTER_CLAIM_CHALLENGE_INDEX,
+            NOVA_NATIVE_RAM_CLAIM_CHALLENGE_INDEX,
+            NOVA_NATIVE_LOOKUP_CLAIM_CHALLENGE_INDEX,
+            NOVA_NATIVE_CPU_CLAIM_CHALLENGE_INDEX,
+        ]
+        .into_iter()
+        .zip(challenges)
+        {
+            state[index] = recursive_jolt_field_to_nova_scalar(&challenge);
+        }
+    }
     state
 }
 
@@ -8233,12 +8366,53 @@ where
             )
         })
         .unwrap_or_else(NovaScalar::zero);
+    #[cfg(not(feature = "zk"))]
+    if let Some(challenges) = metadata.native_claim_aggregation_challenges {
+        for (index, challenge) in [
+            NOVA_NATIVE_REGISTER_CLAIM_CHALLENGE_INDEX,
+            NOVA_NATIVE_RAM_CLAIM_CHALLENGE_INDEX,
+            NOVA_NATIVE_LOOKUP_CLAIM_CHALLENGE_INDEX,
+            NOVA_NATIVE_CPU_CLAIM_CHALLENGE_INDEX,
+        ]
+        .into_iter()
+        .zip(challenges)
+        {
+            state[index] = Option::from(NovaScalar::from_bytes(&challenge))
+                .expect("canonical BN254 challenge fits in the Pallas scalar field");
+        }
+    }
     Ok(state)
 }
 
 #[cfg(feature = "nova")]
 fn nova_scalar_to_storage(value: NovaScalar) -> [u8; 32] {
     value.to_bytes()
+}
+
+#[cfg(all(feature = "nova", not(feature = "zk")))]
+fn recursive_jolt_field_to_nova_scalar(value: &RecursiveJoltFieldElement) -> NovaScalar {
+    Option::from(NovaScalar::from_bytes(&value.canonical_le_bytes))
+        .expect("canonical BN254 scalar fits losslessly in the Pallas scalar field")
+}
+
+#[cfg(all(feature = "nova", not(feature = "zk")))]
+fn add_recursive_native_claim_accumulator(
+    current: NovaScalar,
+    contribution: &RecursiveJoltFieldElement,
+) -> NovaScalar {
+    let modulus = BigUint::from_str_radix(
+        "21888242871839275222246405745257275088548364400416034343698204186575808495617",
+        10,
+    )
+    .expect("native Jolt field modulus literal is valid");
+    let next = (BigUint::from_bytes_le(&current.to_bytes())
+        + BigUint::from_bytes_le(&contribution.canonical_le_bytes))
+        % modulus;
+    let bytes = next.to_bytes_le();
+    let mut canonical = [0u8; 32];
+    canonical[..bytes.len()].copy_from_slice(&bytes);
+    Option::from(NovaScalar::from_bytes(&canonical))
+        .expect("reduced BN254 accumulator fits losslessly in the Pallas scalar field")
 }
 
 #[cfg(feature = "nova")]
@@ -8264,21 +8438,11 @@ fn nova_z_state_from_storage(
     storage: &NovaFoldZState,
     block_index: usize,
 ) -> Result<NovaZState, BlockTraceError> {
-    Ok([
-        nova_scalar_from_storage(&storage[0], block_index)?,
-        nova_scalar_from_storage(&storage[1], block_index)?,
-        nova_scalar_from_storage(&storage[2], block_index)?,
-        nova_scalar_from_storage(&storage[3], block_index)?,
-        nova_scalar_from_storage(&storage[4], block_index)?,
-        nova_scalar_from_storage(&storage[5], block_index)?,
-        nova_scalar_from_storage(&storage[6], block_index)?,
-        nova_scalar_from_storage(&storage[7], block_index)?,
-        nova_scalar_from_storage(&storage[8], block_index)?,
-        nova_scalar_from_storage(&storage[9], block_index)?,
-        nova_scalar_from_storage(&storage[10], block_index)?,
-        nova_scalar_from_storage(&storage[11], block_index)?,
-        nova_scalar_from_storage(&storage[12], block_index)?,
-    ])
+    let mut state = [NovaScalar::zero(); NOVA_Z_ARITY];
+    for (index, value) in storage.iter().enumerate() {
+        state[index] = nova_scalar_from_storage(value, block_index)?;
+    }
+    Ok(state)
 }
 
 #[cfg(feature = "nova")]
@@ -8316,7 +8480,7 @@ where
     let witness =
         JoltNovaStepWitness::from_fold_input_with_subclaim_backend(fold_input, subclaim_backend);
     let delta = nova_step_delta_vector(&witness);
-    [
+    let mut next = [
         current_z_state[NOVA_SEMANTIC_ACCUMULATOR_INDEX] + delta[0],
         current_z_state[NOVA_NEXT_BLOCK_INDEX_INDEX] + delta[1],
         current_z_state[NOVA_TOTAL_ACTIVE_CYCLES_INDEX] + delta[2],
@@ -8330,7 +8494,34 @@ where
         witness.end_register_digest,
         current_z_state[NOVA_JOLT_LOOKUP_RECEIPT_DIGEST_INDEX],
         current_z_state[NOVA_JOLT_LOOKUP_OPENING_RECEIPT_DIGEST_INDEX],
-    ]
+        current_z_state[NOVA_NATIVE_REGISTER_CLAIM_ACCUMULATOR_INDEX],
+        current_z_state[NOVA_NATIVE_RAM_CLAIM_ACCUMULATOR_INDEX],
+        current_z_state[NOVA_NATIVE_LOOKUP_CLAIM_ACCUMULATOR_INDEX],
+        current_z_state[NOVA_NATIVE_CPU_CLAIM_ACCUMULATOR_INDEX],
+        current_z_state[NOVA_NATIVE_REGISTER_CLAIM_CHALLENGE_INDEX],
+        current_z_state[NOVA_NATIVE_RAM_CLAIM_CHALLENGE_INDEX],
+        current_z_state[NOVA_NATIVE_LOOKUP_CLAIM_CHALLENGE_INDEX],
+        current_z_state[NOVA_NATIVE_CPU_CLAIM_CHALLENGE_INDEX],
+    ];
+    #[cfg(not(feature = "zk"))]
+    if let Some(recursive_opening_witness) = &witness.recursive_opening_witness {
+        let aggregates = recursive_opening_witness
+            .block_claim_aggregates()
+            .expect("validated recursive opening witness has block claim aggregates");
+        for (index, aggregate) in [
+            NOVA_NATIVE_REGISTER_CLAIM_ACCUMULATOR_INDEX,
+            NOVA_NATIVE_RAM_CLAIM_ACCUMULATOR_INDEX,
+            NOVA_NATIVE_LOOKUP_CLAIM_ACCUMULATOR_INDEX,
+            NOVA_NATIVE_CPU_CLAIM_ACCUMULATOR_INDEX,
+        ]
+        .into_iter()
+        .zip(aggregates)
+        {
+            next[index] =
+                add_recursive_native_claim_accumulator(current_z_state[index], &aggregate);
+        }
+    }
+    next
 }
 
 #[cfg(feature = "nova")]
@@ -8347,6 +8538,14 @@ fn nova_step_delta_vector(witness: &JoltNovaStepWitness) -> NovaZState {
         witness.active_cycles,
         witness.end_state_digest - witness.start_state_digest,
         witness.end_register_digest - witness.start_register_digest,
+        NovaScalar::zero(),
+        NovaScalar::zero(),
+        NovaScalar::zero(),
+        NovaScalar::zero(),
+        NovaScalar::zero(),
+        NovaScalar::zero(),
+        NovaScalar::zero(),
+        NovaScalar::zero(),
         NovaScalar::zero(),
         NovaScalar::zero(),
     ]
@@ -10761,6 +10960,28 @@ fn encode_recursive_jolt_field<F: JoltField>(
 }
 
 #[cfg(not(feature = "zk"))]
+fn derive_recursive_native_claim_challenges<F: JoltField>(
+    block_index: usize,
+    opening_receipt_digest: [u8; 32],
+) -> Result<[RecursiveJoltFieldElement; 4], BlockTraceError> {
+    NATIVE_CLAIM_CHALLENGE_LABELS
+        .map(|label| {
+            let mut hasher = Sha3_256::new();
+            hasher.update(b"JOLT_NOVA_NATIVE_CLAIM_AGGREGATION_CHALLENGE_V1");
+            hasher.update(opening_receipt_digest);
+            hasher.update(label);
+            encode_recursive_jolt_field(block_index, F::from_bytes(&hasher.finalize()))
+        })
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()?
+        .try_into()
+        .map_err(|_| BlockTraceError::VerifiedJoltLookupReceiptMismatch {
+            block_index,
+            reason: "recursive native claim challenge count mismatch",
+        })
+}
+
+#[cfg(not(feature = "zk"))]
 fn encode_recursive_jolt_field_array<F: JoltField, const N: usize>(
     block_index: usize,
     values: [F; N],
@@ -11516,6 +11737,10 @@ where
             active_cycles: block.active_cycles,
             cycle_capacity,
             cycles,
+            claim_aggregation_challenges: derive_recursive_native_claim_challenges::<F>(
+                block.block_index,
+                opening_receipt.digest(),
+            )?,
             lookup,
             register,
             ram,
@@ -13426,6 +13651,15 @@ where
     append_optional_digest(output, metadata.initial_register_digest);
     append_optional_digest(output, metadata.verified_jolt_lookup_receipt_digest);
     append_optional_digest(output, metadata.verified_jolt_lookup_opening_receipt_digest);
+    match metadata.native_claim_aggregation_challenges {
+        Some(challenges) => {
+            output.push(1);
+            for challenge in challenges {
+                append_bytes(output, &challenge);
+            }
+        }
+        None => output.push(0),
+    }
     append_optional_digest(output, metadata.latest_state_digest);
     append_optional_digest(output, metadata.latest_machine_state_digest);
     append_optional_digest(output, metadata.latest_register_digest);
@@ -13506,6 +13740,15 @@ fn update_block_fold_metadata<Digest>(
     update_optional_digest(hasher, metadata.initial_register_digest);
     update_optional_digest(hasher, metadata.verified_jolt_lookup_receipt_digest);
     update_optional_digest(hasher, metadata.verified_jolt_lookup_opening_receipt_digest);
+    match metadata.native_claim_aggregation_challenges {
+        Some(challenges) => {
+            hasher.update([1]);
+            for challenge in challenges {
+                hasher.update(challenge);
+            }
+        }
+        None => hasher.update([0]),
+    }
     update_optional_digest(hasher, metadata.latest_state_digest);
     update_optional_digest(hasher, metadata.latest_machine_state_digest);
     update_optional_digest(hasher, metadata.latest_register_digest);
@@ -21035,6 +21278,93 @@ mod tests {
             second_cs.is_satisfied(),
             "second recursive native-opening block is unsatisfied: {:?}",
             second_cs.which_is_unsatisfied()
+        );
+    }
+
+    #[cfg(all(feature = "nova", not(feature = "zk")))]
+    #[test]
+    fn nova_native_claim_accumulators_fold_every_relation_in_bn254() {
+        let block0 = trace_block(0, boundary(0, 0), boundary(1, 0));
+        let block1 = trace_block(1, block0.end_state.clone(), boundary(3, 0));
+        let blocks = [block0, block1];
+        let bytecode = bytecode_for_blocks(&blocks);
+        let opening_receipt =
+            test_lookup_opening_receipt(&bytecode, &blocks, 8, false, false, false, false, false);
+        let receipt =
+            verify_jolt_lookup_block_openings(&bytecode, &blocks, &opening_receipt).unwrap();
+        let pipeline =
+            BlockProofPipeline::<_, ark_bn254::Fr, MockFoldingBackend>::
+                with_backend_and_verified_jolt_lookup_block_opening_receipt(
+                    [9u8; 32],
+                    MockFoldingBackend,
+                    receipt,
+                );
+        let output = pipeline.prove_blocks(&bytecode, &blocks).unwrap();
+        let first_circuit = nova_step_circuit_for_fold_input(&output.fold_inputs[0]);
+        let mut state = nova_initial_z_state_for_witness(&first_circuit.witness);
+        let mut first_metadata = BlockFoldAccumulator::new();
+        first_metadata.absorb(&output.fold_inputs[0]).unwrap();
+        let metadata_state =
+            nova_initial_z_state_from_metadata(&first_metadata, blocks[0].block_index).unwrap();
+        assert_eq!(
+            metadata_state, state,
+            "metadata and witness derived different Nova initial states"
+        );
+        let accumulator_indices = [
+            NOVA_NATIVE_REGISTER_CLAIM_ACCUMULATOR_INDEX,
+            NOVA_NATIVE_RAM_CLAIM_ACCUMULATOR_INDEX,
+            NOVA_NATIVE_LOOKUP_CLAIM_ACCUMULATOR_INDEX,
+            NOVA_NATIVE_CPU_CLAIM_ACCUMULATOR_INDEX,
+        ];
+        let challenge_indices = [
+            NOVA_NATIVE_REGISTER_CLAIM_CHALLENGE_INDEX,
+            NOVA_NATIVE_RAM_CLAIM_CHALLENGE_INDEX,
+            NOVA_NATIVE_LOOKUP_CLAIM_CHALLENGE_INDEX,
+            NOVA_NATIVE_CPU_CLAIM_CHALLENGE_INDEX,
+        ];
+
+        for fold_input in &output.fold_inputs {
+            let witness = fold_input.recursive_opening_witness.as_ref().unwrap();
+            let aggregates = witness.block_claim_aggregates().unwrap();
+            let challenges = witness.claim_aggregation_challenges().unwrap();
+            let mut expected = state;
+            for ((accumulator_index, challenge_index), (aggregate, challenge)) in
+                accumulator_indices
+                    .into_iter()
+                    .zip(challenge_indices)
+                    .zip(aggregates.into_iter().zip(challenges))
+            {
+                expected[accumulator_index] =
+                    add_recursive_native_claim_accumulator(state[accumulator_index], &aggregate);
+                assert_eq!(
+                    state[challenge_index],
+                    recursive_jolt_field_to_nova_scalar(&challenge),
+                    "authenticated claim aggregation challenge changed across blocks"
+                );
+            }
+            let next = nova_next_z_state(state, fold_input);
+            for index in accumulator_indices {
+                assert_eq!(
+                    next[index], expected[index],
+                    "recursive native claim accumulator mismatch at state index {index}"
+                );
+            }
+            state = next;
+        }
+        assert!(
+            accumulator_indices
+                .into_iter()
+                .any(|index| state[index] != NovaScalar::zero()),
+            "honest non-empty trace produced no native claim contribution"
+        );
+
+        let mut tampered_initial = nova_initial_z_state_for_witness(&first_circuit.witness);
+        tampered_initial[NOVA_NATIVE_LOOKUP_CLAIM_CHALLENGE_INDEX] += NovaScalar::from(1);
+        let tampered_cs =
+            synthesize_nova_step_circuit_with_input_for_test(&first_circuit, tampered_initial);
+        assert!(
+            !tampered_cs.is_satisfied(),
+            "tampering the public lookup aggregation challenge must invalidate the step circuit"
         );
     }
 

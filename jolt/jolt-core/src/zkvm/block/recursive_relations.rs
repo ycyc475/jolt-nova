@@ -18,6 +18,11 @@ const JOLT_FIELD_LIMB_WIDTH: usize = 64;
 const JOLT_FIELD_LIMBS: usize = 4;
 const REGISTER_INDEX_BITS: usize = (common::constants::REGISTER_COUNT as usize).ilog2() as usize;
 
+pub(super) struct RecursiveNativeClaimContribution {
+    aggregate: BigNat<NovaScalar>,
+    challenge: BigNat<NovaScalar>,
+}
+
 fn jolt_field_modulus() -> BigInt {
     BigInt::parse_bytes(
         b"21888242871839275222246405745257275088548364400416034343698204186575808495617",
@@ -617,6 +622,122 @@ fn enforce_equal<CS: ConstraintSystem<NovaScalar>>(
     actual.equal_when_carried_regroup(cs, expected)
 }
 
+fn aggregate_native_claims<CS: ConstraintSystem<NovaScalar>>(
+    mut cs: CS,
+    values: &[BigNat<NovaScalar>],
+    challenge_value: &RecursiveJoltFieldElement,
+    modulus: &BigNat<NovaScalar>,
+    zero: &BigNat<NovaScalar>,
+) -> Result<RecursiveNativeClaimContribution, SynthesisError> {
+    let challenge = alloc_jolt_field(
+        cs.namespace(|| "claim aggregation challenge"),
+        challenge_value,
+        modulus,
+    )?;
+    let mut aggregate = zero.clone();
+    for (index, value) in values.iter().enumerate() {
+        let (_, scaled) = aggregate.mult_mod(
+            cs.namespace(|| format!("scale aggregate at claim {index}")),
+            &challenge,
+            modulus,
+        )?;
+        aggregate = add_mod(
+            cs.namespace(|| format!("absorb claim {index}")),
+            &scaled,
+            value,
+            modulus,
+        )?;
+    }
+    Ok(RecursiveNativeClaimContribution {
+        aggregate,
+        challenge,
+    })
+}
+
+fn packed_bignat_lc<CS: ConstraintSystem<NovaScalar>>(
+    value: &BigNat<NovaScalar>,
+) -> LinearCombination<NovaScalar> {
+    let mut coefficient = NovaScalar::from(1);
+    value
+        .limbs
+        .iter()
+        .fold(LinearCombination::zero(), |lc, limb| {
+            let current = coefficient;
+            for _ in 0..JOLT_FIELD_LIMB_WIDTH {
+                coefficient = coefficient + coefficient;
+            }
+            lc + (current, limb)
+        })
+}
+
+fn packed_bignat_value(value: &BigNat<NovaScalar>) -> Option<NovaScalar> {
+    value.limb_values.as_ref().map(|limbs| {
+        let mut coefficient = NovaScalar::from(1);
+        limbs.iter().fold(NovaScalar::from(0), |acc, limb| {
+            let current = coefficient;
+            for _ in 0..JOLT_FIELD_LIMB_WIDTH {
+                coefficient = coefficient + coefficient;
+            }
+            acc + current * limb
+        })
+    })
+}
+
+pub(super) fn accumulate_recursive_native_claim<CS: ConstraintSystem<NovaScalar>>(
+    mut cs: CS,
+    current: &AllocatedNum<NovaScalar>,
+    public_challenge: &AllocatedNum<NovaScalar>,
+    contribution: &RecursiveNativeClaimContribution,
+) -> Result<AllocatedNum<NovaScalar>, SynthesisError> {
+    let modulus = alloc_jolt_modulus(cs.namespace(|| "Jolt field modulus"))?;
+    let current_nat = BigNat::alloc_from_nat(
+        cs.namespace(|| "allocate current native claim accumulator"),
+        || {
+            current
+                .get_value()
+                .map(|value| BigInt::from_bytes_le(Sign::Plus, &value.to_bytes()))
+                .ok_or(SynthesisError::AssignmentMissing)
+        },
+        JOLT_FIELD_LIMB_WIDTH,
+        JOLT_FIELD_LIMBS,
+    )?;
+    current_nat.assert_well_formed(cs.namespace(|| "current accumulator limbs fit"))?;
+    let reduced = current_nat.red_mod(cs.namespace(|| "reduce current accumulator"), &modulus)?;
+    enforce_equal(
+        cs.namespace(|| "current accumulator is canonical"),
+        &current_nat,
+        &reduced,
+    )?;
+    cs.enforce(
+        || "current public accumulator packs native limbs",
+        |_| packed_bignat_lc::<CS>(&current_nat) - current.get_variable(),
+        |lc| lc + CS::one(),
+        |lc| lc,
+    );
+    cs.enforce(
+        || "public aggregation challenge packs native limbs",
+        |_| packed_bignat_lc::<CS>(&contribution.challenge) - public_challenge.get_variable(),
+        |lc| lc + CS::one(),
+        |lc| lc,
+    );
+    let next = add_mod(
+        cs.namespace(|| "accumulate native block claim"),
+        &current_nat,
+        &contribution.aggregate,
+        &modulus,
+    )?;
+    let output = AllocatedNum::alloc(cs.namespace(|| "next native claim accumulator"), || {
+        packed_bignat_value(&next).ok_or(SynthesisError::AssignmentMissing)
+    })?;
+    cs.enforce(
+        || "next public accumulator packs native limbs",
+        |_| packed_bignat_lc::<CS>(&next) - output.get_variable(),
+        |lc| lc + CS::one(),
+        |lc| lc,
+    );
+    Ok(output)
+}
+
 fn allocate_register_claims<CS: ConstraintSystem<NovaScalar>>(
     mut cs: CS,
     register: &RecursiveJoltRegisterOpeningWitness,
@@ -717,7 +838,7 @@ pub(super) fn synthesize_recursive_lookup_opening_relation<CS: ConstraintSystem<
     global_cycle_start: &AllocatedNum<NovaScalar>,
     active_cycles: &AllocatedNum<NovaScalar>,
     opening_present: &AllocatedNum<NovaScalar>,
-) -> Result<(), SynthesisError> {
+) -> Result<RecursiveNativeClaimContribution, SynthesisError> {
     witness
         .validate_shape()
         .map_err(|reason| SynthesisError::Unsatisfiable(reason.to_string()))?;
@@ -920,7 +1041,21 @@ pub(super) fn synthesize_recursive_lookup_opening_relation<CS: ConstraintSystem<
             &expected,
         )?;
     }
-    Ok(())
+    let challenge = witness
+        .claim_aggregation_challenges()
+        .map_err(|reason| SynthesisError::Unsatisfiable(reason.to_string()))?[2];
+    let aggregate_values = instruction_sums
+        .iter()
+        .chain(tuple_sums.iter())
+        .cloned()
+        .collect::<Vec<_>>();
+    aggregate_native_claims(
+        cs.namespace(|| "aggregate native lookup block claims"),
+        &aggregate_values,
+        &challenge,
+        &modulus,
+        &zero,
+    )
 }
 
 /// Verify the complete per-block register opening decomposition inside the
@@ -936,7 +1071,7 @@ pub(super) fn synthesize_recursive_register_opening_relation<CS: ConstraintSyste
     global_cycle_start: &AllocatedNum<NovaScalar>,
     active_cycles: &AllocatedNum<NovaScalar>,
     opening_present: &AllocatedNum<NovaScalar>,
-) -> Result<(), SynthesisError> {
+) -> Result<RecursiveNativeClaimContribution, SynthesisError> {
     witness
         .validate_shape()
         .map_err(|reason| SynthesisError::Unsatisfiable(reason.to_string()))?;
@@ -1175,7 +1310,22 @@ pub(super) fn synthesize_recursive_register_opening_relation<CS: ConstraintSyste
         &inc_sum,
         &expected_inc,
     )?;
-    Ok(())
+    let challenge = witness
+        .claim_aggregation_challenges()
+        .map_err(|reason| SynthesisError::Unsatisfiable(reason.to_string()))?[0];
+    let aggregate_values = value_sums
+        .iter()
+        .chain(address_sums.iter())
+        .chain(core::iter::once(&inc_sum))
+        .cloned()
+        .collect::<Vec<_>>();
+    aggregate_native_claims(
+        cs.namespace(|| "aggregate native register block claims"),
+        &aggregate_values,
+        &challenge,
+        &modulus,
+        &zero,
+    )
 }
 
 /// Verify the complete per-block RAM opening decomposition inside the Nova
@@ -1192,7 +1342,7 @@ pub(super) fn synthesize_recursive_ram_opening_relation<CS: ConstraintSystem<Nov
     global_cycle_start: &AllocatedNum<NovaScalar>,
     active_cycles: &AllocatedNum<NovaScalar>,
     opening_present: &AllocatedNum<NovaScalar>,
-) -> Result<(), SynthesisError> {
+) -> Result<RecursiveNativeClaimContribution, SynthesisError> {
     witness
         .validate_shape()
         .map_err(|reason| SynthesisError::Unsatisfiable(reason.to_string()))?;
@@ -1599,7 +1749,22 @@ pub(super) fn synthesize_recursive_ram_opening_relation<CS: ConstraintSystem<Nov
         &inc_sum,
         &expected_inc,
     )?;
-    Ok(())
+    let challenge = witness
+        .claim_aggregation_challenges()
+        .map_err(|reason| SynthesisError::Unsatisfiable(reason.to_string()))?[1];
+    let aggregate_values = ra_sums
+        .iter()
+        .chain(tuple_sums.iter())
+        .chain(core::iter::once(&inc_sum))
+        .cloned()
+        .collect::<Vec<_>>();
+    aggregate_native_claims(
+        cs.namespace(|| "aggregate native RAM block claims"),
+        &aggregate_values,
+        &challenge,
+        &modulus,
+        &zero,
+    )
 }
 
 /// Verify the native Jolt CPU/Spartan opening and all uniform CPU R1CS rows
@@ -1615,7 +1780,7 @@ pub(super) fn synthesize_recursive_cpu_opening_relation<CS: ConstraintSystem<Nov
     global_cycle_start: &AllocatedNum<NovaScalar>,
     active_cycles: &AllocatedNum<NovaScalar>,
     opening_present: &AllocatedNum<NovaScalar>,
-) -> Result<(), SynthesisError> {
+) -> Result<RecursiveNativeClaimContribution, SynthesisError> {
     witness
         .validate_shape()
         .map_err(|reason| SynthesisError::Unsatisfiable(reason.to_string()))?;
@@ -1795,5 +1960,14 @@ pub(super) fn synthesize_recursive_cpu_opening_relation<CS: ConstraintSystem<Nov
             &expected,
         )?;
     }
-    Ok(())
+    let challenge = witness
+        .claim_aggregation_challenges()
+        .map_err(|reason| SynthesisError::Unsatisfiable(reason.to_string()))?[3];
+    aggregate_native_claims(
+        cs.namespace(|| "aggregate native CPU block claims"),
+        &opening_sums,
+        &challenge,
+        &modulus,
+        &zero,
+    )
 }
