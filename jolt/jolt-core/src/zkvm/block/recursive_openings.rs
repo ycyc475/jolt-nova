@@ -1,3 +1,4 @@
+#[cfg(feature = "nova")]
 use num::{BigUint, Num};
 use sha3::{Digest as ShaDigest, Sha3_256};
 
@@ -396,6 +397,7 @@ impl RecursiveJoltBlockOpeningWitness {
         Ok(self.claim_aggregation_challenges)
     }
 
+    #[cfg(feature = "nova")]
     pub(crate) fn block_claim_aggregates(
         &self,
     ) -> Result<[RecursiveJoltFieldElement; 4], &'static str> {
@@ -426,6 +428,7 @@ impl RecursiveJoltBlockOpeningWitness {
     }
 }
 
+#[cfg(feature = "nova")]
 fn aggregate_claim_values<'a>(
     values: impl IntoIterator<Item = &'a RecursiveJoltFieldElement>,
     challenge: &RecursiveJoltFieldElement,
