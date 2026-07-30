@@ -57,6 +57,32 @@ impl RecursiveJoltOpeningPoint {
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct RecursiveJoltLookupOpeningWitness {
+    pub log_k_chunk: usize,
+    pub instruction_opening_points: Vec<RecursiveJoltOpeningPoint>,
+    pub instruction_claims: Vec<RecursiveJoltFieldElement>,
+    pub instruction_block_contributions: Vec<RecursiveJoltFieldElement>,
+    pub tuple_opening_point: RecursiveJoltOpeningPoint,
+    pub tuple_claims: [RecursiveJoltFieldElement; 3],
+    pub tuple_block_contributions: [RecursiveJoltFieldElement; 3],
+}
+
+impl RecursiveJoltLookupOpeningWitness {
+    fn update_digest(&self, hasher: &mut Sha3_256) {
+        update_usize(hasher, self.log_k_chunk);
+        update_usize(hasher, self.instruction_opening_points.len());
+        for point in &self.instruction_opening_points {
+            point.update_digest(hasher);
+        }
+        update_field_elements(hasher, &self.instruction_claims);
+        update_field_elements(hasher, &self.instruction_block_contributions);
+        self.tuple_opening_point.update_digest(hasher);
+        update_field_elements(hasher, &self.tuple_claims);
+        update_field_elements(hasher, &self.tuple_block_contributions);
+    }
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct RecursiveJoltRegisterOpeningWitness {
     pub value_opening_point: RecursiveJoltOpeningPoint,
     pub value_claims: [RecursiveJoltFieldElement; 3],
@@ -226,6 +252,7 @@ pub struct RecursiveJoltBlockOpeningWitness {
     pub active_cycles: usize,
     pub cycle_capacity: usize,
     pub cycles: Vec<RecursiveJoltCycleWitness>,
+    pub lookup: RecursiveJoltLookupOpeningWitness,
     pub register: RecursiveJoltRegisterOpeningWitness,
     pub ram: RecursiveJoltRamOpeningWitness,
     pub cpu: RecursiveJoltCpuOpeningWitness,
@@ -240,6 +267,8 @@ pub struct RecursiveJoltBlockOpeningWitness {
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct RecursiveJoltOpeningCircuitShape {
     pub cycle_capacity: usize,
+    pub lookup_instruction_point_lens: Vec<usize>,
+    pub lookup_tuple_point_len: usize,
     pub register_value_point_len: usize,
     pub register_address_point_len: usize,
     pub register_inc_point_len: usize,
@@ -254,6 +283,13 @@ impl RecursiveJoltOpeningCircuitShape {
     pub fn from_witness(witness: &RecursiveJoltBlockOpeningWitness) -> Self {
         Self {
             cycle_capacity: witness.cycle_capacity,
+            lookup_instruction_point_lens: witness
+                .lookup
+                .instruction_opening_points
+                .iter()
+                .map(|point| point.coordinates.len())
+                .collect(),
+            lookup_tuple_point_len: witness.lookup.tuple_opening_point.coordinates.len(),
             register_value_point_len: witness.register.value_opening_point.coordinates.len(),
             register_address_point_len: witness.register.address_opening_point.coordinates.len(),
             register_inc_point_len: witness.register.inc_opening_point.coordinates.len(),
@@ -285,6 +321,7 @@ impl RecursiveJoltBlockOpeningWitness {
         for cycle in &self.cycles {
             cycle.update_digest(&mut hasher);
         }
+        self.lookup.update_digest(&mut hasher);
         self.register.update_digest(&mut hasher);
         self.ram.update_digest(&mut hasher);
         self.cpu.update_digest(&mut hasher);
@@ -321,8 +358,18 @@ impl RecursiveJoltBlockOpeningWitness {
             || self.register.address_block_contributions.len() != 3
             || self.ram.tuple_claims.len() != 3
             || self.ram.tuple_block_contributions.len() != 3
+            || self.lookup.tuple_claims.len() != 3
+            || self.lookup.tuple_block_contributions.len() != 3
         {
             return Err("recursive Jolt opening witness has invalid fixed claim shape");
+        }
+        if self.lookup.log_k_chunk == 0
+            || self.lookup.instruction_opening_points.len() != self.lookup.instruction_claims.len()
+            || self.lookup.instruction_claims.len()
+                != self.lookup.instruction_block_contributions.len()
+            || self.lookup.instruction_opening_points.is_empty()
+        {
+            return Err("recursive Jolt lookup opening witness has inconsistent claim shape");
         }
         if self.ram.ra_opening_points.len() != self.ram.ra_claims.len()
             || self.ram.ra_claims.len() != self.ram.ra_block_contributions.len()

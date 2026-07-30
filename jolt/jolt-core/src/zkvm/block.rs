@@ -16,13 +16,13 @@ mod recursive_relations;
 #[cfg(not(feature = "zk"))]
 pub use recursive_openings::{
     RecursiveJoltBlockOpeningWitness, RecursiveJoltCpuOpeningWitness, RecursiveJoltCycleWitness,
-    RecursiveJoltFieldElement, RecursiveJoltOpeningCircuitShape, RecursiveJoltOpeningPoint,
-    RecursiveJoltRamOpeningWitness, RecursiveJoltRegisterOpeningWitness,
+    RecursiveJoltFieldElement, RecursiveJoltLookupOpeningWitness, RecursiveJoltOpeningCircuitShape,
+    RecursiveJoltOpeningPoint, RecursiveJoltRamOpeningWitness, RecursiveJoltRegisterOpeningWitness,
 };
 #[cfg(all(feature = "nova", not(feature = "zk")))]
 use recursive_relations::{
-    synthesize_recursive_cpu_opening_relation, synthesize_recursive_ram_opening_relation,
-    synthesize_recursive_register_opening_relation,
+    synthesize_recursive_cpu_opening_relation, synthesize_recursive_lookup_opening_relation,
+    synthesize_recursive_ram_opening_relation, synthesize_recursive_register_opening_relation,
 };
 
 use crate::{
@@ -5642,6 +5642,13 @@ impl nova_snark::traits::circuit::StepCircuit<NovaScalar> for JoltNovaStepCircui
 
         #[cfg(not(feature = "zk"))]
         if let Some(recursive_opening_witness) = &self.witness.recursive_opening_witness {
+            synthesize_recursive_lookup_opening_relation(
+                cs.namespace(|| "native Jolt lookup opening relation"),
+                recursive_opening_witness,
+                &global_cycle_start,
+                &active_cycles,
+                &verified_jolt_lookup_opening_present,
+            )?;
             synthesize_recursive_register_opening_relation(
                 cs.namespace(|| "native Jolt register opening relation"),
                 recursive_opening_witness,
@@ -11433,6 +11440,30 @@ where
                 block_rd_inc_contributions[block_position],
             )?,
         };
+        let lookup = RecursiveJoltLookupOpeningWitness {
+            log_k_chunk,
+            instruction_opening_points: opening_points
+                .iter()
+                .map(|point| encode_recursive_jolt_opening_point::<F>(block.block_index, point))
+                .collect::<Result<Vec<_>, _>>()?,
+            instruction_claims: encode_recursive_jolt_field_vec(block.block_index, opening_claims)?,
+            instruction_block_contributions: encode_recursive_jolt_field_vec(
+                block.block_index,
+                &block_contributions[block_position],
+            )?,
+            tuple_opening_point: encode_recursive_jolt_opening_point::<F>(
+                block.block_index,
+                tuple_opening_point,
+            )?,
+            tuple_claims: encode_recursive_jolt_field_array(
+                block.block_index,
+                expected_tuple_claims,
+            )?,
+            tuple_block_contributions: encode_recursive_jolt_field_array(
+                block.block_index,
+                block_tuple_contributions[block_position],
+            )?,
+        };
         let ram = RecursiveJoltRamOpeningWitness {
             ram_start_address,
             ram_k,
@@ -11485,6 +11516,7 @@ where
             active_cycles: block.active_cycles,
             cycle_capacity,
             cycles,
+            lookup,
             register,
             ram,
             cpu,
@@ -20379,6 +20411,38 @@ mod tests {
     }
 
     #[cfg(all(feature = "nova", not(feature = "zk")))]
+    fn synthesize_recursive_lookup_relation_for_test(
+        witness: &RecursiveJoltBlockOpeningWitness,
+        global_cycle_start: usize,
+    ) -> Result<
+        nova_snark::frontend::test_cs::TestConstraintSystem<NovaScalar>,
+        nova_snark::frontend::SynthesisError,
+    > {
+        use nova_snark::frontend::{
+            num::AllocatedNum, test_cs::TestConstraintSystem, ConstraintSystem,
+        };
+
+        let mut cs = TestConstraintSystem::<NovaScalar>::new();
+        let start = AllocatedNum::alloc(cs.namespace(|| "global cycle start"), || {
+            Ok(NovaScalar::from(global_cycle_start as u64))
+        })?;
+        let opening_present = AllocatedNum::alloc(cs.namespace(|| "opening present"), || {
+            Ok(NovaScalar::from(1))
+        })?;
+        let active_cycles = AllocatedNum::alloc(cs.namespace(|| "active cycles"), || {
+            Ok(NovaScalar::from(witness.active_cycles as u64))
+        })?;
+        synthesize_recursive_lookup_opening_relation(
+            cs.namespace(|| "recursive lookup relation"),
+            witness,
+            &start,
+            &active_cycles,
+            &opening_present,
+        )?;
+        Ok(cs)
+    }
+
+    #[cfg(all(feature = "nova", not(feature = "zk")))]
     fn synthesize_recursive_register_relation_for_test(
         witness: &RecursiveJoltBlockOpeningWitness,
         global_cycle_start: usize,
@@ -20519,6 +20583,95 @@ mod tests {
             .map(|value| RecursiveJoltFieldElement::from_field(value).unwrap())
             .collect();
         witness.seal()
+    }
+
+    #[cfg(all(feature = "nova", not(feature = "zk")))]
+    #[test]
+    fn nova_lookup_opening_relation_checks_native_lasso_arithmetic() {
+        let blocks = [register_trace_block()];
+        let bytecode = bytecode_for_blocks(&blocks);
+        let opening_receipt =
+            test_lookup_opening_receipt(&bytecode, &blocks, 4, false, false, false, false, false);
+        let receipt =
+            verify_jolt_lookup_block_openings(&bytecode, &blocks, &opening_receipt).unwrap();
+        let witness = receipt
+            .recursive_block_opening_witness(blocks[0].block_index)
+            .unwrap();
+
+        let cs =
+            synthesize_recursive_lookup_relation_for_test(witness, blocks[0].global_cycle_start)
+                .unwrap();
+        assert!(
+            cs.is_satisfied(),
+            "honest native lookup opening relation is unsatisfied: {:?}",
+            cs.which_is_unsatisfied()
+        );
+
+        let mut tampered_index = witness.clone();
+        tampered_index.cycles[0].lookup_index ^= 1;
+        tampered_index = tampered_index.seal();
+        let cs = synthesize_recursive_lookup_relation_for_test(
+            &tampered_index,
+            blocks[0].global_cycle_start,
+        )
+        .unwrap();
+        assert!(
+            !cs.is_satisfied(),
+            "tampering a lookup index must invalidate an InstructionRa opening"
+        );
+
+        let mut tampered_operand = witness.clone();
+        tampered_operand.cycles[0].right_lookup_operand ^= 1;
+        tampered_operand = tampered_operand.seal();
+        let cs = synthesize_recursive_lookup_relation_for_test(
+            &tampered_operand,
+            blocks[0].global_cycle_start,
+        )
+        .unwrap();
+        assert!(
+            !cs.is_satisfied(),
+            "tampering a lookup operand must invalidate the lookup tuple opening"
+        );
+
+        let mut tampered_point = witness.clone();
+        tampered_point.lookup.instruction_opening_points[0].coordinates[0].canonical_le_bytes[0] ^=
+            1;
+        tampered_point = tampered_point.seal();
+        let cs = synthesize_recursive_lookup_relation_for_test(
+            &tampered_point,
+            blocks[0].global_cycle_start,
+        )
+        .unwrap();
+        assert!(
+            !cs.is_satisfied(),
+            "tampering an InstructionRa opening point must invalidate the Nova relation"
+        );
+
+        let mut tampered_contribution = witness.clone();
+        tampered_contribution.lookup.tuple_block_contributions[2].canonical_le_bytes[0] ^= 1;
+        tampered_contribution = tampered_contribution.seal();
+        let cs = synthesize_recursive_lookup_relation_for_test(
+            &tampered_contribution,
+            blocks[0].global_cycle_start,
+        )
+        .unwrap();
+        assert!(
+            !cs.is_satisfied(),
+            "tampering a lookup tuple contribution must invalidate the Nova relation"
+        );
+
+        let mut noncanonical_claim = witness.clone();
+        noncanonical_claim.lookup.instruction_claims[0].canonical_le_bytes = [0xff; 32];
+        noncanonical_claim = noncanonical_claim.seal();
+        let cs = synthesize_recursive_lookup_relation_for_test(
+            &noncanonical_claim,
+            blocks[0].global_cycle_start,
+        )
+        .unwrap();
+        assert!(
+            !cs.is_satisfied(),
+            "a non-canonical lookup claim encoding must be rejected"
+        );
     }
 
     #[cfg(all(feature = "nova", not(feature = "zk")))]

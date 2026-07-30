@@ -10,7 +10,8 @@ use crate::zkvm::r1cs::constraints::{LC, R1CS_CONSTRAINTS};
 
 use super::{
     NovaScalar, RecursiveJoltBlockOpeningWitness, RecursiveJoltFieldElement,
-    RecursiveJoltOpeningPoint, RecursiveJoltRamOpeningWitness, RecursiveJoltRegisterOpeningWitness,
+    RecursiveJoltLookupOpeningWitness, RecursiveJoltOpeningPoint, RecursiveJoltRamOpeningWitness,
+    RecursiveJoltRegisterOpeningWitness,
 };
 
 const JOLT_FIELD_LIMB_WIDTH: usize = 64;
@@ -287,6 +288,47 @@ fn alloc_u64_jolt_field_with_bits<CS: ConstraintSystem<NovaScalar>>(
     for limb_index in 1..JOLT_FIELD_LIMBS {
         cs.enforce(
             || format!("u64 upper Jolt-field limb {limb_index} is zero"),
+            |lc| lc + &allocated.limbs[limb_index],
+            |lc| lc + CS::one(),
+            |lc| lc,
+        );
+    }
+    Ok((allocated, bits))
+}
+
+fn alloc_u128_jolt_field_with_bits<CS: ConstraintSystem<NovaScalar>>(
+    mut cs: CS,
+    value: u128,
+) -> Result<(BigNat<NovaScalar>, Vec<AllocatedBit>), SynthesisError> {
+    let allocated = BigNat::alloc_from_nat(
+        cs.namespace(|| "allocate u128 as Jolt field"),
+        || Ok(BigInt::from(value)),
+        JOLT_FIELD_LIMB_WIDTH,
+        JOLT_FIELD_LIMBS,
+    )?;
+    allocated.assert_well_formed(cs.namespace(|| "u128 limbs fit"))?;
+    let bits = (0..128)
+        .map(|bit| {
+            AllocatedBit::alloc(
+                cs.namespace(|| format!("u128 bit {bit}")),
+                Some(((value >> bit) & 1) == 1),
+            )
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    for limb_index in 0..2 {
+        let packed = packed_bits_lc::<CS>(
+            &bits[limb_index * JOLT_FIELD_LIMB_WIDTH..(limb_index + 1) * JOLT_FIELD_LIMB_WIDTH],
+        );
+        cs.enforce(
+            || format!("u128 limb {limb_index} matches bits"),
+            |_| packed - &allocated.limbs[limb_index],
+            |lc| lc + CS::one(),
+            |lc| lc,
+        );
+    }
+    for limb_index in 2..JOLT_FIELD_LIMBS {
+        cs.enforce(
+            || format!("u128 upper Jolt-field limb {limb_index} is zero"),
             |lc| lc + &allocated.limbs[limb_index],
             |lc| lc + CS::one(),
             |lc| lc,
@@ -629,6 +671,28 @@ fn allocate_ram_claims<CS: ConstraintSystem<NovaScalar>>(
     Ok(())
 }
 
+fn allocate_lookup_claims<CS: ConstraintSystem<NovaScalar>>(
+    mut cs: CS,
+    lookup: &RecursiveJoltLookupOpeningWitness,
+    modulus: &BigNat<NovaScalar>,
+) -> Result<(), SynthesisError> {
+    for (index, claim) in lookup.instruction_claims.iter().enumerate() {
+        alloc_jolt_field(
+            cs.namespace(|| format!("InstructionRa global claim {index}")),
+            claim,
+            modulus,
+        )?;
+    }
+    for (index, claim) in lookup.tuple_claims.iter().enumerate() {
+        alloc_jolt_field(
+            cs.namespace(|| format!("lookup tuple global claim {index}")),
+            claim,
+            modulus,
+        )?;
+    }
+    Ok(())
+}
+
 struct AllocatedRamCycle {
     active: AllocatedBit,
     access: AllocatedBit,
@@ -639,6 +703,224 @@ struct AllocatedRamCycle {
     write_value: BigNat<NovaScalar>,
     offset_bits: Vec<AllocatedBit>,
     offset: usize,
+}
+
+/// Verify the complete per-block native Lasso opening decomposition inside
+/// the Nova step circuit.
+///
+/// The relation derives every committed `InstructionRa` chunk from the full
+/// lookup index and reconstructs the left-operand, right-operand, and output
+/// virtual-polynomial openings from the raw cycle tuple.
+pub(super) fn synthesize_recursive_lookup_opening_relation<CS: ConstraintSystem<NovaScalar>>(
+    mut cs: CS,
+    witness: &RecursiveJoltBlockOpeningWitness,
+    global_cycle_start: &AllocatedNum<NovaScalar>,
+    active_cycles: &AllocatedNum<NovaScalar>,
+    opening_present: &AllocatedNum<NovaScalar>,
+) -> Result<(), SynthesisError> {
+    witness
+        .validate_shape()
+        .map_err(|reason| SynthesisError::Unsatisfiable(reason.to_string()))?;
+
+    cs.enforce(
+        || "full recursive lookup opening witness requires authenticated opening",
+        |lc| lc + opening_present.get_variable(),
+        |lc| lc + CS::one(),
+        |lc| lc + CS::one(),
+    );
+
+    let modulus = alloc_jolt_modulus(cs.namespace(|| "Jolt field modulus"))?;
+    let zero = alloc_jolt_constant(cs.namespace(|| "Jolt field zero"), 0)?;
+    let one = alloc_jolt_constant(cs.namespace(|| "Jolt field one"), 1)?;
+    let lookup = &witness.lookup;
+    allocate_lookup_claims(
+        cs.namespace(|| "allocate authenticated global lookup claims"),
+        lookup,
+        &modulus,
+    )?;
+
+    let instruction_points = lookup
+        .instruction_opening_points
+        .iter()
+        .enumerate()
+        .map(|(index, point)| {
+            alloc_opening_point(
+                cs.namespace(|| format!("InstructionRa opening point {index}")),
+                point,
+                &modulus,
+            )
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let tuple_point = alloc_opening_point(
+        cs.namespace(|| "lookup tuple opening point"),
+        &lookup.tuple_opening_point,
+        &modulus,
+    )?;
+    if tuple_point.is_empty()
+        || lookup.log_k_chunk >= 128
+        || instruction_points
+            .iter()
+            .any(|point| point.len() != lookup.log_k_chunk + tuple_point.len())
+        || lookup.log_k_chunk * instruction_points.len() > 128
+    {
+        return Err(SynthesisError::Unsatisfiable(
+            "recursive lookup opening points have inconsistent dimensions".to_string(),
+        ));
+    }
+
+    let instruction_d = instruction_points.len();
+    let chunk_mask = (1u128 << lookup.log_k_chunk) - 1;
+    let mut instruction_sums = vec![zero.clone(); instruction_d];
+    let mut tuple_sums = [zero.clone(), zero.clone(), zero.clone()];
+    let mut active_bits = Vec::with_capacity(witness.cycle_capacity);
+
+    for (local_cycle, cycle) in witness.cycles.iter().enumerate() {
+        let active = alloc_boolean(
+            cs.namespace(|| format!("cycle {local_cycle} active")),
+            cycle.active,
+        )?;
+        active_bits.push(active.clone());
+        let cycle_bits = alloc_global_cycle_bits(
+            cs.namespace(|| format!("cycle {local_cycle} global index")),
+            global_cycle_start,
+            &active,
+            cycle.active,
+            local_cycle,
+            cycle.global_cycle,
+            tuple_point.len(),
+        )?;
+        let tuple_weight = eq_at_index(
+            cs.namespace(|| format!("cycle {local_cycle} tuple weight")),
+            &tuple_point,
+            &cycle_bits,
+            cycle.global_cycle,
+            &zero,
+            &one,
+            &modulus,
+        )?;
+        let (lookup_index, lookup_index_bits) = alloc_u128_jolt_field_with_bits(
+            cs.namespace(|| format!("cycle {local_cycle} lookup index")),
+            cycle.lookup_index,
+        )?;
+        enforce_zero_when_disabled(
+            cs.namespace(|| format!("cycle {local_cycle} inactive lookup index")),
+            &active,
+            &lookup_index,
+        );
+
+        for (opening_index, point) in instruction_points.iter().enumerate() {
+            let (address_point, cycle_point) = point.split_at(lookup.log_k_chunk);
+            let shift = lookup.log_k_chunk * (instruction_d - 1 - opening_index);
+            let chunk_bits = &lookup_index_bits[shift..shift.saturating_add(lookup.log_k_chunk)];
+            let chunk = ((cycle.lookup_index >> shift) & chunk_mask) as usize;
+            let address_weight = eq_at_index(
+                cs.namespace(|| {
+                    format!("cycle {local_cycle} InstructionRa {opening_index} address weight")
+                }),
+                address_point,
+                chunk_bits,
+                chunk,
+                &zero,
+                &one,
+                &modulus,
+            )?;
+            let cycle_weight = eq_at_index(
+                cs.namespace(|| {
+                    format!("cycle {local_cycle} InstructionRa {opening_index} cycle weight")
+                }),
+                cycle_point,
+                &cycle_bits,
+                cycle.global_cycle,
+                &zero,
+                &one,
+                &modulus,
+            )?;
+            let (_, term) = address_weight.mult_mod(
+                cs.namespace(|| format!("cycle {local_cycle} InstructionRa {opening_index} term")),
+                &cycle_weight,
+                &modulus,
+            )?;
+            let active_term = gated_value(
+                cs.namespace(|| {
+                    format!("cycle {local_cycle} gate InstructionRa {opening_index} term")
+                }),
+                &active,
+                cycle.active,
+                &term,
+                &zero,
+            )?;
+            instruction_sums[opening_index] = add_mod(
+                cs.namespace(|| {
+                    format!("cycle {local_cycle} accumulate InstructionRa {opening_index}")
+                }),
+                &instruction_sums[opening_index],
+                &active_term,
+                &modulus,
+            )?;
+        }
+
+        let left = alloc_small_jolt_field(
+            cs.namespace(|| format!("cycle {local_cycle} left lookup operand")),
+            cycle.left_lookup_operand,
+        )?;
+        let (right, _) = alloc_u128_jolt_field_with_bits(
+            cs.namespace(|| format!("cycle {local_cycle} right lookup operand")),
+            cycle.right_lookup_operand,
+        )?;
+        let output = alloc_small_jolt_field(
+            cs.namespace(|| format!("cycle {local_cycle} lookup output")),
+            cycle.lookup_output,
+        )?;
+        for (label, value) in [("left", &left), ("right", &right), ("output", &output)] {
+            enforce_zero_when_disabled(
+                cs.namespace(|| format!("cycle {local_cycle} inactive {label} lookup value")),
+                &active,
+                value,
+            );
+        }
+        for (claim_index, value) in [&left, &right, &output].into_iter().enumerate() {
+            tuple_sums[claim_index] = accumulate_weighted_value(
+                cs.namespace(|| {
+                    format!("cycle {local_cycle} accumulate lookup tuple {claim_index}")
+                }),
+                &tuple_sums[claim_index],
+                &tuple_weight,
+                value,
+                &modulus,
+            )?;
+        }
+    }
+    enforce_active_cycle_prefix(
+        cs.namespace(|| "lookup active-cycle prefix"),
+        &active_bits,
+        active_cycles,
+    );
+
+    for (opening_index, actual) in instruction_sums.iter().enumerate() {
+        let expected = alloc_jolt_field(
+            cs.namespace(|| format!("expected InstructionRa contribution {opening_index}")),
+            &lookup.instruction_block_contributions[opening_index],
+            &modulus,
+        )?;
+        enforce_equal(
+            cs.namespace(|| format!("InstructionRa contribution {opening_index} matches")),
+            actual,
+            &expected,
+        )?;
+    }
+    for (claim_index, actual) in tuple_sums.iter().enumerate() {
+        let expected = alloc_jolt_field(
+            cs.namespace(|| format!("expected lookup tuple contribution {claim_index}")),
+            &lookup.tuple_block_contributions[claim_index],
+            &modulus,
+        )?;
+        enforce_equal(
+            cs.namespace(|| format!("lookup tuple contribution {claim_index} matches")),
+            actual,
+            &expected,
+        )?;
+    }
+    Ok(())
 }
 
 /// Verify the complete per-block register opening decomposition inside the
