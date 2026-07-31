@@ -63,9 +63,11 @@ pub struct RecursiveJoltLookupOpeningWitness {
     pub log_k_chunk: usize,
     pub instruction_opening_points: Vec<RecursiveJoltOpeningPoint>,
     pub instruction_claims: Vec<RecursiveJoltFieldElement>,
+    pub instruction_padding: Vec<RecursiveJoltFieldElement>,
     pub instruction_block_contributions: Vec<RecursiveJoltFieldElement>,
     pub tuple_opening_point: RecursiveJoltOpeningPoint,
     pub tuple_claims: [RecursiveJoltFieldElement; 3],
+    pub tuple_padding: [RecursiveJoltFieldElement; 3],
     pub tuple_block_contributions: [RecursiveJoltFieldElement; 3],
 }
 
@@ -77,9 +79,11 @@ impl RecursiveJoltLookupOpeningWitness {
             point.update_digest(hasher);
         }
         update_field_elements(hasher, &self.instruction_claims);
+        update_field_elements(hasher, &self.instruction_padding);
         update_field_elements(hasher, &self.instruction_block_contributions);
         self.tuple_opening_point.update_digest(hasher);
         update_field_elements(hasher, &self.tuple_claims);
+        update_field_elements(hasher, &self.tuple_padding);
         update_field_elements(hasher, &self.tuple_block_contributions);
     }
 }
@@ -151,6 +155,7 @@ impl RecursiveJoltRamOpeningWitness {
 pub struct RecursiveJoltCpuOpeningWitness {
     pub opening_point: RecursiveJoltOpeningPoint,
     pub claims: Vec<RecursiveJoltFieldElement>,
+    pub padding: Vec<RecursiveJoltFieldElement>,
     pub block_contributions: Vec<RecursiveJoltFieldElement>,
 }
 
@@ -158,6 +163,7 @@ impl RecursiveJoltCpuOpeningWitness {
     fn update_digest(&self, hasher: &mut Sha3_256) {
         self.opening_point.update_digest(hasher);
         update_field_elements(hasher, &self.claims);
+        update_field_elements(hasher, &self.padding);
         update_field_elements(hasher, &self.block_contributions);
     }
 }
@@ -251,10 +257,13 @@ impl RecursiveJoltCycleWitness {
 pub struct RecursiveJoltBlockOpeningWitness {
     pub version: u16,
     pub block_index: usize,
+    pub block_position: usize,
+    pub block_count: usize,
     pub active_cycles: usize,
     pub cycle_capacity: usize,
     pub cycles: Vec<RecursiveJoltCycleWitness>,
     pub claim_aggregation_challenges: [RecursiveJoltFieldElement; 4],
+    pub claim_closure_targets: [RecursiveJoltFieldElement; 4],
     pub lookup: RecursiveJoltLookupOpeningWitness,
     pub register: RecursiveJoltRegisterOpeningWitness,
     pub ram: RecursiveJoltRamOpeningWitness,
@@ -311,13 +320,15 @@ impl RecursiveJoltOpeningCircuitShape {
 }
 
 impl RecursiveJoltBlockOpeningWitness {
-    pub const VERSION: u16 = 2;
+    pub const VERSION: u16 = 3;
 
     pub(crate) fn compute_digest(&self) -> [u8; 32] {
         let mut hasher = Sha3_256::new();
-        hasher.update(b"JOLT_NOVA_RECURSIVE_NATIVE_OPENING_WITNESS_V2");
+        hasher.update(b"JOLT_NOVA_RECURSIVE_NATIVE_OPENING_WITNESS_V3");
         hasher.update(self.version.to_le_bytes());
         update_usize(&mut hasher, self.block_index);
+        update_usize(&mut hasher, self.block_position);
+        update_usize(&mut hasher, self.block_count);
         update_usize(&mut hasher, self.active_cycles);
         update_usize(&mut hasher, self.cycle_capacity);
         update_usize(&mut hasher, self.cycles.len());
@@ -325,6 +336,7 @@ impl RecursiveJoltBlockOpeningWitness {
             cycle.update_digest(&mut hasher);
         }
         update_field_elements(&mut hasher, &self.claim_aggregation_challenges);
+        update_field_elements(&mut hasher, &self.claim_closure_targets);
         self.lookup.update_digest(&mut hasher);
         self.register.update_digest(&mut hasher);
         self.ram.update_digest(&mut hasher);
@@ -340,6 +352,12 @@ impl RecursiveJoltBlockOpeningWitness {
     pub fn validate_shape(&self) -> Result<(), &'static str> {
         if self.version != Self::VERSION {
             return Err("unsupported recursive Jolt opening witness version");
+        }
+        if self.block_count == 0 {
+            return Err("recursive Jolt opening witness has an empty block schedule");
+        }
+        if self.block_position >= self.block_count {
+            return Err("recursive Jolt opening witness has an invalid block position");
         }
         if self.active_cycles == 0 || self.active_cycles > self.cycle_capacity {
             return Err("recursive Jolt opening witness has invalid active-cycle count");
@@ -369,6 +387,7 @@ impl RecursiveJoltBlockOpeningWitness {
         }
         if self.lookup.log_k_chunk == 0
             || self.lookup.instruction_opening_points.len() != self.lookup.instruction_claims.len()
+            || self.lookup.instruction_claims.len() != self.lookup.instruction_padding.len()
             || self.lookup.instruction_claims.len()
                 != self.lookup.instruction_block_contributions.len()
             || self.lookup.instruction_opening_points.is_empty()
@@ -381,6 +400,7 @@ impl RecursiveJoltBlockOpeningWitness {
             return Err("recursive Jolt RAM opening witness has inconsistent claim shape");
         }
         if self.cpu.claims.len() != 35
+            || self.cpu.padding.len() != self.cpu.claims.len()
             || self.cpu.block_contributions.len() != self.cpu.claims.len()
         {
             return Err("recursive Jolt CPU opening witness has inconsistent claim shape");
@@ -395,6 +415,12 @@ impl RecursiveJoltBlockOpeningWitness {
         &self,
     ) -> Result<[RecursiveJoltFieldElement; 4], &'static str> {
         Ok(self.claim_aggregation_challenges)
+    }
+
+    pub(crate) fn claim_closure_targets(
+        &self,
+    ) -> Result<[RecursiveJoltFieldElement; 4], &'static str> {
+        Ok(self.claim_closure_targets)
     }
 
     #[cfg(feature = "nova")]

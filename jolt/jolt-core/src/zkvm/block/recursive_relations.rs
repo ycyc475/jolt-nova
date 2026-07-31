@@ -20,6 +20,7 @@ const REGISTER_INDEX_BITS: usize = (common::constants::REGISTER_COUNT as usize).
 
 pub(super) struct RecursiveNativeClaimContribution {
     aggregate: BigNat<NovaScalar>,
+    target: BigNat<NovaScalar>,
     challenge: BigNat<NovaScalar>,
 }
 
@@ -625,6 +626,7 @@ fn enforce_equal<CS: ConstraintSystem<NovaScalar>>(
 fn aggregate_native_claims<CS: ConstraintSystem<NovaScalar>>(
     mut cs: CS,
     values: &[BigNat<NovaScalar>],
+    target_values: &[BigNat<NovaScalar>],
     challenge_value: &RecursiveJoltFieldElement,
     modulus: &BigNat<NovaScalar>,
     zero: &BigNat<NovaScalar>,
@@ -648,8 +650,23 @@ fn aggregate_native_claims<CS: ConstraintSystem<NovaScalar>>(
             modulus,
         )?;
     }
+    let mut target = zero.clone();
+    for (index, value) in target_values.iter().enumerate() {
+        let (_, scaled) = target.mult_mod(
+            cs.namespace(|| format!("scale target at claim {index}")),
+            &challenge,
+            modulus,
+        )?;
+        target = add_mod(
+            cs.namespace(|| format!("absorb target claim {index}")),
+            &scaled,
+            value,
+            modulus,
+        )?;
+    }
     Ok(RecursiveNativeClaimContribution {
         aggregate,
+        target,
         challenge,
     })
 }
@@ -687,6 +704,7 @@ pub(super) fn accumulate_recursive_native_claim<CS: ConstraintSystem<NovaScalar>
     mut cs: CS,
     current: &AllocatedNum<NovaScalar>,
     public_challenge: &AllocatedNum<NovaScalar>,
+    public_target: &AllocatedNum<NovaScalar>,
     contribution: &RecursiveNativeClaimContribution,
 ) -> Result<AllocatedNum<NovaScalar>, SynthesisError> {
     let modulus = alloc_jolt_modulus(cs.namespace(|| "Jolt field modulus"))?;
@@ -717,6 +735,12 @@ pub(super) fn accumulate_recursive_native_claim<CS: ConstraintSystem<NovaScalar>
     cs.enforce(
         || "public aggregation challenge packs native limbs",
         |_| packed_bignat_lc::<CS>(&contribution.challenge) - public_challenge.get_variable(),
+        |lc| lc + CS::one(),
+        |lc| lc,
+    );
+    cs.enforce(
+        || "public closure target packs authenticated native claims",
+        |_| packed_bignat_lc::<CS>(&contribution.target) - public_target.get_variable(),
         |lc| lc + CS::one(),
         |lc| lc,
     );
@@ -1049,9 +1073,56 @@ pub(super) fn synthesize_recursive_lookup_opening_relation<CS: ConstraintSystem<
         .chain(tuple_sums.iter())
         .cloned()
         .collect::<Vec<_>>();
+    let mut target_values =
+        Vec::with_capacity(lookup.instruction_claims.len() + lookup.tuple_claims.len());
+    for (index, (claim, padding)) in lookup
+        .instruction_claims
+        .iter()
+        .zip(lookup.instruction_padding.iter())
+        .enumerate()
+    {
+        let claim = alloc_jolt_field(
+            cs.namespace(|| format!("InstructionRa target claim {index}")),
+            claim,
+            &modulus,
+        )?;
+        let padding = alloc_jolt_field(
+            cs.namespace(|| format!("InstructionRa target padding {index}")),
+            padding,
+            &modulus,
+        )?;
+        target_values.push(claim.sub_mod(
+            cs.namespace(|| format!("InstructionRa active target {index}")),
+            &padding,
+            &modulus,
+        )?);
+    }
+    for (index, (claim, padding)) in lookup
+        .tuple_claims
+        .iter()
+        .zip(lookup.tuple_padding.iter())
+        .enumerate()
+    {
+        let claim = alloc_jolt_field(
+            cs.namespace(|| format!("lookup tuple target claim {index}")),
+            claim,
+            &modulus,
+        )?;
+        let padding = alloc_jolt_field(
+            cs.namespace(|| format!("lookup tuple target padding {index}")),
+            padding,
+            &modulus,
+        )?;
+        target_values.push(claim.sub_mod(
+            cs.namespace(|| format!("lookup tuple active target {index}")),
+            &padding,
+            &modulus,
+        )?);
+    }
     aggregate_native_claims(
         cs.namespace(|| "aggregate native lookup block claims"),
         &aggregate_values,
+        &target_values,
         &challenge,
         &modulus,
         &zero,
@@ -1319,9 +1390,24 @@ pub(super) fn synthesize_recursive_register_opening_relation<CS: ConstraintSyste
         .chain(core::iter::once(&inc_sum))
         .cloned()
         .collect::<Vec<_>>();
+    let target_values = register
+        .value_claims
+        .iter()
+        .chain(register.address_claims.iter())
+        .chain(core::iter::once(&register.inc_claim))
+        .enumerate()
+        .map(|(index, claim)| {
+            alloc_jolt_field(
+                cs.namespace(|| format!("register closure target claim {index}")),
+                claim,
+                &modulus,
+            )
+        })
+        .collect::<Result<Vec<_>, _>>()?;
     aggregate_native_claims(
         cs.namespace(|| "aggregate native register block claims"),
         &aggregate_values,
+        &target_values,
         &challenge,
         &modulus,
         &zero,
@@ -1758,9 +1844,24 @@ pub(super) fn synthesize_recursive_ram_opening_relation<CS: ConstraintSystem<Nov
         .chain(core::iter::once(&inc_sum))
         .cloned()
         .collect::<Vec<_>>();
+    let target_values = ram
+        .ra_claims
+        .iter()
+        .chain(ram.tuple_claims.iter())
+        .chain(core::iter::once(&ram.inc_claim))
+        .enumerate()
+        .map(|(index, claim)| {
+            alloc_jolt_field(
+                cs.namespace(|| format!("RAM closure target claim {index}")),
+                claim,
+                &modulus,
+            )
+        })
+        .collect::<Result<Vec<_>, _>>()?;
     aggregate_native_claims(
         cs.namespace(|| "aggregate native RAM block claims"),
         &aggregate_values,
+        &target_values,
         &challenge,
         &modulus,
         &zero,
@@ -1963,9 +2064,28 @@ pub(super) fn synthesize_recursive_cpu_opening_relation<CS: ConstraintSystem<Nov
     let challenge = witness
         .claim_aggregation_challenges()
         .map_err(|reason| SynthesisError::Unsatisfiable(reason.to_string()))?[3];
+    let mut target_values = Vec::with_capacity(cpu.claims.len());
+    for (index, (claim, padding)) in cpu.claims.iter().zip(cpu.padding.iter()).enumerate() {
+        let claim = alloc_jolt_field(
+            cs.namespace(|| format!("CPU closure target claim {index}")),
+            claim,
+            &modulus,
+        )?;
+        let padding = alloc_jolt_field(
+            cs.namespace(|| format!("CPU closure target padding {index}")),
+            padding,
+            &modulus,
+        )?;
+        target_values.push(claim.sub_mod(
+            cs.namespace(|| format!("CPU active closure target {index}")),
+            &padding,
+            &modulus,
+        )?);
+    }
     aggregate_native_claims(
         cs.namespace(|| "aggregate native CPU block claims"),
         &opening_sums,
+        &target_values,
         &challenge,
         &modulus,
         &zero,
