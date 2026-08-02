@@ -12,25 +12,33 @@
 //! - [`SumcheckRoundGadget`]: Constraint generation for a single sumcheck round
 //! - [`BlindFoldWitness`]: Witness assignment for the verifier circuit
 
+#[cfg(feature = "zk")]
 mod folding;
 pub(crate) mod layout;
 mod output_constraint;
+#[cfg(feature = "zk")]
 mod protocol;
 mod r1cs;
+#[cfg(feature = "zk")]
 mod relaxed_r1cs;
+#[cfg(feature = "zk")]
 mod spartan;
 mod witness;
 
+#[cfg(feature = "zk")]
 pub use folding::{compute_cross_term, sample_random_satisfying_pair};
 pub use output_constraint::{
     InputClaimConstraint, OutputClaimConstraint, ProductTerm, SumOfProductsVisitor, ValueSource,
 };
+#[cfg(feature = "zk")]
 pub use protocol::{
     BlindFoldProof, BlindFoldProver, BlindFoldVerifier, BlindFoldVerifierInput,
     BlindFoldVerifyError,
 };
 pub use r1cs::{SparseR1CSMatrix, VerifierR1CS, VerifierR1CSBuilder};
+#[cfg(feature = "zk")]
 pub use relaxed_r1cs::{RelaxedR1CSInstance, RelaxedR1CSWitness};
+#[cfg(feature = "zk")]
 pub use spartan::{
     compute_L_w_at_ry, BlindFoldInnerSumcheckProver, BlindFoldSpartanParams,
     BlindFoldSpartanProver, BlindFoldSpartanVerifier, SpartanFinalClaims,

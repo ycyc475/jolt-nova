@@ -1,3 +1,5 @@
+use ark_serialize::CanonicalSerialize;
+use light_poseidon::parameters::bn254_x5::get_poseidon_parameters;
 use nova_snark::{
     frontend::{
         num::AllocatedNum, AllocatedBit, ConstraintSystem, LinearCombination, SynthesisError,
@@ -6,17 +8,589 @@ use nova_snark::{
 };
 use num::{bigint::Sign, BigInt};
 
+use crate::subprotocols::blindfold::VerifierR1CS;
 use crate::zkvm::r1cs::constraints::{LC, R1CS_CONSTRAINTS};
 
 use super::{
-    NovaScalar, RecursiveJoltBlockOpeningWitness, RecursiveJoltFieldElement,
-    RecursiveJoltLookupOpeningWitness, RecursiveJoltOpeningPoint, RecursiveJoltRamOpeningWitness,
-    RecursiveJoltRegisterOpeningWitness,
+    NovaScalar, RecursiveClearSumcheckStageWitness, RecursiveJoltBlockOpeningWitness,
+    RecursiveJoltFieldElement, RecursiveJoltLookupOpeningWitness, RecursiveJoltOpeningPoint,
+    RecursiveJoltRamOpeningWitness, RecursiveJoltRegisterOpeningWitness,
 };
 
 const JOLT_FIELD_LIMB_WIDTH: usize = 64;
 const JOLT_FIELD_LIMBS: usize = 4;
 const REGISTER_INDEX_BITS: usize = (common::constants::REGISTER_COUNT as usize).ilog2() as usize;
+
+/// Allocates and enforces the verifier R1CS used by Jolt's BlindFold relation.
+/// This matrix contains the stage endpoint constraints for Lasso lookups,
+/// registers, RAM, CPU/Spartan, and the Stage-8 joint-opening claim.  Enforcing
+/// it row-by-row inside Nova avoids replacing those relations with receipt
+/// digests.
+pub(super) fn synthesize_recursive_jolt_verifier_r1cs<CS: ConstraintSystem<NovaScalar>>(
+    mut cs: CS,
+    verifier_r1cs: &VerifierR1CS<ark_bn254::Fr>,
+    witness: &[ark_bn254::Fr],
+) -> Result<Vec<AllocatedNum<NovaScalar>>, SynthesisError> {
+    if witness.len() != verifier_r1cs.num_vars
+        || verifier_r1cs.a.num_rows != verifier_r1cs.num_constraints
+        || verifier_r1cs.b.num_rows != verifier_r1cs.num_constraints
+        || verifier_r1cs.c.num_rows != verifier_r1cs.num_constraints
+        || verifier_r1cs.a.num_cols != verifier_r1cs.num_vars
+        || verifier_r1cs.b.num_cols != verifier_r1cs.num_vars
+        || verifier_r1cs.c.num_cols != verifier_r1cs.num_vars
+    {
+        return Err(SynthesisError::Unsatisfiable(
+            "recursive Jolt verifier R1CS dimensions are inconsistent".to_string(),
+        ));
+    }
+
+    let allocated = witness
+        .iter()
+        .enumerate()
+        .map(|(index, value)| {
+            let value = ark_bn254_scalar_as_nova_scalar(value)?;
+            AllocatedNum::alloc(
+                cs.namespace(|| format!("verifier variable {index}")),
+                || Ok(value),
+            )
+        })
+        .collect::<Result<Vec<_>, SynthesisError>>()?;
+    cs.enforce(
+        || "verifier R1CS constant variable equals one",
+        |lc| lc + allocated[0].get_variable() - CS::one(),
+        |lc| lc + CS::one(),
+        |lc| lc,
+    );
+
+    let matrix_row = |matrix: &crate::subprotocols::blindfold::SparseR1CSMatrix<ark_bn254::Fr>,
+                      row: usize|
+     -> Result<LinearCombination<NovaScalar>, SynthesisError> {
+        matrix
+            .entries
+            .iter()
+            .filter(|(entry_row, _, _)| *entry_row == row)
+            .try_fold(
+                LinearCombination::<NovaScalar>::zero(),
+                |lc, (_, column, coefficient)| {
+                    Ok(lc
+                        + (
+                            ark_bn254_scalar_as_nova_scalar(coefficient)?,
+                            allocated[*column].get_variable(),
+                        ))
+                },
+            )
+    };
+
+    for row in 0..verifier_r1cs.num_constraints {
+        let a = matrix_row(&verifier_r1cs.a, row)?;
+        let b = matrix_row(&verifier_r1cs.b, row)?;
+        let c = matrix_row(&verifier_r1cs.c, row)?;
+        cs.enforce(
+            || format!("Jolt verifier R1CS row {row}"),
+            |_| a,
+            |_| b,
+            |_| c,
+        );
+    }
+    Ok(allocated)
+}
+
+/// Binds the transcript-verified sumcheck polynomials to the coefficient rows
+/// of the exact Jolt verifier R1CS witness grid.
+pub(super) fn bind_recursive_sumchecks_to_verifier_r1cs<CS: ConstraintSystem<NovaScalar>>(
+    mut cs: CS,
+    stages: &[AllocatedRecursiveClearSumcheckStage],
+    verifier_r1cs: &VerifierR1CS<ark_bn254::Fr>,
+    allocated_verifier_witness: &[AllocatedNum<NovaScalar>],
+) -> Result<(), SynthesisError> {
+    let rounds = stages
+        .iter()
+        .flat_map(|stage| stage.full_round_coefficients.iter())
+        .collect::<Vec<_>>();
+    if rounds.len() != verifier_r1cs.hyrax.total_rounds
+        || allocated_verifier_witness.len() != verifier_r1cs.num_vars
+        || verifier_r1cs.num_vars < 1 + verifier_r1cs.hyrax.R_prime * verifier_r1cs.hyrax.C
+    {
+        return Err(SynthesisError::Unsatisfiable(
+            "sumcheck/R1CS coefficient-grid dimensions do not match".to_string(),
+        ));
+    }
+
+    for (round_index, coefficients) in rounds.into_iter().enumerate() {
+        if coefficients.len() > verifier_r1cs.hyrax.C {
+            return Err(SynthesisError::Unsatisfiable(
+                "sumcheck polynomial exceeds verifier R1CS coefficient width".to_string(),
+            ));
+        }
+        for column in 0..verifier_r1cs.hyrax.C {
+            let verifier_variable =
+                &allocated_verifier_witness[1 + round_index * verifier_r1cs.hyrax.C + column];
+            if let Some(coefficient) = coefficients.get(column) {
+                cs.enforce(
+                    || format!("bind sumcheck round {round_index} coefficient {column}"),
+                    |lc| lc + coefficient.get_variable() - verifier_variable.get_variable(),
+                    |lc| lc + CS::one(),
+                    |lc| lc,
+                );
+            } else {
+                cs.enforce(
+                    || format!("zero-pad sumcheck round {round_index} coefficient {column}"),
+                    |lc| lc + verifier_variable.get_variable(),
+                    |lc| lc + CS::one(),
+                    |lc| lc,
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
+/// The exact state carried by Jolt's BN254 Poseidon Fiat--Shamir transcript.
+/// Both values are native BN254 scalars after the Nova engine was moved to
+/// `Bn256EngineIPA`.
+pub(super) struct AllocatedRecursivePoseidonTranscriptState {
+    pub state: AllocatedNum<NovaScalar>,
+    pub n_rounds: AllocatedNum<NovaScalar>,
+}
+
+fn ark_bn254_scalar_as_nova_scalar(value: &ark_bn254::Fr) -> Result<NovaScalar, SynthesisError> {
+    let mut bytes = [0u8; 32];
+    value
+        .serialize_uncompressed(&mut bytes[..])
+        .map_err(|error| SynthesisError::Unsatisfiable(error.to_string()))?;
+    Option::from(NovaScalar::from_bytes(&bytes)).ok_or_else(|| {
+        SynthesisError::Unsatisfiable(
+            "arkworks BN254 scalar is not canonical for the Nova BN254 scalar field".to_string(),
+        )
+    })
+}
+
+fn alloc_nova_constant<CS: ConstraintSystem<NovaScalar>>(
+    mut cs: CS,
+    value: NovaScalar,
+) -> Result<AllocatedNum<NovaScalar>, SynthesisError> {
+    let allocated = AllocatedNum::alloc(cs.namespace(|| "allocate constant"), || Ok(value))?;
+    cs.enforce(
+        || "bind constant",
+        |lc| lc + allocated.get_variable() - (value, CS::one()),
+        |lc| lc + CS::one(),
+        |lc| lc,
+    );
+    Ok(allocated)
+}
+
+fn poseidon_x5<CS: ConstraintSystem<NovaScalar>>(
+    mut cs: CS,
+    input: &AllocatedNum<NovaScalar>,
+) -> Result<AllocatedNum<NovaScalar>, SynthesisError> {
+    let square = AllocatedNum::alloc(cs.namespace(|| "x squared"), || {
+        input
+            .get_value()
+            .map(|value| value.square())
+            .ok_or(SynthesisError::AssignmentMissing)
+    })?;
+    cs.enforce(
+        || "x squared constraint",
+        |lc| lc + input.get_variable(),
+        |lc| lc + input.get_variable(),
+        |lc| lc + square.get_variable(),
+    );
+    let fourth = AllocatedNum::alloc(cs.namespace(|| "x fourth"), || {
+        input
+            .get_value()
+            .map(|value| value.square().square())
+            .ok_or(SynthesisError::AssignmentMissing)
+    })?;
+    cs.enforce(
+        || "x fourth constraint",
+        |lc| lc + square.get_variable(),
+        |lc| lc + square.get_variable(),
+        |lc| lc + fourth.get_variable(),
+    );
+    let fifth = AllocatedNum::alloc(cs.namespace(|| "x fifth"), || {
+        input
+            .get_value()
+            .map(|value| value.square().square() * value)
+            .ok_or(SynthesisError::AssignmentMissing)
+    })?;
+    cs.enforce(
+        || "x fifth constraint",
+        |lc| lc + fourth.get_variable(),
+        |lc| lc + input.get_variable(),
+        |lc| lc + fifth.get_variable(),
+    );
+    Ok(fifth)
+}
+
+/// Constrains the exact `light_poseidon::Poseidon::<Fr>::new_circom(3)`
+/// permutation used by `PoseidonTranscript`.  The domain tag is zero and the
+/// three inputs are `(state, n_rounds, data)`.
+pub(super) fn synthesize_recursive_poseidon_hash<CS: ConstraintSystem<NovaScalar>>(
+    mut cs: CS,
+    state: &AllocatedNum<NovaScalar>,
+    n_rounds: &AllocatedNum<NovaScalar>,
+    data: &AllocatedNum<NovaScalar>,
+) -> Result<AllocatedNum<NovaScalar>, SynthesisError> {
+    let parameters = get_poseidon_parameters::<ark_bn254::Fr>(4)
+        .map_err(|error| SynthesisError::Unsatisfiable(error.to_string()))?;
+    debug_assert_eq!(parameters.width, 4);
+    debug_assert_eq!(parameters.alpha, 5);
+
+    let zero = alloc_nova_constant(cs.namespace(|| "Poseidon domain tag"), NovaScalar::zero())?;
+    let mut poseidon_state = vec![zero, state.clone(), n_rounds.clone(), data.clone()];
+    let half_full_rounds = parameters.full_rounds / 2;
+    let total_rounds = parameters.full_rounds + parameters.partial_rounds;
+
+    for round in 0..total_rounds {
+        let mut round_cs = cs.namespace(|| format!("Poseidon round {round}"));
+        for (column, state_word) in poseidon_state.iter_mut().enumerate() {
+            let round_constant = ark_bn254_scalar_as_nova_scalar(
+                &parameters.ark[round * parameters.width + column],
+            )?;
+            let with_constant = AllocatedNum::alloc(
+                round_cs.namespace(|| format!("add round constant {column}")),
+                || {
+                    state_word
+                        .get_value()
+                        .map(|value| value + round_constant)
+                        .ok_or(SynthesisError::AssignmentMissing)
+                },
+            )?;
+            round_cs.enforce(
+                || format!("round constant constraint {column}"),
+                |lc| {
+                    lc + state_word.get_variable() + (round_constant, CS::one())
+                        - with_constant.get_variable()
+                },
+                |lc| lc + CS::one(),
+                |lc| lc,
+            );
+            *state_word = with_constant;
+        }
+
+        let is_full_round =
+            round < half_full_rounds || round >= half_full_rounds + parameters.partial_rounds;
+        let sbox_columns = if is_full_round { parameters.width } else { 1 };
+        for (column, state_word) in poseidon_state.iter_mut().enumerate().take(sbox_columns) {
+            *state_word = poseidon_x5(
+                round_cs.namespace(|| format!("S-box column {column}")),
+                state_word,
+            )?;
+        }
+
+        let previous_state = poseidon_state;
+        poseidon_state = (0..parameters.width)
+            .map(|row| {
+                let coefficients = parameters.mds[row]
+                    .iter()
+                    .map(ark_bn254_scalar_as_nova_scalar)
+                    .collect::<Result<Vec<_>, _>>()?;
+                let mixed = AllocatedNum::alloc(
+                    round_cs.namespace(|| format!("MDS output {row}")),
+                    || {
+                        previous_state.iter().zip(coefficients.iter()).try_fold(
+                            NovaScalar::zero(),
+                            |accumulator, (word, coefficient)| {
+                                Ok::<_, SynthesisError>(
+                                    accumulator
+                                        + word
+                                            .get_value()
+                                            .ok_or(SynthesisError::AssignmentMissing)?
+                                            * coefficient,
+                                )
+                            },
+                        )
+                    },
+                )?;
+                let input_lc = previous_state.iter().zip(coefficients.iter()).fold(
+                    LinearCombination::<NovaScalar>::zero(),
+                    |lc, (word, coefficient)| lc + (*coefficient, word.get_variable()),
+                );
+                round_cs.enforce(
+                    || format!("MDS constraint {row}"),
+                    |lc| lc + &input_lc - mixed.get_variable(),
+                    |lc| lc + CS::one(),
+                    |lc| lc,
+                );
+                Ok(mixed)
+            })
+            .collect::<Result<Vec<_>, SynthesisError>>()?;
+    }
+
+    Ok(poseidon_state.remove(0))
+}
+
+/// Performs one exact transcript transition and increments the domain-
+/// separation counter.  This primitive is shared by append and challenge
+/// operations; challenge generation uses a zero `data` word.
+pub(super) fn synthesize_recursive_poseidon_transcript_transition<
+    CS: ConstraintSystem<NovaScalar>,
+>(
+    mut cs: CS,
+    current: &AllocatedRecursivePoseidonTranscriptState,
+    data: &AllocatedNum<NovaScalar>,
+) -> Result<AllocatedRecursivePoseidonTranscriptState, SynthesisError> {
+    let state = synthesize_recursive_poseidon_hash(
+        cs.namespace(|| "Poseidon transcript hash"),
+        &current.state,
+        &current.n_rounds,
+        data,
+    )?;
+    let n_rounds = AllocatedNum::alloc(cs.namespace(|| "next transcript round"), || {
+        current
+            .n_rounds
+            .get_value()
+            .map(|value| value + NovaScalar::one())
+            .ok_or(SynthesisError::AssignmentMissing)
+    })?;
+    cs.enforce(
+        || "increment transcript round",
+        |lc| lc + current.n_rounds.get_variable() + CS::one() - n_rounds.get_variable(),
+        |lc| lc + CS::one(),
+        |lc| lc,
+    );
+    Ok(AllocatedRecursivePoseidonTranscriptState { state, n_rounds })
+}
+
+fn packed_transcript_label_and_len(label: &[u8], len: usize) -> Result<NovaScalar, SynthesisError> {
+    if label.len() > 24 {
+        return Err(SynthesisError::Unsatisfiable(
+            "recursive transcript label exceeds Jolt's 24-byte packed-label limit".to_string(),
+        ));
+    }
+    let mut packed = [0u8; 32];
+    packed[..label.len()].copy_from_slice(label);
+    packed[24..].copy_from_slice(&(len as u64).to_be_bytes());
+    ark_bn254_scalar_as_nova_scalar(
+        &<ark_bn254::Fr as ark_ff::PrimeField>::from_le_bytes_mod_order(&packed),
+    )
+}
+
+/// Binds every compressed-polynomial coefficient and every claimed sumcheck
+/// challenge to Jolt's real Poseidon Fiat--Shamir state machine.
+pub(super) fn synthesize_recursive_clear_sumcheck_transcript<CS: ConstraintSystem<NovaScalar>>(
+    mut cs: CS,
+    initial_transcript: &AllocatedRecursivePoseidonTranscriptState,
+    sumcheck: &AllocatedRecursiveClearSumcheckStage,
+) -> Result<AllocatedRecursivePoseidonTranscriptState, SynthesisError> {
+    if sumcheck.round_coefficients.len() != sumcheck.challenges.len() {
+        return Err(SynthesisError::Unsatisfiable(
+            "recursive sumcheck transcript has inconsistent round dimensions".to_string(),
+        ));
+    }
+
+    let mut transcript = AllocatedRecursivePoseidonTranscriptState {
+        state: initial_transcript.state.clone(),
+        n_rounds: initial_transcript.n_rounds.clone(),
+    };
+    let zero = alloc_nova_constant(
+        cs.namespace(|| "sumcheck challenge zero"),
+        NovaScalar::zero(),
+    )?;
+    for (round_index, (coefficients, claimed_challenge)) in sumcheck
+        .round_coefficients
+        .iter()
+        .zip(sumcheck.challenges.iter())
+        .enumerate()
+    {
+        let mut round_cs = cs.namespace(|| format!("sumcheck transcript round {round_index}"));
+        let label_and_len = alloc_nova_constant(
+            round_cs.namespace(|| "packed sumcheck label and coefficient count"),
+            packed_transcript_label_and_len(b"sumcheck_poly", coefficients.len())?,
+        )?;
+        transcript = synthesize_recursive_poseidon_transcript_transition(
+            round_cs.namespace(|| "absorb sumcheck label and coefficient count"),
+            &transcript,
+            &label_and_len,
+        )?;
+        for (coefficient_index, coefficient) in coefficients.iter().enumerate() {
+            transcript = synthesize_recursive_poseidon_transcript_transition(
+                round_cs.namespace(|| format!("absorb coefficient {coefficient_index}")),
+                &transcript,
+                coefficient,
+            )?;
+        }
+        transcript = synthesize_recursive_poseidon_transcript_transition(
+            round_cs.namespace(|| "derive sumcheck challenge"),
+            &transcript,
+            &zero,
+        )?;
+        round_cs.enforce(
+            || "claimed sumcheck challenge equals Poseidon transcript challenge",
+            |lc| lc + transcript.state.get_variable() - claimed_challenge.get_variable(),
+            |lc| lc + CS::one(),
+            |lc| lc,
+        );
+    }
+    Ok(transcript)
+}
+
+pub(super) struct AllocatedRecursiveClearSumcheckStage {
+    pub initial_claim: AllocatedNum<NovaScalar>,
+    pub round_coefficients: Vec<Vec<AllocatedNum<NovaScalar>>>,
+    pub full_round_coefficients: Vec<Vec<AllocatedNum<NovaScalar>>>,
+    pub challenges: Vec<AllocatedNum<NovaScalar>>,
+    pub final_claim: AllocatedNum<NovaScalar>,
+    pub expected_final_claim: AllocatedNum<NovaScalar>,
+}
+
+fn recursive_jolt_field_as_native_scalar(
+    value: &RecursiveJoltFieldElement,
+) -> Result<NovaScalar, SynthesisError> {
+    Option::from(NovaScalar::from_bytes(&value.canonical_le_bytes)).ok_or_else(|| {
+        SynthesisError::Unsatisfiable(
+            "recursive Jolt field encoding is not canonical BN254::Fr".to_string(),
+        )
+    })
+}
+
+fn alloc_native_jolt_field<CS: ConstraintSystem<NovaScalar>>(
+    cs: CS,
+    value: &RecursiveJoltFieldElement,
+) -> Result<AllocatedNum<NovaScalar>, SynthesisError> {
+    let scalar = recursive_jolt_field_as_native_scalar(value)?;
+    AllocatedNum::alloc(cs, || Ok(scalar))
+}
+
+/// Synthesizes the complete compressed-polynomial arithmetic for one clear
+/// Jolt sumcheck stage.  Challenges and endpoint claims are returned so the
+/// Fiat-Shamir and stage-specific relation gadgets can bind them separately.
+pub(super) fn synthesize_recursive_clear_sumcheck_stage<CS: ConstraintSystem<NovaScalar>>(
+    mut cs: CS,
+    witness: &RecursiveClearSumcheckStageWitness,
+    expected_stage_index: usize,
+    expected_rounds: usize,
+    expected_degree_bound: usize,
+) -> Result<AllocatedRecursiveClearSumcheckStage, SynthesisError> {
+    witness
+        .validate_shape(expected_stage_index, expected_rounds, expected_degree_bound)
+        .map_err(|reason| SynthesisError::Unsatisfiable(reason.to_string()))?;
+
+    let initial_claim = alloc_native_jolt_field(
+        cs.namespace(|| "allocate initial sumcheck claim"),
+        &witness.initial_claim,
+    )?;
+    let mut running_claim = initial_claim.clone();
+    let mut round_coefficients = Vec::with_capacity(expected_rounds);
+    let mut full_round_coefficients = Vec::with_capacity(expected_rounds);
+    let mut challenges = Vec::with_capacity(expected_rounds);
+
+    for (round_index, round) in witness.rounds.iter().enumerate() {
+        let mut round_cs = cs.namespace(|| format!("sumcheck round {round_index}"));
+        let coefficients = round
+            .coefficients_except_linear
+            .iter()
+            .enumerate()
+            .map(|(coefficient_index, coefficient)| {
+                alloc_native_jolt_field(
+                    round_cs.namespace(|| format!("coefficient {coefficient_index}")),
+                    coefficient,
+                )
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let challenge = alloc_native_jolt_field(
+            round_cs.namespace(|| "Fiat-Shamir challenge"),
+            &round.challenge,
+        )?;
+
+        let linear = AllocatedNum::alloc(
+            round_cs.namespace(|| "recovered linear coefficient"),
+            || {
+                let mut value = running_claim
+                    .get_value()
+                    .ok_or(SynthesisError::AssignmentMissing)?;
+                let constant = coefficients[0]
+                    .get_value()
+                    .ok_or(SynthesisError::AssignmentMissing)?;
+                value -= constant;
+                value -= constant;
+                for coefficient in coefficients.iter().skip(1) {
+                    value -= coefficient
+                        .get_value()
+                        .ok_or(SynthesisError::AssignmentMissing)?;
+                }
+                Ok(value)
+            },
+        )?;
+        let high_degree_sum = coefficients.iter().skip(1).fold(
+            LinearCombination::<NovaScalar>::zero(),
+            |lc, coefficient| lc + coefficient.get_variable(),
+        );
+        round_cs.enforce(
+            || "compressed polynomial recovers linear coefficient from claim",
+            |lc| {
+                lc + running_claim.get_variable()
+                    - (NovaScalar::from(2), coefficients[0].get_variable())
+                    - &high_degree_sum
+                    - linear.get_variable()
+            },
+            |lc| lc + CS::one(),
+            |lc| lc,
+        );
+
+        let mut full_coefficients = Vec::with_capacity(coefficients.len() + 1);
+        full_coefficients.push(coefficients[0].clone());
+        full_coefficients.push(linear);
+        full_coefficients.extend(coefficients.iter().skip(1).cloned());
+
+        let mut evaluated = full_coefficients
+            .last()
+            .expect("validated polynomial has at least two coefficients")
+            .clone();
+        for (horner_index, coefficient) in full_coefficients[..full_coefficients.len() - 1]
+            .iter()
+            .rev()
+            .enumerate()
+        {
+            let next = AllocatedNum::alloc(
+                round_cs.namespace(|| format!("Horner evaluation {horner_index}")),
+                || {
+                    Ok(evaluated
+                        .get_value()
+                        .ok_or(SynthesisError::AssignmentMissing)?
+                        * challenge
+                            .get_value()
+                            .ok_or(SynthesisError::AssignmentMissing)?
+                        + coefficient
+                            .get_value()
+                            .ok_or(SynthesisError::AssignmentMissing)?)
+                },
+            )?;
+            round_cs.enforce(
+                || format!("Horner multiplication {horner_index}"),
+                |lc| lc + evaluated.get_variable(),
+                |lc| lc + challenge.get_variable(),
+                |lc| lc + next.get_variable() - coefficient.get_variable(),
+            );
+            evaluated = next;
+        }
+
+        running_claim = evaluated;
+        round_coefficients.push(coefficients);
+        full_round_coefficients.push(full_coefficients);
+        challenges.push(challenge);
+    }
+
+    let expected_final_claim = alloc_native_jolt_field(
+        cs.namespace(|| "allocate expected final sumcheck claim"),
+        &witness.expected_final_claim,
+    )?;
+    cs.enforce(
+        || "sumcheck final claim equals stage relation claim",
+        |lc| lc + running_claim.get_variable() - expected_final_claim.get_variable(),
+        |lc| lc + CS::one(),
+        |lc| lc,
+    );
+
+    Ok(AllocatedRecursiveClearSumcheckStage {
+        initial_claim,
+        round_coefficients,
+        full_round_coefficients,
+        challenges,
+        final_claim: running_claim,
+        expected_final_claim,
+    })
+}
 
 pub(super) struct RecursiveNativeClaimContribution {
     aggregate: BigNat<NovaScalar>,
@@ -2090,4 +2664,462 @@ pub(super) fn synthesize_recursive_cpu_opening_relation<CS: ConstraintSystem<Nov
         &modulus,
         &zero,
     )
+}
+
+#[cfg(test)]
+mod recursive_sumcheck_tests {
+    use ark_bn254::Fr;
+    use ark_ff::Field;
+    use ark_std::One;
+    use nova_snark::frontend::test_cs::TestConstraintSystem;
+
+    use crate::transcripts::{PoseidonTranscript, Transcript};
+
+    use super::*;
+    use crate::zkvm::block::RecursiveClearSumcheckRoundWitness;
+
+    fn field(value: u64) -> RecursiveJoltFieldElement {
+        RecursiveJoltFieldElement::from_field(Fr::from(value)).unwrap()
+    }
+
+    fn valid_witness() -> RecursiveClearSumcheckStageWitness {
+        // Round 0: h(X) = 2 + 3X + 3X^2, h(0)+h(1)=10,
+        // h(4)=62. Round 1: h(X)=5+52X, h(0)+h(1)=62,
+        // h(3)=161.
+        RecursiveClearSumcheckStageWitness {
+            stage_index: 3,
+            degree_bound: 2,
+            initial_claim: field(10),
+            rounds: vec![
+                RecursiveClearSumcheckRoundWitness {
+                    coefficients_except_linear: vec![field(2), field(3)],
+                    challenge: field(4),
+                },
+                RecursiveClearSumcheckRoundWitness {
+                    coefficients_except_linear: vec![field(5)],
+                    challenge: field(3),
+                },
+            ],
+            expected_final_claim: field(161),
+        }
+    }
+
+    fn transcript_bound_witness(
+        tamper_first_challenge: bool,
+    ) -> (RecursiveClearSumcheckStageWitness, PoseidonTranscript) {
+        let mut transcript = PoseidonTranscript::new(b"stage14-sc");
+        let first_coefficients = [Fr::from(2u64), Fr::from(3u64)];
+        transcript.append_scalars(b"sumcheck_poly", &first_coefficients);
+        let native_first_challenge = transcript.challenge_scalar::<Fr>();
+        let first_challenge = if tamper_first_challenge {
+            native_first_challenge + Fr::one()
+        } else {
+            native_first_challenge
+        };
+        let first_claim = Fr::from(2u64)
+            + Fr::from(3u64) * first_challenge
+            + Fr::from(3u64) * first_challenge.square();
+
+        let second_coefficients = [Fr::from(5u64)];
+        transcript.append_scalars(b"sumcheck_poly", &second_coefficients);
+        let second_challenge = transcript.challenge_scalar::<Fr>();
+        let second_linear = first_claim - Fr::from(10u64);
+        let final_claim = Fr::from(5u64) + second_linear * second_challenge;
+
+        (
+            RecursiveClearSumcheckStageWitness {
+                stage_index: 0,
+                degree_bound: 2,
+                initial_claim: RecursiveJoltFieldElement::from_field(Fr::from(10u64)).unwrap(),
+                rounds: vec![
+                    RecursiveClearSumcheckRoundWitness {
+                        coefficients_except_linear: first_coefficients
+                            .iter()
+                            .map(|value| RecursiveJoltFieldElement::from_field(*value).unwrap())
+                            .collect(),
+                        challenge: RecursiveJoltFieldElement::from_field(first_challenge).unwrap(),
+                    },
+                    RecursiveClearSumcheckRoundWitness {
+                        coefficients_except_linear: second_coefficients
+                            .iter()
+                            .map(|value| RecursiveJoltFieldElement::from_field(*value).unwrap())
+                            .collect(),
+                        challenge: RecursiveJoltFieldElement::from_field(second_challenge).unwrap(),
+                    },
+                ],
+                expected_final_claim: RecursiveJoltFieldElement::from_field(final_claim).unwrap(),
+            },
+            transcript,
+        )
+    }
+
+    fn alloc_initial_transcript(
+        cs: &mut TestConstraintSystem<NovaScalar>,
+    ) -> AllocatedRecursivePoseidonTranscriptState {
+        let transcript = PoseidonTranscript::new(b"stage14-sc");
+        AllocatedRecursivePoseidonTranscriptState {
+            state: AllocatedNum::alloc(cs.namespace(|| "initial transcript state"), || {
+                Ok(Option::from(NovaScalar::from_bytes(&transcript.state)).unwrap())
+            })
+            .unwrap(),
+            n_rounds: AllocatedNum::alloc(cs.namespace(|| "initial transcript round"), || {
+                Ok(NovaScalar::zero())
+            })
+            .unwrap(),
+        }
+    }
+
+    #[test]
+    fn recursive_clear_sumcheck_gadget_checks_every_round_and_endpoint() {
+        let mut cs = TestConstraintSystem::<NovaScalar>::new();
+        let allocated = synthesize_recursive_clear_sumcheck_stage(
+            cs.namespace(|| "clear sumcheck"),
+            &valid_witness(),
+            3,
+            2,
+            2,
+        )
+        .unwrap();
+
+        assert_eq!(allocated.round_coefficients.len(), 2);
+        assert_eq!(allocated.challenges.len(), 2);
+        assert_eq!(
+            allocated.initial_claim.get_value(),
+            Some(NovaScalar::from(10))
+        );
+        assert_eq!(
+            allocated.final_claim.get_value(),
+            Some(NovaScalar::from(161))
+        );
+        assert_eq!(
+            allocated.expected_final_claim.get_value(),
+            Some(NovaScalar::from(161))
+        );
+        assert!(cs.is_satisfied(), "{:?}", cs.which_is_unsatisfied());
+    }
+
+    #[test]
+    fn recursive_clear_sumcheck_gadget_rejects_tampered_final_claim() {
+        let mut witness = valid_witness();
+        witness.expected_final_claim = field(162);
+        let mut cs = TestConstraintSystem::<NovaScalar>::new();
+        synthesize_recursive_clear_sumcheck_stage(
+            cs.namespace(|| "tampered clear sumcheck"),
+            &witness,
+            3,
+            2,
+            2,
+        )
+        .unwrap();
+
+        assert!(!cs.is_satisfied());
+        assert!(cs
+            .which_is_unsatisfied()
+            .unwrap_or_default()
+            .contains("sumcheck final claim equals stage relation claim"));
+    }
+
+    #[test]
+    fn recursive_clear_sumcheck_gadget_rejects_unexpected_shape() {
+        let mut cs = TestConstraintSystem::<NovaScalar>::new();
+        let error = synthesize_recursive_clear_sumcheck_stage(
+            cs.namespace(|| "wrong-shape clear sumcheck"),
+            &valid_witness(),
+            3,
+            3,
+            2,
+        )
+        .err()
+        .expect("wrong round count must be rejected");
+        assert!(matches!(error, SynthesisError::Unsatisfiable(_)));
+    }
+
+    #[test]
+    fn recursive_clear_sumcheck_binds_every_challenge_to_poseidon_transcript() {
+        let (witness, native_final_transcript) = transcript_bound_witness(false);
+        let mut cs = TestConstraintSystem::<NovaScalar>::new();
+        let initial_transcript = alloc_initial_transcript(&mut cs);
+        let allocated = synthesize_recursive_clear_sumcheck_stage(
+            cs.namespace(|| "clear sumcheck arithmetic"),
+            &witness,
+            0,
+            2,
+            2,
+        )
+        .unwrap();
+        let final_transcript = synthesize_recursive_clear_sumcheck_transcript(
+            cs.namespace(|| "clear sumcheck Fiat-Shamir"),
+            &initial_transcript,
+            &allocated,
+        )
+        .unwrap();
+
+        assert_eq!(
+            final_transcript.state.get_value(),
+            Some(Option::from(NovaScalar::from_bytes(&native_final_transcript.state)).unwrap())
+        );
+        assert_eq!(
+            final_transcript.n_rounds.get_value(),
+            Some(NovaScalar::from(native_final_transcript.n_rounds as u64))
+        );
+        assert!(cs.is_satisfied(), "{:?}", cs.which_is_unsatisfied());
+    }
+
+    #[test]
+    fn recursive_clear_sumcheck_rejects_forged_challenge_even_when_arithmetic_is_valid() {
+        let (witness, _) = transcript_bound_witness(true);
+        let mut cs = TestConstraintSystem::<NovaScalar>::new();
+        let initial_transcript = alloc_initial_transcript(&mut cs);
+        let allocated = synthesize_recursive_clear_sumcheck_stage(
+            cs.namespace(|| "clear sumcheck arithmetic"),
+            &witness,
+            0,
+            2,
+            2,
+        )
+        .unwrap();
+        synthesize_recursive_clear_sumcheck_transcript(
+            cs.namespace(|| "clear sumcheck Fiat-Shamir"),
+            &initial_transcript,
+            &allocated,
+        )
+        .unwrap();
+
+        assert!(!cs.is_satisfied());
+        assert!(cs
+            .which_is_unsatisfied()
+            .unwrap_or_default()
+            .contains("claimed sumcheck challenge equals Poseidon transcript challenge"));
+    }
+}
+
+#[cfg(test)]
+mod recursive_poseidon_transcript_tests {
+    use ark_bn254::Fr;
+    use ark_ff::PrimeField;
+    use nova_snark::frontend::test_cs::TestConstraintSystem;
+
+    use crate::transcripts::{PoseidonTranscript, Transcript};
+
+    use super::*;
+
+    fn nova_scalar_from_le_bytes(bytes: &[u8; 32]) -> NovaScalar {
+        Option::from(NovaScalar::from_bytes(bytes)).expect("canonical BN254 scalar")
+    }
+
+    fn alloc_value(
+        cs: &mut TestConstraintSystem<NovaScalar>,
+        name: &'static str,
+        value: NovaScalar,
+    ) -> AllocatedNum<NovaScalar> {
+        AllocatedNum::alloc(cs.namespace(|| name), || Ok(value)).unwrap()
+    }
+
+    #[test]
+    fn recursive_poseidon_hash_matches_jolt_native_poseidon() {
+        use light_poseidon::{Poseidon, PoseidonHasher};
+
+        let state_ark = Fr::from(7u64);
+        let round_ark = Fr::from(11u64);
+        let data_ark = Fr::from(13u64);
+        let expected_ark = Poseidon::<Fr>::new_circom(3)
+            .unwrap()
+            .hash(&[state_ark, round_ark, data_ark])
+            .unwrap();
+        let expected = ark_bn254_scalar_as_nova_scalar(&expected_ark).unwrap();
+
+        let mut cs = TestConstraintSystem::<NovaScalar>::new();
+        let state = alloc_value(&mut cs, "state", NovaScalar::from(7));
+        let n_rounds = alloc_value(&mut cs, "round", NovaScalar::from(11));
+        let data = alloc_value(&mut cs, "data", NovaScalar::from(13));
+        let actual = synthesize_recursive_poseidon_hash(
+            cs.namespace(|| "recursive Poseidon"),
+            &state,
+            &n_rounds,
+            &data,
+        )
+        .unwrap();
+
+        assert_eq!(actual.get_value(), Some(expected));
+        assert!(cs.is_satisfied(), "{:?}", cs.which_is_unsatisfied());
+    }
+
+    #[test]
+    fn recursive_poseidon_transcript_matches_jolt_sumcheck_absorption_and_challenge() {
+        let mut native = PoseidonTranscript::new(b"stage14-sumcheck");
+        let initial_state = nova_scalar_from_le_bytes(&native.state);
+        let coefficients = [Fr::from(7u64), Fr::from(9u64)];
+        native.append_scalars(b"sumcheck_poly", &coefficients);
+        let native_challenge = native.challenge_scalar::<Fr>();
+        let expected_challenge = ark_bn254_scalar_as_nova_scalar(&native_challenge).unwrap();
+        let expected_state = nova_scalar_from_le_bytes(&native.state);
+        assert_eq!(expected_challenge, expected_state);
+        assert_eq!(native.n_rounds, 4);
+
+        let mut packed_label_and_len = [0u8; 32];
+        packed_label_and_len[..b"sumcheck_poly".len()].copy_from_slice(b"sumcheck_poly");
+        packed_label_and_len[24..].copy_from_slice(&(coefficients.len() as u64).to_be_bytes());
+
+        let mut cs = TestConstraintSystem::<NovaScalar>::new();
+        let initial = AllocatedRecursivePoseidonTranscriptState {
+            state: alloc_value(&mut cs, "initial transcript state", initial_state),
+            n_rounds: alloc_value(&mut cs, "initial transcript round", NovaScalar::zero()),
+        };
+        let packed = alloc_value(
+            &mut cs,
+            "packed sumcheck label and length",
+            ark_bn254_scalar_as_nova_scalar(&Fr::from_le_bytes_mod_order(&packed_label_and_len))
+                .unwrap(),
+        );
+        let after_label = synthesize_recursive_poseidon_transcript_transition(
+            cs.namespace(|| "append packed sumcheck label and length"),
+            &initial,
+            &packed,
+        )
+        .unwrap();
+        let first_coefficient = alloc_value(&mut cs, "first coefficient", NovaScalar::from(7));
+        let after_first = synthesize_recursive_poseidon_transcript_transition(
+            cs.namespace(|| "append first coefficient"),
+            &after_label,
+            &first_coefficient,
+        )
+        .unwrap();
+        let second_coefficient = alloc_value(&mut cs, "second coefficient", NovaScalar::from(9));
+        let after_second = synthesize_recursive_poseidon_transcript_transition(
+            cs.namespace(|| "append second coefficient"),
+            &after_first,
+            &second_coefficient,
+        )
+        .unwrap();
+        let zero =
+            alloc_nova_constant(cs.namespace(|| "challenge zero"), NovaScalar::zero()).unwrap();
+        let after_challenge = synthesize_recursive_poseidon_transcript_transition(
+            cs.namespace(|| "derive challenge"),
+            &after_second,
+            &zero,
+        )
+        .unwrap();
+
+        assert_eq!(after_challenge.state.get_value(), Some(expected_challenge));
+        assert_eq!(
+            after_challenge.n_rounds.get_value(),
+            Some(NovaScalar::from(4))
+        );
+        assert!(cs.is_satisfied(), "{:?}", cs.which_is_unsatisfied());
+    }
+
+    #[test]
+    fn recursive_poseidon_transcript_rejects_tampered_challenge() {
+        let mut cs = TestConstraintSystem::<NovaScalar>::new();
+        let state = alloc_value(&mut cs, "state", NovaScalar::from(1));
+        let n_rounds = alloc_value(&mut cs, "round", NovaScalar::from(2));
+        let data = alloc_value(&mut cs, "data", NovaScalar::from(3));
+        let actual = synthesize_recursive_poseidon_hash(
+            cs.namespace(|| "recursive Poseidon"),
+            &state,
+            &n_rounds,
+            &data,
+        )
+        .unwrap();
+        let tampered = alloc_value(
+            &mut cs,
+            "tampered challenge",
+            actual.get_value().unwrap() + NovaScalar::one(),
+        );
+        cs.enforce(
+            || "challenge must equal transcript output",
+            |lc| lc + actual.get_variable() - tampered.get_variable(),
+            |lc| lc + <TestConstraintSystem<NovaScalar> as ConstraintSystem<NovaScalar>>::one(),
+            |lc| lc,
+        );
+
+        assert!(!cs.is_satisfied());
+        assert!(cs
+            .which_is_unsatisfied()
+            .unwrap_or_default()
+            .contains("challenge must equal transcript output"));
+    }
+}
+
+#[cfg(test)]
+mod recursive_verifier_r1cs_tests {
+    use ark_bn254::Fr;
+    use nova_snark::frontend::test_cs::TestConstraintSystem;
+
+    use crate::subprotocols::blindfold::{HyraxParams, SparseR1CSMatrix};
+
+    use super::*;
+
+    fn multiplication_verifier_r1cs() -> VerifierR1CS<Fr> {
+        // Z = [1, a, b, c], with the verifier relation a * b = c.
+        let mut a = SparseR1CSMatrix::new(1, 4);
+        let mut b = SparseR1CSMatrix::new(1, 4);
+        let mut c = SparseR1CSMatrix::new(1, 4);
+        a.push(0, 1, Fr::from(1u64));
+        b.push(0, 2, Fr::from(1u64));
+        c.push(0, 3, Fr::from(1u64));
+        VerifierR1CS {
+            a,
+            b,
+            c,
+            num_vars: 4,
+            num_constraints: 1,
+            stage_configs: Vec::new(),
+            extra_constraints: Vec::new(),
+            extra_output_vars: Vec::new(),
+            extra_blinding_vars: Vec::new(),
+            hyrax: HyraxParams {
+                C: 1,
+                R_coeff: 0,
+                R_prime: 1,
+                noncoeff_count: 3,
+                total_rounds: 0,
+                output_claims_rows: 0,
+            },
+            output_claims_opening_ids: Vec::new(),
+            opening_aliases: Default::default(),
+        }
+    }
+
+    #[test]
+    fn recursive_verifier_r1cs_enforces_every_native_jolt_row() {
+        let r1cs = multiplication_verifier_r1cs();
+        let witness = [
+            Fr::from(1u64),
+            Fr::from(3u64),
+            Fr::from(4u64),
+            Fr::from(12u64),
+        ];
+        let mut cs = TestConstraintSystem::<NovaScalar>::new();
+        synthesize_recursive_jolt_verifier_r1cs(
+            cs.namespace(|| "Jolt verifier R1CS"),
+            &r1cs,
+            &witness,
+        )
+        .unwrap();
+        assert!(cs.is_satisfied(), "{:?}", cs.which_is_unsatisfied());
+    }
+
+    #[test]
+    fn recursive_verifier_r1cs_rejects_tampered_relation_witness() {
+        let r1cs = multiplication_verifier_r1cs();
+        let witness = [
+            Fr::from(1u64),
+            Fr::from(3u64),
+            Fr::from(4u64),
+            Fr::from(13u64),
+        ];
+        let mut cs = TestConstraintSystem::<NovaScalar>::new();
+        synthesize_recursive_jolt_verifier_r1cs(
+            cs.namespace(|| "Jolt verifier R1CS"),
+            &r1cs,
+            &witness,
+        )
+        .unwrap();
+        assert!(!cs.is_satisfied());
+        assert!(cs
+            .which_is_unsatisfied()
+            .unwrap_or_default()
+            .contains("Jolt verifier R1CS row 0"));
+    }
 }

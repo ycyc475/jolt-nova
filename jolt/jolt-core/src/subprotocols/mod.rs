@@ -1,4 +1,4 @@
-#[cfg(feature = "zk")]
+#[cfg(any(feature = "zk", feature = "nova"))]
 pub mod blindfold;
 pub mod booleanity;
 pub mod mles_product_sum;

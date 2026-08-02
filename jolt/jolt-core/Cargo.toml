@@ -51,7 +51,7 @@ field-inline = [
 transcript-poseidon = ["dep:light-poseidon", "challenge-254-bit"]
 transcript-keccak = []
 transcript-blake2b = []
-nova = ["minimal", "dep:nova-snark"]
+nova = ["minimal", "dep:nova-snark", "transcript-poseidon"]
 
 [dependencies]
 ark-bn254.workspace = true

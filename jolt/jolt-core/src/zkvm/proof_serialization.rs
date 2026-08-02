@@ -65,17 +65,14 @@ pub struct JoltProof<
     pub dory_layout: DoryLayout,
 }
 
-/// A compact commitment to the verifier transcript of a fully verified Jolt
-/// proof.
+/// A legacy compact commitment to a host-verifier transcript.
 ///
-/// This receipt is deliberately not constructible by downstream callers. It
-/// is returned by `JoltVerifier::verify_with_lookup_receipt` only after the
-/// complete Jolt verifier has accepted all sumchecks and the joint PCS
-/// opening. Nova can bind this fixed-size capsule into every recursive step
-/// without carrying the variable-size Jolt proof as circuit witness. The
-/// historical lookup-oriented type name is retained for API compatibility,
-/// but version 2 binds the complete clear verifier transcript, not only the
-/// lookup-specific reductions.
+/// It remains useful for compatibility, indexing, and continuity binding, but
+/// Stage 14 does **not** treat its digest as proof of validity. Recursive
+/// acceptance instead requires the constrained verifier relation and deferred
+/// PCS check. This type is still returned only after the legacy host verifier
+/// accepts, preserving existing APIs while removing it from the new trust
+/// boundary.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct VerifiedJoltLookupProofReceipt {
     version: u16,

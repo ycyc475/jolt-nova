@@ -15,6 +15,10 @@ use tracer::{instruction::Cycle, MachineBoundaryState, TraceBlock};
 mod recursive_openings;
 #[cfg(all(feature = "nova", not(feature = "zk")))]
 mod recursive_relations;
+#[cfg(feature = "nova")]
+mod recursive_verifier;
+#[cfg(all(feature = "nova", not(feature = "zk")))]
+mod recursive_verifier_circuit;
 #[cfg(not(feature = "zk"))]
 pub use recursive_openings::{
     RecursiveJoltBlockOpeningWitness, RecursiveJoltCpuOpeningWitness, RecursiveJoltCycleWitness,
@@ -26,6 +30,18 @@ use recursive_relations::{
     accumulate_recursive_native_claim, synthesize_recursive_cpu_opening_relation,
     synthesize_recursive_lookup_opening_relation, synthesize_recursive_ram_opening_relation,
     synthesize_recursive_register_opening_relation,
+};
+#[cfg(feature = "nova")]
+pub use recursive_verifier::{
+    RecursiveClearSumcheckRoundWitness, RecursiveClearSumcheckStageWitness,
+    RecursiveDeferredPcsOpening, RecursiveJoltVerifierObject, RecursiveJoltVerifierObjectParts,
+    RecursiveVerifierPcsStrategy,
+};
+#[cfg(all(feature = "nova", not(feature = "zk")))]
+pub use recursive_verifier_circuit::RecursiveJoltVerifierSpartanProof;
+#[cfg(all(feature = "nova", not(feature = "zk")))]
+pub use recursive_verifier_circuit::{
+    RecursiveJoltFinalAcceptance, RecursiveJoltVerifierBaseline, RecursiveJoltVerifierCircuit,
 };
 
 use crate::{
@@ -2109,6 +2125,8 @@ pub struct JoltLassoFinalBinding {
     pub recursive_lookup_receipt_digest_binding: [u8; 32],
     pub recursive_lookup_opening_receipt_digest_binding: [u8; 32],
     pub lookup_claim_accumulator: [u8; 32],
+    /// Legacy receipt-presence indicator. Stage-14 final acceptance does not
+    /// use this boolean as authenticity evidence.
     pub authenticated_lasso_openings: bool,
 }
 
@@ -3222,10 +3240,16 @@ where
 }
 
 #[cfg(feature = "nova")]
-type NovaPrimaryEngine = nova_snark::provider::PallasEngine;
+// Stage 14 executes the Jolt verifier's field relations inside the Nova step
+// circuit.  Jolt proofs use BN254::Fr, so the primary Nova circuit must use the
+// same scalar field; otherwise every sumcheck/lookup/R1CS operation becomes a
+// non-native 256-bit computation.  The BN256/Grumpkin cycle gives us exactly
+// that field alignment while retaining an IPA commitment engine (and therefore
+// requiring no trusted KZG setup for the recursive SNARK itself).
+type NovaPrimaryEngine = nova_snark::provider::Bn256EngineIPA;
 
 #[cfg(feature = "nova")]
-type NovaSecondaryEngine = nova_snark::provider::VestaEngine;
+type NovaSecondaryEngine = nova_snark::provider::GrumpkinEngine;
 
 #[cfg(feature = "nova")]
 type NovaScalar = <NovaPrimaryEngine as nova_snark::traits::Engine>::Scalar;
@@ -8675,7 +8699,7 @@ where
         .zip(challenges)
         {
             state[index] = Option::from(NovaScalar::from_bytes(&challenge))
-                .expect("canonical BN254 challenge fits in the Pallas scalar field");
+                .expect("canonical BN254 challenge fits in the Nova BN254 scalar field");
         }
     }
     #[cfg(not(feature = "zk"))]
@@ -8690,7 +8714,7 @@ where
         .zip(targets)
         {
             state[index] = Option::from(NovaScalar::from_bytes(&target))
-                .expect("canonical BN254 closure target fits in the Pallas scalar field");
+                .expect("canonical BN254 closure target fits in the Nova BN254 scalar field");
         }
         state[NOVA_NATIVE_CLAIM_REMAINING_BLOCKS_INDEX] =
             NovaScalar::from(metadata.native_claim_total_blocks.unwrap_or(0) as u64);
@@ -8706,7 +8730,7 @@ fn nova_scalar_to_storage(value: NovaScalar) -> [u8; 32] {
 #[cfg(all(feature = "nova", not(feature = "zk")))]
 fn recursive_jolt_field_to_nova_scalar(value: &RecursiveJoltFieldElement) -> NovaScalar {
     Option::from(NovaScalar::from_bytes(&value.canonical_le_bytes))
-        .expect("canonical BN254 scalar fits losslessly in the Pallas scalar field")
+        .expect("canonical BN254 scalar fits losslessly in the Nova BN254 scalar field")
 }
 
 #[cfg(all(feature = "nova", not(feature = "zk")))]
@@ -8726,7 +8750,7 @@ fn add_recursive_native_claim_accumulator(
     let mut canonical = [0u8; 32];
     canonical[..bytes.len()].copy_from_slice(&bytes);
     Option::from(NovaScalar::from_bytes(&canonical))
-        .expect("reduced BN254 accumulator fits losslessly in the Pallas scalar field")
+        .expect("reduced BN254 accumulator fits losslessly in the Nova BN254 scalar field")
 }
 
 #[cfg(feature = "nova")]
