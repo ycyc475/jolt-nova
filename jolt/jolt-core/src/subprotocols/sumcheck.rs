@@ -31,6 +31,18 @@ pub use crate::subprotocols::univariate_skip::UniSkipFirstRoundProof;
 /// For details, refer to Jim Posen's ["Perspectives on Sumcheck Batching"](https://hackmd.io/s/HyxaupAAA).
 /// We do what they describe as "front-loaded" batch sumcheck.
 pub enum BatchedSumcheck {}
+
+/// Exact verifier checkpoint around one native batched-sumcheck proof. Nova
+/// adapters consume this trace instead of reconstructing challenges from an
+/// application-level receipt.
+#[derive(Clone)]
+pub struct SumcheckVerifierTrace<F: JoltField, T: Transcript> {
+    pub transcript_before_proof: T,
+    pub initial_claim: F,
+    pub final_claim: F,
+    pub degree_bound: usize,
+}
+
 impl BatchedSumcheck {
     /// Returns (proof, challenges, initial_batched_claim)
     /// For non-ZK mode - returns ClearSumcheckProof with polynomial coefficients visible.
@@ -412,7 +424,14 @@ impl BatchedSumcheck {
         >,
         opening_accumulator: &mut VerifierOpeningAccumulator<F>,
         transcript: &mut ProofTranscript,
-    ) -> Result<(Vec<F>, Vec<F::Challenge>), ProofVerifyError> {
+    ) -> Result<
+        (
+            Vec<F>,
+            Vec<F::Challenge>,
+            SumcheckVerifierTrace<F, ProofTranscript>,
+        ),
+        ProofVerifyError,
+    > {
         let max_degree = sumcheck_instances
             .iter()
             .map(|sumcheck| sumcheck.degree())
@@ -452,6 +471,7 @@ impl BatchedSumcheck {
             })
             .sum();
 
+        let transcript_before_proof = transcript.clone();
         let (output_claim, r_sumcheck) =
             proof.verify(claim, max_num_rounds, max_degree, transcript)?;
 
@@ -484,7 +504,16 @@ impl BatchedSumcheck {
             return Err(ProofVerifyError::SumcheckVerificationError);
         }
 
-        Ok((batching_coeffs, r_sumcheck))
+        Ok((
+            batching_coeffs,
+            r_sumcheck,
+            SumcheckVerifierTrace {
+                transcript_before_proof,
+                initial_claim: claim,
+                final_claim: output_claim,
+                degree_bound: max_degree,
+            },
+        ))
     }
 
     /// Verify a standard (non-ZK) sumcheck proof without requiring a curve type.

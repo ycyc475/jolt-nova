@@ -9,6 +9,7 @@ use nova_snark::{
 use num::{bigint::Sign, BigInt};
 
 use crate::subprotocols::blindfold::VerifierR1CS;
+use crate::transcripts::Transcript;
 use crate::zkvm::r1cs::constraints::{LC, R1CS_CONSTRAINTS};
 
 use super::{
@@ -350,6 +351,57 @@ pub(super) fn synthesize_recursive_poseidon_transcript_transition<
         |lc| lc,
     );
     Ok(AllocatedRecursivePoseidonTranscriptState { state, n_rounds })
+}
+
+/// Commits the verifier-observed per-stage transcript checkpoints into one
+/// public Poseidon root. Jolt performs other transcript operations between
+/// sumcheck stages, so the stages cannot soundly be replayed as one contiguous
+/// sequence.
+pub(super) fn synthesize_recursive_checkpoint_capsule<CS: ConstraintSystem<NovaScalar>>(
+    mut cs: CS,
+    checkpoints: &[AllocatedRecursivePoseidonTranscriptState],
+) -> Result<AllocatedNum<NovaScalar>, SynthesisError> {
+    let initial = crate::transcripts::PoseidonTranscript::new(b"stage15-checkpoints");
+    let initial_state = Option::from(NovaScalar::from_bytes(&initial.state)).ok_or_else(|| {
+        SynthesisError::Unsatisfiable(
+            "checkpoint capsule initial state is not canonical".to_string(),
+        )
+    })?;
+    let state = alloc_nova_constant(
+        cs.namespace(|| "checkpoint capsule initial state"),
+        initial_state,
+    )?;
+    let rounds = alloc_nova_constant(
+        cs.namespace(|| "checkpoint capsule initial round"),
+        NovaScalar::from(initial.n_rounds as u64),
+    )?;
+    let mut capsule = AllocatedRecursivePoseidonTranscriptState {
+        state,
+        n_rounds: rounds,
+    };
+    for (index, checkpoint) in checkpoints.iter().enumerate() {
+        let mut checkpoint_cs = cs.namespace(|| format!("checkpoint capsule item {index}"));
+        let label = alloc_nova_constant(
+            checkpoint_cs.namespace(|| "packed checkpoint label and length"),
+            packed_transcript_label_and_len(b"checkpoint", 2)?,
+        )?;
+        capsule = synthesize_recursive_poseidon_transcript_transition(
+            checkpoint_cs.namespace(|| "absorb checkpoint label"),
+            &capsule,
+            &label,
+        )?;
+        capsule = synthesize_recursive_poseidon_transcript_transition(
+            checkpoint_cs.namespace(|| "absorb checkpoint state"),
+            &capsule,
+            &checkpoint.state,
+        )?;
+        capsule = synthesize_recursive_poseidon_transcript_transition(
+            checkpoint_cs.namespace(|| "absorb checkpoint round"),
+            &capsule,
+            &checkpoint.n_rounds,
+        )?;
+    }
+    Ok(capsule.state)
 }
 
 fn packed_transcript_label_and_len(label: &[u8], len: usize) -> Result<NovaScalar, SynthesisError> {

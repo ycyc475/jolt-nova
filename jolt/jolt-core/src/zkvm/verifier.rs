@@ -15,8 +15,10 @@ use crate::subprotocols::blindfold::{
     StageConfig, ValueSource, VerifierR1CSBuilder,
 };
 use crate::subprotocols::sumcheck::BatchedSumcheck;
-#[cfg(feature = "zk")]
+#[cfg(any(feature = "zk", feature = "nova"))]
 use crate::subprotocols::sumcheck::SumcheckInstanceProof;
+#[cfg(feature = "nova")]
+use crate::subprotocols::sumcheck::SumcheckVerifierTrace;
 #[cfg(feature = "zk")]
 use crate::subprotocols::sumcheck_verifier::SumcheckInstanceParams;
 #[cfg(feature = "zk")]
@@ -260,6 +262,8 @@ pub struct JoltVerifier<
     program_image_reduction_verifier: Option<ProgramImageClaimReductionVerifier<F>>,
     pub spartan_key: UniformSpartanKey<F>,
     pub one_hot_params: OneHotParams,
+    #[cfg(feature = "nova")]
+    recursive_sumcheck_traces: Vec<SumcheckVerifierTrace<F, ProofTranscript>>,
 }
 
 #[derive(Clone, Debug)]
@@ -411,6 +415,8 @@ impl<
             program_image_reduction_verifier: None,
             spartan_key,
             one_hot_params,
+            #[cfg(feature = "nova")]
+            recursive_sumcheck_traces: Vec::with_capacity(8),
         })
     }
 
@@ -874,12 +880,14 @@ impl<
             &dyn SumcheckInstanceVerifier<F, ProofTranscript, VerifierOpeningAccumulator<F>>,
         > = vec![&spartan_outer_remaining];
 
-        let (batching_coefficients, r_stage1) = BatchedSumcheck::verify(
+        let (batching_coefficients, r_stage1, _stage1_trace) = BatchedSumcheck::verify(
             &self.proof.stage1_sumcheck_proof,
             instances.clone(),
             &mut self.opening_accumulator,
             &mut self.transcript,
         )?;
+        #[cfg(feature = "nova")]
+        self.recursive_sumcheck_traces.push(_stage1_trace);
 
         #[cfg(feature = "zk")]
         {
@@ -1005,12 +1013,14 @@ impl<
             &ram_output_check,
         ];
 
-        let (batching_coefficients, r_stage2) = BatchedSumcheck::verify(
+        let (batching_coefficients, r_stage2, _stage2_trace) = BatchedSumcheck::verify(
             &self.proof.stage2_sumcheck_proof,
             instances.clone(),
             &mut self.opening_accumulator,
             &mut self.transcript,
         )?;
+        #[cfg(feature = "nova")]
+        self.recursive_sumcheck_traces.push(_stage2_trace);
 
         #[cfg(feature = "zk")]
         {
@@ -1093,12 +1103,14 @@ impl<
             &spartan_registers_claim_reduction,
         ];
 
-        let (batching_coefficients, r_stage3) = BatchedSumcheck::verify(
+        let (batching_coefficients, r_stage3, _stage3_trace) = BatchedSumcheck::verify(
             &self.proof.stage3_sumcheck_proof,
             instances.clone(),
             &mut self.opening_accumulator,
             &mut self.transcript,
         )?;
+        #[cfg(feature = "nova")]
+        self.recursive_sumcheck_traces.push(_stage3_trace);
 
         #[cfg(feature = "zk")]
         {
@@ -1199,12 +1211,14 @@ impl<
             &dyn SumcheckInstanceVerifier<F, ProofTranscript, VerifierOpeningAccumulator<F>>,
         > = vec![&registers_read_write_checking, &ram_val_check];
 
-        let (batching_coefficients, r_stage4) = BatchedSumcheck::verify(
+        let (batching_coefficients, r_stage4, _stage4_trace) = BatchedSumcheck::verify(
             &self.proof.stage4_sumcheck_proof,
             instances.clone(),
             &mut self.opening_accumulator,
             &mut self.transcript,
         )?;
+        #[cfg(feature = "nova")]
+        self.recursive_sumcheck_traces.push(_stage4_trace);
 
         #[cfg(feature = "zk")]
         {
@@ -1272,12 +1286,14 @@ impl<
             &registers_val_evaluation,
         ];
 
-        let (batching_coefficients, r_stage5) = BatchedSumcheck::verify(
+        let (batching_coefficients, r_stage5, _stage5_trace) = BatchedSumcheck::verify(
             &self.proof.stage5_sumcheck_proof,
             instances.clone(),
             &mut self.opening_accumulator,
             &mut self.transcript,
         )?;
+        #[cfg(feature = "nova")]
+        self.recursive_sumcheck_traces.push(_stage5_trace);
 
         #[cfg(feature = "zk")]
         {
@@ -1352,13 +1368,15 @@ impl<
         let instances: Vec<
             &dyn SumcheckInstanceVerifier<F, ProofTranscript, VerifierOpeningAccumulator<F>>,
         > = vec![&bytecode_read_raf, &booleanity];
-        let (_batching_coefficients, r_stage6a) = BatchedSumcheck::verify(
+        let (_batching_coefficients, r_stage6a, _stage6a_trace) = BatchedSumcheck::verify(
             &self.proof.stage6a_sumcheck_proof,
             instances.clone(),
             &mut self.opening_accumulator,
             &mut self.transcript,
         )
         .inspect_err(|err| tracing::error!("Stage 6a: {err}"))?;
+        #[cfg(feature = "nova")]
+        self.recursive_sumcheck_traces.push(_stage6a_trace);
         #[cfg(feature = "zk")]
         {
             let regular_oc_ids = self.opening_accumulator.take_pending_claim_ids();
@@ -1523,13 +1541,15 @@ impl<
             instances.push(reduction);
         }
 
-        let (batching_coefficients, r_stage6b) = BatchedSumcheck::verify(
+        let (batching_coefficients, r_stage6b, _stage6b_trace) = BatchedSumcheck::verify(
             &self.proof.stage6b_sumcheck_proof,
             instances.clone(),
             &mut self.opening_accumulator,
             &mut self.transcript,
         )
         .inspect_err(|err| tracing::error!("Stage 6b: {err}"))?;
+        #[cfg(feature = "nova")]
+        self.recursive_sumcheck_traces.push(_stage6b_trace);
 
         #[cfg(feature = "zk")]
         {
@@ -1919,12 +1939,14 @@ impl<
             }
         }
 
-        let (batching_coefficients, r_stage7) = BatchedSumcheck::verify(
+        let (batching_coefficients, r_stage7, _stage7_trace) = BatchedSumcheck::verify(
             &self.proof.stage7_sumcheck_proof,
             instances.clone(),
             &mut self.opening_accumulator,
             &mut self.transcript,
         )?;
+        #[cfg(feature = "nova")]
+        self.recursive_sumcheck_traces.push(_stage7_trace);
 
         #[cfg(feature = "zk")]
         {
@@ -2270,6 +2292,61 @@ impl<
             .unzip();
 
         Ok(PCS::combine_commitments(&commitments, &coeffs))
+    }
+}
+
+#[cfg(feature = "nova")]
+impl<'a, C, PCS> JoltVerifier<'a, ark_bn254::Fr, C, PCS, crate::transcripts::PoseidonTranscript>
+where
+    C: JoltCurve<F = ark_bn254::Fr>,
+    PCS: CommitmentScheme<Field = ark_bn254::Fr> + ZkEvalCommitment<C>,
+{
+    /// Runs the production verifier and returns the eight exact clear-sumcheck
+    /// artifacts observed during that successful run.
+    pub fn verify_with_recursive_sumcheck_artifacts(
+        self,
+    ) -> Result<
+        (
+            Self,
+            Vec<crate::zkvm::block::RecursiveClearSumcheckStageArtifact>,
+        ),
+        ProofVerifyError,
+    > {
+        let verified = self.verify_preserving_state()?;
+        if verified.recursive_sumcheck_traces.len() != 8 {
+            return Err(ProofVerifyError::InternalError);
+        }
+        let stage_proofs = [
+            &verified.proof.stage1_sumcheck_proof,
+            &verified.proof.stage2_sumcheck_proof,
+            &verified.proof.stage3_sumcheck_proof,
+            &verified.proof.stage4_sumcheck_proof,
+            &verified.proof.stage5_sumcheck_proof,
+            &verified.proof.stage6a_sumcheck_proof,
+            &verified.proof.stage6b_sumcheck_proof,
+            &verified.proof.stage7_sumcheck_proof,
+        ];
+        let artifacts = stage_proofs
+            .into_iter()
+            .zip(verified.recursive_sumcheck_traces.iter().cloned())
+            .enumerate()
+            .map(|(stage_index, (proof, trace))| match proof {
+                SumcheckInstanceProof::Clear(clear) => {
+                    crate::zkvm::block::RecursiveClearSumcheckStageArtifact::from_native_proof(
+                        stage_index,
+                        clear,
+                        crate::zkvm::block::RecursiveClearSumcheckStageContext {
+                            transcript_before: trace.transcript_before_proof,
+                            initial_claim: trace.initial_claim,
+                            expected_final_claim: trace.final_claim,
+                            degree_bound: trace.degree_bound,
+                        },
+                    )
+                }
+                SumcheckInstanceProof::Zk(_) => Err(ProofVerifyError::ZkFeatureRequired),
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok((verified, artifacts))
     }
 }
 

@@ -440,6 +440,7 @@ pub enum BlindFoldVerifyError {
     EvalWitnessOpeningFailed,
 }
 
+#[derive(Clone, Debug)]
 pub struct BlindFoldVerifierInput<C: JoltCurve> {
     pub round_commitments: Vec<C::G1>,
     /// Hyrax OC row commitments, extracted from stage proofs (not from BlindFoldProof).

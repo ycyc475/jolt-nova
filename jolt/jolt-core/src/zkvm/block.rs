@@ -11,7 +11,6 @@ use common::constants::{REGISTER_COUNT, XLEN};
 use sha3::{Digest as ShaDigest, Sha3_256};
 use tracer::{instruction::Cycle, MachineBoundaryState, TraceBlock};
 
-#[cfg(not(feature = "zk"))]
 mod recursive_openings;
 #[cfg(all(feature = "nova", not(feature = "zk")))]
 mod recursive_relations;
@@ -19,7 +18,6 @@ mod recursive_relations;
 mod recursive_verifier;
 #[cfg(all(feature = "nova", not(feature = "zk")))]
 mod recursive_verifier_circuit;
-#[cfg(not(feature = "zk"))]
 pub use recursive_openings::{
     RecursiveJoltBlockOpeningWitness, RecursiveJoltCpuOpeningWitness, RecursiveJoltCycleWitness,
     RecursiveJoltFieldElement, RecursiveJoltLookupOpeningWitness, RecursiveJoltOpeningCircuitShape,
@@ -33,15 +31,23 @@ use recursive_relations::{
 };
 #[cfg(feature = "nova")]
 pub use recursive_verifier::{
-    RecursiveClearSumcheckRoundWitness, RecursiveClearSumcheckStageWitness,
+    RecursiveClearSumcheckRoundWitness, RecursiveClearSumcheckStageArtifact,
+    RecursiveClearSumcheckStageContext, RecursiveClearSumcheckStageWitness,
     RecursiveDeferredPcsOpening, RecursiveJoltVerifierObject, RecursiveJoltVerifierObjectParts,
     RecursiveVerifierPcsStrategy,
+};
+#[cfg(all(feature = "nova", feature = "zk"))]
+pub use recursive_verifier::{
+    RecursiveDeferredBlindFoldVerification, RecursiveJoltZkFinalAcceptance,
+    RecursiveJoltZkStatement,
 };
 #[cfg(all(feature = "nova", not(feature = "zk")))]
 pub use recursive_verifier_circuit::RecursiveJoltVerifierSpartanProof;
 #[cfg(all(feature = "nova", not(feature = "zk")))]
 pub use recursive_verifier_circuit::{
     RecursiveJoltFinalAcceptance, RecursiveJoltVerifierBaseline, RecursiveJoltVerifierCircuit,
+    RecursiveJoltVerifierProverParameters, RecursiveJoltVerifierStatement,
+    RecursiveJoltVerifierVerificationKey,
 };
 
 use crate::{
@@ -2137,6 +2143,147 @@ pub struct FinalFoldedProof<Digest = [u8; 32]> {
     pub spartan_encoding_digest: Option<[u8; 32]>,
     pub proof_digest: [u8; 32],
     pub spartan_proof_bytes: Option<Vec<u8>>,
+}
+
+/// Stage-15 cryptographic envelope joining the multi-block Nova/Spartan proof
+/// and the recursive verifier proof for the original Jolt proof.
+#[cfg(all(feature = "nova", not(feature = "zk")))]
+pub struct JoltNovaEndToEndProof<F, PCS, FS, Digest = [u8; 32]>
+where
+    F: JoltField,
+    PCS: crate::poly::commitment::commitment_scheme::CommitmentScheme<Field = F>,
+    FS: crate::transcripts::Transcript,
+{
+    pub folded_execution_proof: FinalFoldedProof<Digest>,
+    pub recursive_verifier_statement: RecursiveJoltVerifierStatement,
+    pub recursive_verifier_acceptance: RecursiveJoltFinalAcceptance<F, PCS, FS>,
+    pub linkage_digest: [u8; 32],
+}
+
+/// Per-relation/transport baseline emitted by the Stage-15 end-to-end path.
+#[cfg(all(feature = "nova", not(feature = "zk")))]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct JoltNovaStage15Baseline {
+    pub absorbed_blocks: usize,
+    pub total_active_cycles: usize,
+    pub folded_spartan_proof_bytes: usize,
+    pub recursive_verifier_spartan_proof_bytes: usize,
+    pub recursive_verifier_public_output_bytes: usize,
+    pub total_cryptographic_payload_bytes: usize,
+    pub recursive_verifier_shape_id: [u8; 32],
+    pub end_to_end_linkage_digest: [u8; 32],
+}
+
+#[cfg(all(feature = "nova", not(feature = "zk")))]
+impl<F, PCS, FS, Digest> JoltNovaEndToEndProof<F, PCS, FS, Digest>
+where
+    F: JoltField,
+    PCS: crate::poly::commitment::commitment_scheme::CommitmentScheme<Field = F>,
+    FS: crate::transcripts::Transcript,
+    Digest: Clone + PartialEq + AsRef<[u8]>,
+{
+    pub fn new(
+        folded_execution_proof: FinalFoldedProof<Digest>,
+        recursive_verifier_statement: RecursiveJoltVerifierStatement,
+        recursive_verifier_acceptance: RecursiveJoltFinalAcceptance<F, PCS, FS>,
+    ) -> Self {
+        let linkage_digest = digest_jolt_nova_end_to_end_linkage(
+            &folded_execution_proof,
+            &recursive_verifier_statement,
+        );
+        Self {
+            folded_execution_proof,
+            recursive_verifier_statement,
+            recursive_verifier_acceptance,
+            linkage_digest,
+        }
+    }
+
+    /// Verifies both real Spartan proofs, the deferred PCS equation, and the
+    /// immutable cross-envelope linkage. The block fold accumulator itself is
+    /// supplied by the caller and checked against the final folded proof.
+    pub fn verify(
+        &self,
+        accumulator: &NovaFoldAccumulator<Digest>,
+        recursive_verifier_key: &RecursiveJoltVerifierVerificationKey,
+        expected_object_id: [u8; 32],
+    ) -> Result<(), String> {
+        if self.linkage_digest
+            != digest_jolt_nova_end_to_end_linkage(
+                &self.folded_execution_proof,
+                &self.recursive_verifier_statement,
+            )
+        {
+            return Err("Jolt-Nova end-to-end linkage digest mismatch".to_string());
+        }
+        verify_configured_final_folded_proof(accumulator, &self.folded_execution_proof)
+            .map_err(|error| format!("folded execution proof verification failed: {error}"))?;
+        self.recursive_verifier_acceptance.verify_pinned(
+            recursive_verifier_key,
+            &self.recursive_verifier_statement,
+            expected_object_id,
+        )
+    }
+
+    pub fn baseline(&self) -> JoltNovaStage15Baseline {
+        let folded_spartan_proof_bytes = self
+            .folded_execution_proof
+            .spartan_proof_bytes
+            .as_ref()
+            .map_or(0, Vec::len);
+        let recursive_verifier_spartan_proof_bytes = self
+            .recursive_verifier_acceptance
+            .recursive_verifier_proof
+            .proof_bytes
+            .len();
+        let recursive_verifier_public_output_bytes = self
+            .recursive_verifier_acceptance
+            .recursive_verifier_proof
+            .public_output
+            .len()
+            * 32;
+        JoltNovaStage15Baseline {
+            absorbed_blocks: self
+                .folded_execution_proof
+                .instance
+                .metadata
+                .absorbed_blocks,
+            total_active_cycles: self
+                .folded_execution_proof
+                .instance
+                .metadata
+                .total_active_cycles,
+            folded_spartan_proof_bytes,
+            recursive_verifier_spartan_proof_bytes,
+            recursive_verifier_public_output_bytes,
+            total_cryptographic_payload_bytes: folded_spartan_proof_bytes
+                + recursive_verifier_spartan_proof_bytes
+                + recursive_verifier_public_output_bytes,
+            recursive_verifier_shape_id: self.recursive_verifier_statement.shape_id,
+            end_to_end_linkage_digest: self.linkage_digest,
+        }
+    }
+}
+
+#[cfg(all(feature = "nova", not(feature = "zk")))]
+fn digest_jolt_nova_end_to_end_linkage<Digest>(
+    folded_proof: &FinalFoldedProof<Digest>,
+    statement: &RecursiveJoltVerifierStatement,
+) -> [u8; 32]
+where
+    Digest: AsRef<[u8]>,
+{
+    let mut hasher = Sha3_256::new();
+    hasher.update(b"jolt-nova/end-to-end-proof-linkage/v1");
+    hasher.update(folded_proof.instance.instance_digest);
+    hasher.update(folded_proof.proof_digest);
+    hasher.update(statement.object_id);
+    hasher.update(statement.deferred_pcs_id);
+    hasher.update(statement.initial_transcript_state.canonical_le_bytes);
+    hasher.update(statement.initial_transcript_round.to_le_bytes());
+    hasher.update(statement.transcript_checkpoint_root.canonical_le_bytes);
+    hasher.update(statement.shape_id);
+    hasher.finalize().into()
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -22851,6 +22998,51 @@ mod tests {
         assert_eq!(
             verify_block_proof_pipeline(&bytecode, &[block], &output).unwrap_err(),
             BlockTraceError::BlockFoldInputMismatch { block_index: 0 }
+        );
+    }
+
+    #[cfg(all(feature = "nova", not(feature = "zk")))]
+    #[test]
+    fn stage15_end_to_end_linkage_binds_both_spartan_envelopes() {
+        let folded = FinalFoldedProof {
+            proof_system: SPARTAN_FINAL_PROOF_SYSTEM_NAME,
+            instance: FinalFoldedInstance {
+                config: NovaFoldConfig::default(),
+                metadata: BlockFoldAccumulator::<[u8; 32]>::new(),
+                recursive_snark_output_digest: [3u8; 32],
+                recursive_z_state: [[0u8; 32]; NOVA_Z_ARITY],
+                instance_digest: [4u8; 32],
+            },
+            spartan_encoding_digest: Some([5u8; 32]),
+            proof_digest: [6u8; 32],
+            spartan_proof_bytes: Some(vec![7u8; 16]),
+        };
+        let statement = RecursiveJoltVerifierStatement {
+            object_id: [8u8; 32],
+            deferred_pcs_id: [9u8; 32],
+            initial_transcript_state: RecursiveJoltFieldElement {
+                canonical_le_bytes: [10u8; 32],
+            },
+            initial_transcript_round: 11,
+            transcript_checkpoint_root: RecursiveJoltFieldElement {
+                canonical_le_bytes: [11u8; 32],
+            },
+            shape_id: [12u8; 32],
+        };
+        let baseline = digest_jolt_nova_end_to_end_linkage(&folded, &statement);
+
+        let mut switched_folded = folded.clone();
+        switched_folded.proof_digest[0] ^= 1;
+        assert_ne!(
+            digest_jolt_nova_end_to_end_linkage(&switched_folded, &statement),
+            baseline
+        );
+
+        let mut switched_statement = statement;
+        switched_statement.object_id[0] ^= 1;
+        assert_ne!(
+            digest_jolt_nova_end_to_end_linkage(&folded, &switched_statement),
+            baseline
         );
     }
 

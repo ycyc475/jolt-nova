@@ -16,9 +16,16 @@ use crate::{
     curve::JoltCurve,
     field::JoltField,
     poly::commitment::commitment_scheme::CommitmentScheme,
-    subprotocols::sumcheck::SumcheckInstanceProof,
-    transcripts::Transcript,
+    subprotocols::sumcheck::{ClearSumcheckProof, SumcheckInstanceProof},
+    transcripts::{PoseidonTranscript, Transcript},
     zkvm::{proof_serialization::JoltProof, verifier::JoltVerifierPreprocessing},
+};
+#[cfg(feature = "zk")]
+use crate::{
+    poly::commitment::pedersen::PedersenGenerators,
+    subprotocols::blindfold::{
+        BlindFoldProof, BlindFoldVerifier, BlindFoldVerifierInput, VerifierR1CS,
+    },
 };
 
 /// One lossless clear-sumcheck round.  The compressed polynomial omits its
@@ -67,6 +74,91 @@ impl RecursiveClearSumcheckStageWitness {
             return Err("recursive sumcheck compressed polynomial has invalid degree");
         }
         Ok(())
+    }
+}
+
+/// Verifier-derived endpoint data needed to adapt one native clear sumcheck.
+/// The transcript checkpoint is the exact state immediately before the native
+/// `ClearSumcheckProof::verify` call.
+#[derive(Clone)]
+pub struct RecursiveClearSumcheckStageContext {
+    pub transcript_before: PoseidonTranscript,
+    pub initial_claim: ark_bn254::Fr,
+    pub expected_final_claim: ark_bn254::Fr,
+    pub degree_bound: usize,
+}
+
+/// Lossless Stage-15 artifact extracted from a real clear Jolt sumcheck.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RecursiveClearSumcheckStageArtifact {
+    pub transcript_state_before: RecursiveJoltFieldElement,
+    pub transcript_round_before: u64,
+    pub witness: RecursiveClearSumcheckStageWitness,
+}
+
+impl RecursiveClearSumcheckStageArtifact {
+    pub fn from_native_proof(
+        stage_index: usize,
+        proof: &ClearSumcheckProof<ark_bn254::Fr, PoseidonTranscript>,
+        context: RecursiveClearSumcheckStageContext,
+    ) -> Result<Self, ProofVerifyError> {
+        let mut transcript = context.transcript_before;
+        let transcript_state_before = RecursiveJoltFieldElement {
+            canonical_le_bytes: transcript.state,
+        };
+        let transcript_round_before = transcript.n_rounds as u64;
+        let (final_claim, challenges) = proof.verify(
+            context.initial_claim,
+            proof.compressed_polys.len(),
+            context.degree_bound,
+            &mut transcript,
+        )?;
+        if final_claim != context.expected_final_claim
+            || challenges.len() != proof.compressed_polys.len()
+        {
+            return Err(ProofVerifyError::SumcheckVerificationError);
+        }
+
+        let rounds = proof
+            .compressed_polys
+            .iter()
+            .zip(challenges)
+            .map(|(polynomial, challenge)| {
+                let challenge_field: ark_bn254::Fr = challenge.into();
+                RecursiveClearSumcheckRoundWitness {
+                    coefficients_except_linear: polynomial
+                        .coeffs_except_linear_term
+                        .iter()
+                        .copied()
+                        .map(RecursiveJoltFieldElement::from_field)
+                        .collect::<Result<Vec<_>, _>>()
+                        .expect("BN254 Fr has a canonical 32-byte encoding"),
+                    challenge: RecursiveJoltFieldElement::from_field(challenge_field)
+                        .expect("BN254 challenge has a canonical field encoding"),
+                }
+            })
+            .collect();
+        let witness = RecursiveClearSumcheckStageWitness {
+            stage_index,
+            degree_bound: context.degree_bound,
+            initial_claim: RecursiveJoltFieldElement::from_field(context.initial_claim)
+                .expect("BN254 Fr has a canonical 32-byte encoding"),
+            rounds,
+            expected_final_claim: RecursiveJoltFieldElement::from_field(final_claim)
+                .expect("BN254 Fr has a canonical 32-byte encoding"),
+        };
+        witness
+            .validate_shape(
+                stage_index,
+                proof.compressed_polys.len(),
+                context.degree_bound,
+            )
+            .map_err(|_| ProofVerifyError::InternalError)?;
+        Ok(Self {
+            transcript_state_before,
+            transcript_round_before,
+            witness,
+        })
     }
 }
 
@@ -182,6 +274,212 @@ where
             &self.opening,
             &self.commitment,
         )
+    }
+}
+
+/// A complete BlindFold verifier equation deferred from the scalar Nova step.
+///
+/// This is the ZK analogue of [`RecursiveDeferredPcsOpening`].  The obligation
+/// retains the real proof, commitments, R1CS, generators, and transcript state;
+/// final acceptance calls the production BlindFold verifier.  The identifier
+/// only binds this exact equation into a recursive statement and is never used
+/// as evidence that verification succeeded.
+#[cfg(feature = "zk")]
+pub struct RecursiveDeferredBlindFoldVerification<F, C, FS>
+where
+    F: JoltField,
+    C: JoltCurve<F = F>,
+    FS: Transcript,
+{
+    proof: BlindFoldProof<F, C>,
+    input: BlindFoldVerifierInput<C>,
+    generators: PedersenGenerators<C>,
+    verifier_r1cs: VerifierR1CS<F>,
+    eval_commitment_generators: Option<(C::G1, C::G1)>,
+    transcript_before_blindfold: FS,
+    obligation_id: [u8; 32],
+}
+
+#[cfg(feature = "zk")]
+impl<F, C, FS> RecursiveDeferredBlindFoldVerification<F, C, FS>
+where
+    F: JoltField,
+    C: JoltCurve<F = F>,
+    FS: Transcript,
+{
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        proof: BlindFoldProof<F, C>,
+        input: BlindFoldVerifierInput<C>,
+        generators: PedersenGenerators<C>,
+        verifier_r1cs: VerifierR1CS<F>,
+        eval_commitment_generators: Option<(C::G1, C::G1)>,
+        transcript_before_blindfold: FS,
+        transcript_binding: &[u8],
+    ) -> Self {
+        let obligation_id = compute_deferred_blindfold_obligation_id(
+            &proof,
+            &input,
+            &generators,
+            &verifier_r1cs,
+            &eval_commitment_generators,
+            transcript_binding,
+        );
+        Self {
+            proof,
+            input,
+            generators,
+            verifier_r1cs,
+            eval_commitment_generators,
+            transcript_before_blindfold,
+            obligation_id,
+        }
+    }
+
+    pub fn obligation_id(&self) -> [u8; 32] {
+        self.obligation_id
+    }
+
+    pub fn verify(&self) -> Result<(), String> {
+        let verifier = BlindFoldVerifier::<F, C>::new(
+            &self.generators,
+            &self.verifier_r1cs,
+            self.eval_commitment_generators.clone(),
+        );
+        let mut transcript = self.transcript_before_blindfold.clone();
+        verifier
+            .verify(&self.proof, &self.input, &mut transcript)
+            .map_err(|error| format!("deferred BlindFold verification failed: {error:?}"))
+    }
+}
+
+#[cfg(feature = "zk")]
+fn append_blindfold_r1cs<F: JoltField>(hasher: &mut Sha3_256, r1cs: &VerifierR1CS<F>) {
+    hasher.update((r1cs.num_vars as u64).to_le_bytes());
+    hasher.update((r1cs.num_constraints as u64).to_le_bytes());
+    for (label, matrix) in [
+        (&b"A"[..], &r1cs.a),
+        (&b"B"[..], &r1cs.b),
+        (&b"C"[..], &r1cs.c),
+    ] {
+        hasher.update(label);
+        hasher.update((matrix.num_rows as u64).to_le_bytes());
+        hasher.update((matrix.num_cols as u64).to_le_bytes());
+        hasher.update((matrix.entries.len() as u64).to_le_bytes());
+        for (row, column, value) in &matrix.entries {
+            hasher.update((*row as u64).to_le_bytes());
+            hasher.update((*column as u64).to_le_bytes());
+            append_canonical(hasher, b"matrix-value", value);
+        }
+    }
+    for value in [
+        r1cs.hyrax.C,
+        r1cs.hyrax.R_coeff,
+        r1cs.hyrax.R_prime,
+        r1cs.hyrax.noncoeff_count,
+        r1cs.hyrax.total_rounds,
+        r1cs.hyrax.output_claims_rows,
+    ] {
+        hasher.update((value as u64).to_le_bytes());
+    }
+    hasher.update((r1cs.extra_output_vars.len() as u64).to_le_bytes());
+    for variable in &r1cs.extra_output_vars {
+        hasher.update((variable.index() as u64).to_le_bytes());
+    }
+    hasher.update((r1cs.extra_blinding_vars.len() as u64).to_le_bytes());
+    for variable in &r1cs.extra_blinding_vars {
+        hasher.update((variable.index() as u64).to_le_bytes());
+    }
+}
+
+#[cfg(feature = "zk")]
+fn compute_deferred_blindfold_obligation_id<F, C>(
+    proof: &BlindFoldProof<F, C>,
+    input: &BlindFoldVerifierInput<C>,
+    generators: &PedersenGenerators<C>,
+    verifier_r1cs: &VerifierR1CS<F>,
+    eval_commitment_generators: &Option<(C::G1, C::G1)>,
+    transcript_binding: &[u8],
+) -> [u8; 32]
+where
+    F: JoltField,
+    C: JoltCurve<F = F>,
+{
+    let mut hasher = Sha3_256::new();
+    hasher.update(b"jolt-nova/deferred-blindfold-verification/v1");
+    append_canonical(&mut hasher, b"proof", proof);
+    append_canonical(&mut hasher, b"round-commitments", &input.round_commitments);
+    append_canonical(
+        &mut hasher,
+        b"output-claim-row-commitments",
+        &input.output_claims_row_commitments,
+    );
+    append_canonical(
+        &mut hasher,
+        b"evaluation-commitments",
+        &input.eval_commitments,
+    );
+    append_canonical(&mut hasher, b"pedersen-generators", generators);
+    append_canonical(
+        &mut hasher,
+        b"evaluation-commitment-generators",
+        eval_commitment_generators,
+    );
+    append_blindfold_r1cs(&mut hasher, verifier_r1cs);
+    hasher.update((transcript_binding.len() as u64).to_le_bytes());
+    hasher.update(transcript_binding);
+    hasher.finalize().into()
+}
+
+/// Public continuity statement for the ZK/BlindFold acceptance path.
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[cfg(feature = "zk")]
+pub struct RecursiveJoltZkStatement {
+    pub object_id: [u8; 32],
+    pub deferred_pcs_id: [u8; 32],
+    pub deferred_blindfold_id: [u8; 32],
+}
+
+/// Final ZK envelope. Both deferred equations are verified cryptographically;
+/// none of the three identifiers is treated as an acceptance receipt.
+#[cfg(feature = "zk")]
+pub struct RecursiveJoltZkFinalAcceptance<F, C, PCS, FS>
+where
+    F: JoltField,
+    C: JoltCurve<F = F>,
+    PCS: CommitmentScheme<Field = F>,
+    FS: Transcript,
+{
+    pub deferred_pcs_opening: RecursiveDeferredPcsOpening<F, PCS, FS>,
+    pub deferred_blindfold_verification: RecursiveDeferredBlindFoldVerification<F, C, FS>,
+}
+
+#[cfg(feature = "zk")]
+impl<F, C, PCS, FS> RecursiveJoltZkFinalAcceptance<F, C, PCS, FS>
+where
+    F: JoltField,
+    C: JoltCurve<F = F>,
+    PCS: CommitmentScheme<Field = F>,
+    FS: Transcript,
+{
+    pub fn verify(
+        &self,
+        statement: &RecursiveJoltZkStatement,
+        expected_object_id: [u8; 32],
+    ) -> Result<(), String> {
+        if statement.object_id != expected_object_id {
+            return Err("recursive ZK verifier object identifier mismatch".to_string());
+        }
+        if statement.deferred_pcs_id != self.deferred_pcs_opening.obligation_id() {
+            return Err("recursive ZK deferred PCS identifier mismatch".to_string());
+        }
+        if statement.deferred_blindfold_id != self.deferred_blindfold_verification.obligation_id() {
+            return Err("recursive ZK deferred BlindFold identifier mismatch".to_string());
+        }
+        self.deferred_pcs_opening
+            .verify()
+            .map_err(|error| format!("deferred ZK PCS verification failed: {error}"))?;
+        self.deferred_blindfold_verification.verify()
     }
 }
 
@@ -365,6 +663,40 @@ where
     }
 }
 
+impl<C, PCS, PublicIo>
+    RecursiveJoltVerifierObject<ark_bn254::Fr, C, PCS, PoseidonTranscript, PublicIo>
+where
+    C: JoltCurve<F = ark_bn254::Fr>,
+    PCS: CommitmentScheme<Field = ark_bn254::Fr>,
+    PCS::Commitment: CanonicalSerialize,
+    PCS::VerifierSetup: CanonicalSerialize,
+    PublicIo: CanonicalSerialize,
+{
+    /// Automatically extracts all eight native clear sumchecks from this Jolt
+    /// proof. Contexts are produced by the verifier stage observer, not by an
+    /// application-level receipt.
+    pub fn adapt_clear_sumchecks(
+        &self,
+        contexts: [RecursiveClearSumcheckStageContext; 8],
+    ) -> Result<Vec<RecursiveClearSumcheckStageArtifact>, ProofVerifyError> {
+        self.sumcheck_stages()
+            .into_iter()
+            .zip(contexts)
+            .enumerate()
+            .map(|(stage_index, (proof, context))| match proof {
+                SumcheckInstanceProof::Clear(proof) => {
+                    RecursiveClearSumcheckStageArtifact::from_native_proof(
+                        stage_index,
+                        proof,
+                        context,
+                    )
+                }
+                SumcheckInstanceProof::Zk(_) => Err(ProofVerifyError::ZkFeatureRequired),
+            })
+            .collect()
+    }
+}
+
 fn append_canonical<T: CanonicalSerialize>(hasher: &mut Sha3_256, label: &[u8], value: &T) {
     let mut bytes = Vec::new();
     value
@@ -412,7 +744,16 @@ where
 
 #[cfg(test)]
 mod tests {
-    use super::{append_canonical, RecursiveVerifierPcsStrategy};
+    use super::{
+        append_canonical, RecursiveClearSumcheckStageArtifact, RecursiveClearSumcheckStageContext,
+        RecursiveVerifierPcsStrategy,
+    };
+    use crate::{
+        poly::unipoly::CompressedUniPoly,
+        subprotocols::sumcheck::ClearSumcheckProof,
+        transcripts::{PoseidonTranscript, Transcript},
+    };
+    use ark_bn254::Fr;
     use sha3::{Digest, Sha3_256};
 
     fn component_commitment(parts: [&Vec<u8>; 4]) -> [u8; 32] {
@@ -454,6 +795,46 @@ mod tests {
                 baseline
             );
         }
+    }
+
+    #[test]
+    fn clear_sumcheck_adapter_uses_native_verifier_checkpoint_and_endpoints() {
+        let proof = ClearSumcheckProof::new(vec![CompressedUniPoly {
+            coeffs_except_linear_term: vec![Fr::from(2u64), Fr::from(6u64)],
+        }]);
+        let transcript = PoseidonTranscript::new(b"stage15-adapter");
+        let mut replay = transcript.clone();
+        let (final_claim, _) = proof.verify(Fr::from(10u64), 1, 2, &mut replay).unwrap();
+        let artifact = RecursiveClearSumcheckStageArtifact::from_native_proof(
+            3,
+            &proof,
+            RecursiveClearSumcheckStageContext {
+                transcript_before: transcript.clone(),
+                initial_claim: Fr::from(10u64),
+                expected_final_claim: final_claim,
+                degree_bound: 2,
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            artifact.transcript_state_before.canonical_le_bytes,
+            transcript.state
+        );
+        assert_eq!(artifact.transcript_round_before, transcript.n_rounds as u64);
+        assert_eq!(artifact.witness.stage_index, 3);
+        assert_eq!(artifact.witness.rounds.len(), 1);
+
+        assert!(RecursiveClearSumcheckStageArtifact::from_native_proof(
+            3,
+            &proof,
+            RecursiveClearSumcheckStageContext {
+                transcript_before: transcript,
+                initial_claim: Fr::from(10u64),
+                expected_final_claim: final_claim + Fr::from(1u64),
+                degree_bound: 2,
+            },
+        )
+        .is_err());
     }
 }
 
@@ -535,5 +916,105 @@ mod deferred_pcs_tests {
             &transcript_binding,
         );
         assert!(forged.verify().is_err());
+    }
+}
+
+#[cfg(all(test, feature = "zk"))]
+mod deferred_blindfold_tests {
+    use ark_bn254::Fr;
+    use ark_std::Zero;
+
+    use crate::{
+        curve::Bn254Curve,
+        field::JoltField,
+        poly::commitment::pedersen::PedersenGenerators,
+        subprotocols::blindfold::{
+            BakedPublicInputs, BlindFoldProver, BlindFoldVerifierInput, BlindFoldWitness,
+            RelaxedR1CSInstance, RoundWitness, StageConfig, StageWitness, VerifierR1CSBuilder,
+        },
+        transcripts::{KeccakTranscript, Transcript},
+    };
+
+    use super::RecursiveDeferredBlindFoldVerification;
+
+    fn fixture(
+        tamper: bool,
+    ) -> RecursiveDeferredBlindFoldVerification<Fr, Bn254Curve, KeccakTranscript> {
+        let config = StageConfig::new(1, 3);
+        let round = RoundWitness::new(
+            vec![
+                Fr::from_u64(40),
+                Fr::from_u64(5),
+                Fr::from_u64(10),
+                Fr::from_u64(5),
+            ],
+            Fr::from_u64(3),
+        );
+        let witness =
+            BlindFoldWitness::new(Fr::from_u64(100), vec![StageWitness::new(vec![round])]);
+        let baked = BakedPublicInputs::from_witness(&witness, std::slice::from_ref(&config));
+        let r1cs = VerifierR1CSBuilder::<Fr>::new(std::slice::from_ref(&config), &baked).build();
+        let generators = PedersenGenerators::<Bn254Curve>::deterministic(r1cs.hyrax.C + 1);
+        let z = witness.assign(&r1cs);
+        r1cs.check_satisfaction(&z).unwrap();
+        let w = z[1..].to_vec();
+        let mut rng = rand::thread_rng();
+        let mut row_blindings = vec![Fr::zero(); r1cs.hyrax.R_prime];
+        let mut round_commitments = Vec::new();
+        for round_index in 0..r1cs.hyrax.total_rounds {
+            let start = round_index * r1cs.hyrax.C;
+            let blinding = Fr::random(&mut rng);
+            round_commitments.push(generators.commit(&w[start..start + r1cs.hyrax.C], &blinding));
+            row_blindings[round_index] = blinding;
+        }
+        let mut noncoeff_commitments = Vec::new();
+        for row in 0..r1cs.hyrax.total_noncoeff_rows() {
+            let start = r1cs.hyrax.R_coeff * r1cs.hyrax.C + row * r1cs.hyrax.C;
+            let end = (start + r1cs.hyrax.C).min(w.len());
+            let blinding = Fr::random(&mut rng);
+            noncoeff_commitments.push(generators.commit(&w[start..end], &blinding));
+            row_blindings[r1cs.hyrax.R_coeff + row] = blinding;
+        }
+        let (instance, relaxed_witness) = RelaxedR1CSInstance::<Fr, Bn254Curve>::new_non_relaxed(
+            &w,
+            r1cs.num_constraints,
+            r1cs.hyrax.C,
+            round_commitments,
+            Vec::new(),
+            noncoeff_commitments,
+            Vec::new(),
+            row_blindings,
+        );
+        let label = b"stage15-deferred-blindfold";
+        let mut prover_transcript = KeccakTranscript::new(label);
+        let mut proof = BlindFoldProver::new(&generators, &r1cs, None).prove(
+            &instance,
+            &relaxed_witness,
+            &z,
+            &mut prover_transcript,
+        );
+        if tamper {
+            proof.spartan_proof.pop();
+        }
+        let input = BlindFoldVerifierInput {
+            round_commitments: instance.round_commitments,
+            output_claims_row_commitments: instance.output_claims_row_commitments,
+            eval_commitments: instance.eval_commitments,
+        };
+        RecursiveDeferredBlindFoldVerification::new(
+            proof,
+            input,
+            generators,
+            r1cs,
+            None,
+            KeccakTranscript::new(label),
+            b"stage15-deferred-blindfold-binding",
+        )
+    }
+
+    #[test]
+    fn deferred_blindfold_obligation_runs_real_verifier_and_rejects_tampering() {
+        fixture(false).verify().unwrap();
+        assert!(fixture(true).verify().is_err());
     }
 }

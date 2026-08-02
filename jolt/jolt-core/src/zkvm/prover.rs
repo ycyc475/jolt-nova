@@ -2598,8 +2598,10 @@ mod tests {
         prover::JoltProverPreprocessing,
         ram::populate_memory_states,
         verifier::{JoltVerifier, JoltVerifierPreprocessing},
-        RV64IMACProof, RV64IMACProver, RV64IMACVerifier, Serializable,
+        RV64IMACProver, RV64IMACVerifier,
     };
+    #[cfg(not(feature = "zk"))]
+    use crate::zkvm::{RV64IMACProof, Serializable};
     #[cfg(feature = "zk")]
     use crate::{curve::JoltCurve, field::JoltField};
     use jolt_riscv::JoltInstructionRow;
@@ -2692,6 +2694,7 @@ mod tests {
         Ok((shared, prover_data, generators, program))
     }
 
+    #[cfg(not(feature = "zk"))]
     #[test]
     #[serial]
     fn fib_e2e_dory() {
