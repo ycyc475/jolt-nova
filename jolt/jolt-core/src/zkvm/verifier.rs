@@ -272,6 +272,8 @@ pub struct JoltVerifier<
     recursive_sumcheck_traces: Vec<SumcheckVerifierTrace<F, ProofTranscript>>,
     #[cfg(feature = "nova")]
     recursive_relation_capture: Option<RecursiveVerifierRelationCapture<F>>,
+    #[cfg(all(feature = "nova", feature = "zk"))]
+    recursive_blindfold_capture: Option<RecursiveBlindFoldRelationCapture<F, C, ProofTranscript>>,
 }
 
 #[cfg(feature = "nova")]
@@ -279,6 +281,20 @@ struct RecursiveVerifierRelationCapture<F: JoltField> {
     verifier_r1cs: VerifierR1CS<F>,
     verifier_witness: Vec<F>,
     pcs_opening_ids: Vec<OpeningId>,
+}
+
+#[cfg(all(feature = "nova", feature = "zk"))]
+struct RecursiveBlindFoldRelationCapture<
+    F: JoltField,
+    C: JoltCurve<F = F>,
+    ProofTranscript: Transcript,
+> {
+    proof: crate::subprotocols::blindfold::BlindFoldProof<F, C>,
+    input: BlindFoldVerifierInput<C>,
+    generators: PedersenGenerators<C>,
+    verifier_r1cs: VerifierR1CS<F>,
+    eval_commitment_generators: Option<(C::G1, C::G1)>,
+    transcript_before_blindfold: ProofTranscript,
 }
 
 #[derive(Clone, Debug)]
@@ -434,6 +450,8 @@ impl<
             recursive_sumcheck_traces: Vec::with_capacity(8),
             #[cfg(feature = "nova")]
             recursive_relation_capture: None,
+            #[cfg(all(feature = "nova", feature = "zk"))]
+            recursive_blindfold_capture: None,
         })
     }
 
@@ -2141,6 +2159,8 @@ impl<
             PCS::eval_commitment_gens_verifier(&self.preprocessing.generators);
         let verifier =
             BlindFoldVerifier::<_, _>::new(&pedersen_generators, &r1cs, eval_commitment_gens);
+        #[cfg(all(feature = "nova", feature = "zk"))]
+        let transcript_before_blindfold = self.transcript.clone();
         self.transcript.append_label(b"BlindFold");
 
         verifier
@@ -2150,6 +2170,18 @@ impl<
                 &mut self.transcript,
             )
             .map_err(|e| ProofVerifyError::BlindFoldError(format!("{e:?}")))?;
+
+        #[cfg(all(feature = "nova", feature = "zk"))]
+        {
+            self.recursive_blindfold_capture = Some(RecursiveBlindFoldRelationCapture {
+                proof: self.proof.blindfold_proof.clone(),
+                input: verifier_input,
+                generators: pedersen_generators,
+                verifier_r1cs: r1cs.clone(),
+                eval_commitment_generators: eval_commitment_gens,
+                transcript_before_blindfold,
+            });
+        }
 
         tracing::debug!(
             "BlindFold verification passed: {} R1CS constraints",
@@ -2669,6 +2701,52 @@ where
     > {
         let (verified, relation) = self.verify_with_recursive_relation_artifact()?;
         Ok((verified, relation.sumcheck_artifacts().to_vec()))
+    }
+}
+
+#[cfg(all(feature = "nova", feature = "zk"))]
+impl<'a, C, PCS> JoltVerifier<'a, ark_bn254::Fr, C, PCS, crate::transcripts::PoseidonTranscript>
+where
+    C: JoltCurve<F = ark_bn254::Fr>,
+    PCS: CommitmentScheme<Field = ark_bn254::Fr> + ZkEvalCommitment<C>,
+{
+    /// Runs the production ZK Jolt verifier and returns the Stage-17 typed
+    /// recursive BlindFold relation derived from that exact successful run.
+    /// No R1CS, witness, challenge, or host acceptance flag is supplied by the
+    /// caller.
+    pub fn verify_with_recursive_zk_relation_artifact(
+        self,
+    ) -> Result<
+        (
+            Self,
+            crate::zkvm::block::RecursiveBlindFoldRelationArtifact<C>,
+        ),
+        ProofVerifyError,
+    > {
+        let receipt = self.proof.lookup_receipt_candidate(
+            &self.program_io,
+            self.preprocessing.shared.digest(),
+            &self.preprocessing.generators,
+            &self.trusted_advice_commitment,
+        );
+        let jolt_statement_id = receipt.recursive_execution_statement_id();
+
+        let mut verified = self.verify_preserving_state()?;
+        let capture = verified
+            .recursive_blindfold_capture
+            .take()
+            .ok_or(ProofVerifyError::InternalError)?;
+        let artifact = crate::zkvm::block::RecursiveBlindFoldRelationArtifact::from_verified_parts(
+            capture.proof,
+            capture.input,
+            capture.generators,
+            capture.verifier_r1cs,
+            capture.eval_commitment_generators,
+            capture.transcript_before_blindfold,
+            jolt_statement_id,
+        )
+        .map_err(|error| ProofVerifyError::BlindFoldError(error))?;
+        Ok((verified, artifact))
     }
 }
 

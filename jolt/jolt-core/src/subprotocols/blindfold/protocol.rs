@@ -714,6 +714,107 @@ impl<'a, F: JoltField, C: JoltCurve<F = F>> BlindFoldVerifier<'a, F, C> {
 
         Ok(())
     }
+
+    /// Verifies only the commitment/group equations that cannot be expressed
+    /// economically by the scalar-field Nova step used by Jolt--Nova.
+    ///
+    /// The challenges supplied here are not trusted: the Stage-17 recursive
+    /// scalar relation derives and constrains them from the complete Poseidon
+    /// transcript.  This method is the typed deferred counterpart of that
+    /// circuit.  Keeping the split explicit prevents a digest or a
+    /// host-produced `accepted` flag from standing in for either half of the
+    /// BlindFold verifier.
+    pub fn verify_deferred_group_relations(
+        &self,
+        proof: &BlindFoldProof<F, C>,
+        input: &BlindFoldVerifierInput<C>,
+        folding_challenge: F,
+        outer_challenges: &[F::Challenge],
+        inner_challenges: &[F::Challenge],
+    ) -> Result<(), BlindFoldVerifyError> {
+        let hyrax = &self.r1cs.hyrax;
+        let (r_e, _) = hyrax.e_grid(self.r1cs.num_constraints);
+        if proof.noncoeff_row_commitments.len() != hyrax.regular_noncoeff_rows()
+            || proof.random_instance.noncoeff_row_commitments.len() != hyrax.regular_noncoeff_rows()
+            || input.round_commitments.len() != hyrax.R_coeff
+            || proof.random_instance.round_commitments.len() != hyrax.R_coeff
+            || input.output_claims_row_commitments.len() != hyrax.output_claims_rows
+            || proof.random_instance.output_claims_row_commitments.len() != hyrax.output_claims_rows
+            || proof.random_instance.e_row_commitments.len() != r_e
+        {
+            return Err(BlindFoldVerifyError::MalformedProof);
+        }
+
+        let real_instance = RelaxedR1CSInstance {
+            u: F::one(),
+            round_commitments: input.round_commitments.clone(),
+            output_claims_row_commitments: input.output_claims_row_commitments.clone(),
+            noncoeff_row_commitments: proof.noncoeff_row_commitments.clone(),
+            e_row_commitments: vec![C::G1::zero(); r_e],
+            eval_commitments: input.eval_commitments.clone(),
+        };
+        let folded_instance = real_instance.fold(
+            &proof.random_instance,
+            &proof.cross_term_row_commitments,
+            folding_challenge,
+        )?;
+
+        if let Some((g1_0, h1)) = self.eval_commitment_gens {
+            if proof.folded_eval_outputs.len() != folded_instance.eval_commitments.len()
+                || proof.folded_eval_blindings.len() != folded_instance.eval_commitments.len()
+            {
+                return Err(BlindFoldVerifyError::MalformedProof);
+            }
+            for (index, commitment) in folded_instance.eval_commitments.iter().enumerate() {
+                let expected = g1_0.scalar_mul(&proof.folded_eval_outputs[index])
+                    + h1.scalar_mul(&proof.folded_eval_blindings[index]);
+                if *commitment != expected {
+                    return Err(BlindFoldVerifyError::EvalCommitmentMismatch);
+                }
+            }
+        }
+        verify_folded_eval_witness_bindings(self.r1cs, self.gens, &folded_instance, proof)?;
+
+        let expected_outer_rounds = self.r1cs.num_constraints.next_power_of_two().log_2();
+        let expected_inner_rounds = (hyrax.R_prime * hyrax.C).log_2();
+        if outer_challenges.len() != expected_outer_rounds
+            || inner_challenges.len() != expected_inner_rounds
+        {
+            return Err(BlindFoldVerifyError::MalformedProof);
+        }
+
+        let rx = outer_challenges
+            .iter()
+            .map(|challenge| (*challenge).into())
+            .collect::<Vec<F>>();
+        let (rx_row, _) = rx.split_at(r_e.log_2());
+        let eq_rx_row = EqPolynomial::evals(rx_row);
+        let combined_e = C::g1_msm(&folded_instance.e_row_commitments, &eq_rx_row);
+        let expected_e = self.gens.commit(
+            &proof.e_opening.combined_row,
+            &proof.e_opening.combined_blinding,
+        );
+        if combined_e != expected_e {
+            return Err(BlindFoldVerifyError::EOpeningFailed);
+        }
+
+        let ry = inner_challenges
+            .iter()
+            .map(|challenge| (*challenge).into())
+            .collect::<Vec<F>>();
+        let (ry_row, _) = ry.split_at(hyrax.log_R_prime());
+        let all_w_rows = folded_instance.all_w_row_commitments(hyrax.R_coeff, hyrax.R_prime)?;
+        let eq_ry_row = EqPolynomial::evals(ry_row);
+        let combined_w = C::g1_msm(&all_w_rows, &eq_ry_row);
+        let expected_w = self.gens.commit(
+            &proof.w_opening.combined_row,
+            &proof.w_opening.combined_blinding,
+        );
+        if combined_w != expected_w {
+            return Err(BlindFoldVerifyError::WOpeningFailed);
+        }
+        Ok(())
+    }
 }
 
 fn append_instance_to_transcript<F: JoltField, C: JoltCurve<F = F>>(

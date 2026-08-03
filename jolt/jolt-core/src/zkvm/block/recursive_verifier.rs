@@ -1,3 +1,5 @@
+#![cfg_attr(feature = "zk", allow(dead_code))]
+
 //! Typed input object for recursive verification of an original Jolt proof.
 //!
 //! Earlier block-folding stages retained fixed-width digests emitted after a
@@ -1082,12 +1084,30 @@ mod deferred_pcs_tests {
         );
         assert!(valid.verify().is_ok());
 
+        // Transparent Dory binds the scalar evaluation directly.  In ZK
+        // Dory, the evaluation is represented by a blinded commitment inside
+        // the proof and the scalar linkage is enforced by BlindFold, so the
+        // negative test must instead corrupt that committed evaluation.
+        #[cfg(not(feature = "zk"))]
+        let (forged_proof, forged_opening) = (proof, opening + Fr::from(1u64));
+        #[cfg(feature = "zk")]
+        let (forged_proof, forged_opening) = {
+            let mut forged_proof = proof;
+            if let Some(ref mut y_com) = forged_proof.y_com {
+                *y_com = *y_com + verifier_setup.g1_0;
+            } else if let Some(ref mut e2) = forged_proof.e2 {
+                *e2 = *e2 + verifier_setup.g2_0;
+            } else {
+                panic!("ZK Dory proof missing committed evaluation fields");
+            }
+            (forged_proof, opening)
+        };
         let forged = RecursiveDeferredPcsOpening::<Fr, DoryCommitmentScheme, _>::new(
-            proof,
+            forged_proof,
             verifier_setup,
             verifier_transcript,
             opening_point,
-            opening + Fr::from(1u64),
+            forged_opening,
             commitment,
             &transcript_binding,
         );

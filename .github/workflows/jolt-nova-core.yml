@@ -45,6 +45,15 @@ jobs:
       - name: Test jolt-core Nova block path
         run: cargo test --locked -p jolt-core --lib --no-default-features --features nova block -- --test-threads=1
 
+      - name: Check Stage-17 Nova BlindFold path
+        run: cargo check --locked -p jolt-core --lib --no-default-features --features "nova zk"
+
+      - name: Test Stage-17 recursive BlindFold verifier
+        run: cargo test --locked -p jolt-core --lib --no-default-features --features "nova zk" recursive_zk_verifier -- --test-threads=1
+
+      - name: Test clear/ZK execution statement equivalence
+        run: cargo test --locked -p jolt-core --lib --no-default-features --features "nova zk" clear_and_zk_receipts_share_the_same_recursive_execution_statement
+
       - name: Test real ELF trace bundle to Nova and Spartan
         run: |
           set -o pipefail

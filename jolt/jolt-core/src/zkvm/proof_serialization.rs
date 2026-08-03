@@ -132,6 +132,26 @@ impl VerifiedJoltLookupProofReceipt {
         self.public_io_digest
     }
 
+    pub fn trusted_advice_commitment_digest(&self) -> [u8; 32] {
+        self.trusted_advice_commitment_digest
+    }
+
+    /// Proof-mode-independent execution statement used to link the clear and
+    /// BlindFold recursive verifier paths.  Proof commitments, transcript
+    /// randomness, and the `zk_mode` bit are intentionally excluded; program
+    /// preprocessing, verifier parameters, public I/O, trace length, and
+    /// trusted advice identity remain bound.
+    pub fn recursive_execution_statement_id(&self) -> [u8; 32] {
+        let mut hasher = Sha3_256::new();
+        hasher.update(b"jolt-nova/common-clear-zk-statement/v1");
+        hasher.update(self.trace_length.to_le_bytes());
+        hasher.update(self.preprocessing_digest);
+        hasher.update(self.verifier_setup_digest);
+        hasher.update(self.public_io_digest);
+        hasher.update(self.trusted_advice_commitment_digest);
+        hasher.finalize().into()
+    }
+
     pub fn commitments_digest(&self) -> [u8; 32] {
         self.commitments_digest
     }
@@ -651,6 +671,23 @@ mod tests {
         RecursiveVerifierTranscriptCapsule, VerifiedJoltBlindFoldReceipt,
         VerifiedJoltLookupProofReceipt,
     };
+
+    #[test]
+    fn clear_and_zk_receipts_share_the_same_recursive_execution_statement() {
+        let clear = VerifiedJoltLookupProofReceipt::new_for_test(41, 1024);
+        let zk = VerifiedJoltLookupProofReceipt::new_zk_for_test(41, 1024);
+        assert_ne!(clear.digest(), zk.digest());
+        assert_eq!(
+            clear.recursive_execution_statement_id(),
+            zk.recursive_execution_statement_id()
+        );
+
+        let different_execution = VerifiedJoltLookupProofReceipt::new_zk_for_test(42, 1024);
+        assert_ne!(
+            clear.recursive_execution_statement_id(),
+            different_execution.recursive_execution_statement_id()
+        );
+    }
 
     #[test]
     fn verified_jolt_lookup_receipt_captures_full_verifier_transcript() {

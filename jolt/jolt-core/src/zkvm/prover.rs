@@ -3961,6 +3961,67 @@ mod tests {
         );
     }
 
+    #[cfg(all(feature = "zk", feature = "nova"))]
+    #[test]
+    #[serial]
+    fn fib_e2e_dory_zk_recursive_blindfold() {
+        DoryGlobals::reset();
+        let mut program = host::Program::new("fibonacci-guest");
+        // Windows cannot reliably use Jolt's Unix-style /tmp default. Keep the
+        // real guest fixture in a stage-local target directory.
+        let guest_target = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .join("target-stage-17-guest");
+        program.build(guest_target.to_str().unwrap());
+        let inputs = postcard::to_stdvec(&32u32).unwrap();
+        let (bytecode, init_memory_state, _, e_entry) = program.decode();
+        let (_, _, _, io_device) = program.trace(&inputs, &[], &[]);
+        let (shared_preprocessing, _program_data) = test_shared_preprocessing(
+            bytecode,
+            init_memory_state,
+            e_entry,
+            io_device.memory_layout.clone(),
+            1 << 16,
+        )
+        .unwrap();
+        let prover_preprocessing = JoltProverPreprocessing::new(shared_preprocessing);
+        let elf_contents = program.get_elf_contents();
+        let elf = elf_contents
+            .as_deref()
+            .expect("fibonacci ELF must be available");
+        let prover = RV64IMACProver::gen_from_elf(
+            &prover_preprocessing,
+            elf,
+            &inputs,
+            &[],
+            &[],
+            None,
+            None,
+            None,
+        );
+        let public_io = prover.program_io.clone();
+        let (proof, debug_info) = prover.prove();
+        let verifier_preprocessing = JoltVerifierPreprocessing::from(&prover_preprocessing);
+        let verifier =
+            RV64IMACVerifier::new(&verifier_preprocessing, proof, public_io, None, debug_info)
+                .expect("ZK verifier construction must succeed");
+        let (_verified, artifact) = verifier
+            .verify_with_recursive_zk_relation_artifact()
+            .expect("real ZK Jolt verification must emit a Stage-17 artifact");
+        let statement = artifact.statement();
+        assert_ne!(statement.object_id, [0; 32]);
+        assert_ne!(statement.deferred_group_id, [0; 32]);
+        assert_ne!(statement.jolt_statement_id, [0; 32]);
+        let (circuit, group_obligation) = artifact.into_parts();
+        circuit
+            .test_constraints_are_satisfied()
+            .expect("real ZK Jolt BlindFold scalar relation must satisfy Nova constraints");
+        group_obligation
+            .verify()
+            .expect("real ZK Jolt BlindFold group obligation must verify");
+    }
+
     #[cfg(feature = "zk")]
     #[test]
     #[serial]

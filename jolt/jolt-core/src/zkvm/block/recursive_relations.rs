@@ -1,3 +1,5 @@
+#![cfg_attr(feature = "zk", allow(dead_code))]
+
 use ark_serialize::CanonicalSerialize;
 use light_poseidon::parameters::bn254_x5::get_poseidon_parameters;
 use nova_snark::{
@@ -181,7 +183,9 @@ pub(super) struct AllocatedRecursivePoseidonTranscriptState {
     pub n_rounds: AllocatedNum<NovaScalar>,
 }
 
-fn ark_bn254_scalar_as_nova_scalar(value: &ark_bn254::Fr) -> Result<NovaScalar, SynthesisError> {
+pub(super) fn ark_bn254_scalar_as_nova_scalar(
+    value: &ark_bn254::Fr,
+) -> Result<NovaScalar, SynthesisError> {
     let mut bytes = [0u8; 32];
     value
         .serialize_uncompressed(&mut bytes[..])
@@ -193,7 +197,7 @@ fn ark_bn254_scalar_as_nova_scalar(value: &ark_bn254::Fr) -> Result<NovaScalar, 
     })
 }
 
-fn alloc_nova_constant<CS: ConstraintSystem<NovaScalar>>(
+pub(super) fn alloc_nova_constant<CS: ConstraintSystem<NovaScalar>>(
     mut cs: CS,
     value: NovaScalar,
 ) -> Result<AllocatedNum<NovaScalar>, SynthesisError> {

@@ -1,3 +1,5 @@
+#![cfg_attr(all(feature = "nova", feature = "zk"), allow(dead_code, unused_mut))]
+
 #[cfg(feature = "nova")]
 use nova_snark::traits::PrimeFieldExt;
 #[cfg(all(feature = "nova", not(feature = "zk")))]
@@ -12,7 +14,7 @@ use sha3::{Digest as ShaDigest, Sha3_256};
 use tracer::{instruction::Cycle, MachineBoundaryState, TraceBlock};
 
 mod recursive_openings;
-#[cfg(all(feature = "nova", not(feature = "zk")))]
+#[cfg(feature = "nova")]
 mod recursive_relations;
 #[cfg(feature = "nova")]
 mod recursive_verifier;
@@ -42,6 +44,8 @@ pub use recursive_verifier::{
     RecursiveDeferredBlindFoldVerification, RecursiveJoltZkFinalAcceptance,
     RecursiveJoltZkStatement,
 };
+#[cfg(all(feature = "nova", feature = "zk"))]
+mod recursive_zk_verifier;
 #[cfg(all(feature = "nova", not(feature = "zk")))]
 pub use recursive_verifier_circuit::RecursiveJoltVerifierSpartanProof;
 #[cfg(all(feature = "nova", not(feature = "zk")))]
@@ -49,6 +53,14 @@ pub use recursive_verifier_circuit::{
     RecursiveJoltFinalAcceptance, RecursiveJoltVerifierBaseline, RecursiveJoltVerifierCircuit,
     RecursiveJoltVerifierProverParameters, RecursiveJoltVerifierStatement,
     RecursiveJoltVerifierVerificationKey,
+};
+#[cfg(all(feature = "nova", feature = "zk"))]
+pub use recursive_zk_verifier::{
+    RecursiveBlindFoldBaseline, RecursiveBlindFoldGroupObligation,
+    RecursiveBlindFoldRelationArtifact, RecursiveBlindFoldSpartanProof,
+    RecursiveBlindFoldStatement, RecursiveBlindFoldVerifierCircuit,
+    RecursiveBlindFoldVerifierProverParameters, RecursiveBlindFoldVerifierVerificationKey,
+    RecursiveJoltZkCompleteFinalAcceptance, RecursiveJoltZkRecursiveFinalAcceptance,
 };
 
 use crate::{

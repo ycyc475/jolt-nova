@@ -1,3 +1,5 @@
+#![cfg_attr(feature = "zk", allow(dead_code))]
+
 #[cfg(feature = "nova")]
 use num::{BigUint, Num};
 use sha3::{Digest as ShaDigest, Sha3_256};

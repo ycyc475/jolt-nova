@@ -28,11 +28,11 @@ use super::r1cs::VerifierR1CS;
 
 /// Spartan sumcheck degree bound.
 /// eq(τ,x) * Az(x) * Bz(x) is degree 3 in each variable.
-pub(super) const SPARTAN_DEGREE_BOUND: usize = 3;
+pub const SPARTAN_DEGREE_BOUND: usize = 3;
 
 /// Inner sumcheck degree bound.
 /// L_w(j) * W(j) is degree 2 in each variable.
-pub(super) const INNER_SUMCHECK_DEGREE_BOUND: usize = 2;
+pub const INNER_SUMCHECK_DEGREE_BOUND: usize = 2;
 
 #[derive(Clone)]
 pub struct BlindFoldSpartanParams<F: JoltField> {

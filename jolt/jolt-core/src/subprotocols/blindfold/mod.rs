@@ -42,6 +42,7 @@ pub use relaxed_r1cs::{RelaxedR1CSInstance, RelaxedR1CSWitness};
 pub use spartan::{
     compute_L_w_at_ry, BlindFoldInnerSumcheckProver, BlindFoldSpartanParams,
     BlindFoldSpartanProver, BlindFoldSpartanVerifier, SpartanFinalClaims,
+    INNER_SUMCHECK_DEGREE_BOUND, SPARTAN_DEGREE_BOUND,
 };
 pub use witness::{
     BlindFoldWitness, ExtraConstraintWitness, FinalOutputWitness, RoundWitness, StageWitness,
