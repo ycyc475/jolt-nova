@@ -250,7 +250,7 @@ impl RecursiveJoltVerifierRelationArtifact {
         &self.opening_bindings
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, feature = "prover"))]
     pub(crate) fn test_tamper_verifier_witness(&mut self) {
         if self.verifier_witness.len() > 1 {
             self.verifier_witness[1] += ark_bn254::Fr::from(1u64);

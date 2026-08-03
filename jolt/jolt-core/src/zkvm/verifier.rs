@@ -122,6 +122,7 @@ struct StageVerifyResult<F: JoltField> {
     uniskip_input_constraint_challenge_values: Vec<F>,
     uniskip_output_constraint: Option<OutputClaimConstraint>,
     uniskip_output_constraint_challenge_values: Vec<F>,
+    #[cfg_attr(not(feature = "zk"), allow(dead_code))]
     oc_block_ids: Vec<Vec<OpeningId>>,
 }
 

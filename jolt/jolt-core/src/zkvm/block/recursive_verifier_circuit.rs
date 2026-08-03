@@ -360,6 +360,7 @@ impl RecursiveJoltVerifierCircuit {
     /// BlindFold verifier-relation witness layout. This adapter preserves the
     /// exact Lasso/register/RAM/CPU endpoint variable ordering.
     #[cfg(test)]
+    #[allow(dead_code)]
     pub(crate) fn from_blindfold_witness(
         object_id: [u8; 32],
         deferred_pcs_id: [u8; 32],
@@ -394,7 +395,7 @@ impl RecursiveJoltVerifierCircuit {
     }
 
     /// Test-only full synthesis gate used by real-proof integration tests.
-    #[cfg(test)]
+    #[cfg(all(test, feature = "prover"))]
     pub(crate) fn test_constraints_are_satisfied(&self) -> Result<(), String> {
         use nova_snark::frontend::test_cs::TestConstraintSystem;
 
