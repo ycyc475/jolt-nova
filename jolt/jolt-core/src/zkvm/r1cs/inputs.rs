@@ -390,6 +390,10 @@ impl R1CSCycleInputs {
         }
     }
 
+    // The clear verifier consumes this helper directly. In the recursive ZK
+    // configuration the equivalent values are read through the BlindFold
+    // relation artifact, so the clear-only call sites are not compiled.
+    #[cfg_attr(feature = "zk", allow(dead_code))]
     pub(crate) fn get_input_value(&self, input: JoltR1CSInputs) -> i128 {
         match input {
             JoltR1CSInputs::PC => self.pc as i128,
