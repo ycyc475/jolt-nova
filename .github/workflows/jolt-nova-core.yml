@@ -60,6 +60,9 @@ jobs:
       - name: Compile Stage-18 real Jolt ZK integration
         run: cargo test --locked -p jolt-core --lib --no-default-features --features "host nova zk" fib_e2e_dory_zk_recursive_blindfold --no-run
 
+      - name: Test Stage-19 benchmark schema and runner
+        run: cargo test --locked -p jolt-core --example jolt_nova_stage19_benchmark --no-default-features --features "host nova zk"
+
       - name: Test real ELF trace bundle to Nova and Spartan
         run: |
           set -o pipefail

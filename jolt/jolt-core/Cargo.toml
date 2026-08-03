@@ -154,6 +154,11 @@ name = "jolt_nova_final_proof_size_benchmark"
 path = "examples/jolt_nova_final_proof_size_benchmark.rs"
 required-features = ["nova"]
 
+[[example]]
+name = "jolt_nova_stage19_benchmark"
+path = "examples/jolt_nova_stage19_benchmark.rs"
+required-features = ["host", "nova", "zk"]
+
 [lib]
 name = "jolt_core"
 path = "src/lib.rs"

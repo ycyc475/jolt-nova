@@ -46,6 +46,7 @@ pub use recursive_verifier::{
 };
 #[cfg(all(feature = "nova", feature = "zk"))]
 mod recursive_zk_verifier;
+mod stage19;
 #[cfg(feature = "nova")]
 mod streaming;
 #[cfg(all(feature = "nova", not(feature = "zk")))]
@@ -64,6 +65,14 @@ pub use recursive_zk_verifier::{
     RecursiveBlindFoldVerifierProverParameters, RecursiveBlindFoldVerifierVerificationKey,
     RecursiveJoltZkCompleteFinalAcceptance, RecursiveJoltZkRecursiveFinalAcceptance,
     RecursiveJoltZkVerifiedArtifacts,
+};
+pub use stage19::{
+    hex_digest as stage19_hex_digest, Stage19BenchmarkArtifact, Stage19BenchmarkSample,
+    Stage19BlockAggregate, Stage19Bottleneck, Stage19MemoryBytes, Stage19Platform,
+    Stage19ProofSizes, Stage19RegressionComparison, Stage19RegressionMetric,
+    Stage19RelationMeasurement, Stage19SummaryStatistics, Stage19TimingsMicros,
+    JOLT_NOVA_STAGE19_LOOKUP_BACKEND, JOLT_NOVA_STAGE19_PROFILE_METHOD,
+    JOLT_NOVA_STAGE19_RUNNER_VERSION, JOLT_NOVA_STAGE19_SCHEMA_VERSION,
 };
 #[cfg(all(feature = "nova", feature = "zk"))]
 pub use streaming::Stage18ZkEndToEndProof;
