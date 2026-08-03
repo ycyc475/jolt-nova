@@ -274,6 +274,8 @@ pub struct JoltVerifier<
     recursive_relation_capture: Option<RecursiveVerifierRelationCapture<F>>,
     #[cfg(all(feature = "nova", feature = "zk"))]
     recursive_blindfold_capture: Option<RecursiveBlindFoldRelationCapture<F, C, ProofTranscript>>,
+    #[cfg(all(feature = "nova", feature = "zk"))]
+    recursive_pcs_capture: Option<RecursivePcsRelationCapture<F, PCS, ProofTranscript>>,
 }
 
 #[cfg(feature = "nova")]
@@ -295,6 +297,20 @@ struct RecursiveBlindFoldRelationCapture<
     verifier_r1cs: VerifierR1CS<F>,
     eval_commitment_generators: Option<(C::G1, C::G1)>,
     transcript_before_blindfold: ProofTranscript,
+}
+
+#[cfg(all(feature = "nova", feature = "zk"))]
+struct RecursivePcsRelationCapture<
+    F: JoltField,
+    PCS: CommitmentScheme<Field = F>,
+    ProofTranscript: Transcript,
+> {
+    proof: PCS::Proof,
+    verifier_setup: PCS::VerifierSetup,
+    transcript_before_pcs: ProofTranscript,
+    opening_point: Vec<F::Challenge>,
+    opening: F,
+    commitment: PCS::Commitment,
 }
 
 #[derive(Clone, Debug)]
@@ -452,6 +468,8 @@ impl<
             recursive_relation_capture: None,
             #[cfg(all(feature = "nova", feature = "zk"))]
             recursive_blindfold_capture: None,
+            #[cfg(all(feature = "nova", feature = "zk"))]
+            recursive_pcs_capture: None,
         })
     }
 
@@ -2550,6 +2568,15 @@ impl<
 
         let zk_mode = self.opening_accumulator.zk_mode;
         if zk_mode {
+            #[cfg(all(feature = "nova", feature = "zk"))]
+            let recursive_pcs_capture = RecursivePcsRelationCapture {
+                proof: self.proof.joint_opening_proof.clone(),
+                verifier_setup: self.preprocessing.generators.clone(),
+                transcript_before_pcs: self.transcript.clone(),
+                opening_point: opening_point.r.clone(),
+                opening: F::zero(),
+                commitment: joint_commitment.clone(),
+            };
             PCS::verify(
                 &self.proof.joint_opening_proof,
                 &self.preprocessing.generators,
@@ -2558,6 +2585,10 @@ impl<
                 &F::zero(),
                 &joint_commitment,
             )?;
+            #[cfg(all(feature = "nova", feature = "zk"))]
+            {
+                self.recursive_pcs_capture = Some(recursive_pcs_capture);
+            }
 
             #[cfg(feature = "zk")]
             {
@@ -2723,6 +2754,24 @@ where
         ),
         ProofVerifyError,
     > {
+        let (verified, artifacts) = self.verify_with_recursive_zk_complete_artifacts()?;
+        let (blindfold, _deferred_pcs_opening) = artifacts.into_parts();
+        Ok((verified, blindfold))
+    }
+
+    /// Runs the production ZK verifier and exports both typed cryptographic
+    /// obligations needed by Stage 18: the recursive BlindFold relation and
+    /// the exact PCS equation verified in the same transcript.  The caller
+    /// cannot inject either object or pair artifacts from separate proofs.
+    pub fn verify_with_recursive_zk_complete_artifacts(
+        self,
+    ) -> Result<
+        (
+            Self,
+            crate::zkvm::block::RecursiveJoltZkVerifiedArtifacts<C, PCS>,
+        ),
+        ProofVerifyError,
+    > {
         let receipt = self.proof.lookup_receipt_candidate(
             &self.program_io,
             self.preprocessing.shared.digest(),
@@ -2746,7 +2795,30 @@ where
             jolt_statement_id,
         )
         .map_err(|error| ProofVerifyError::BlindFoldError(error))?;
-        Ok((verified, artifact))
+        let pcs_capture = verified
+            .recursive_pcs_capture
+            .take()
+            .ok_or(ProofVerifyError::InternalError)?;
+        let mut transcript_binding = pcs_capture.transcript_before_pcs.state.to_vec();
+        transcript_binding
+            .extend_from_slice(&(pcs_capture.transcript_before_pcs.n_rounds as u64).to_le_bytes());
+        let deferred_pcs_opening = crate::zkvm::block::RecursiveDeferredPcsOpening::new(
+            pcs_capture.proof,
+            pcs_capture.verifier_setup,
+            pcs_capture.transcript_before_pcs,
+            pcs_capture.opening_point,
+            pcs_capture.opening,
+            pcs_capture.commitment,
+            &transcript_binding,
+        );
+        Ok((
+            verified,
+            crate::zkvm::block::RecursiveJoltZkVerifiedArtifacts::new(
+                artifact,
+                deferred_pcs_opening,
+                receipt,
+            ),
+        ))
     }
 }
 

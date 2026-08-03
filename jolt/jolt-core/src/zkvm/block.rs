@@ -46,6 +46,8 @@ pub use recursive_verifier::{
 };
 #[cfg(all(feature = "nova", feature = "zk"))]
 mod recursive_zk_verifier;
+#[cfg(feature = "nova")]
+mod streaming;
 #[cfg(all(feature = "nova", not(feature = "zk")))]
 pub use recursive_verifier_circuit::RecursiveJoltVerifierSpartanProof;
 #[cfg(all(feature = "nova", not(feature = "zk")))]
@@ -61,6 +63,14 @@ pub use recursive_zk_verifier::{
     RecursiveBlindFoldStatement, RecursiveBlindFoldVerifierCircuit,
     RecursiveBlindFoldVerifierProverParameters, RecursiveBlindFoldVerifierVerificationKey,
     RecursiveJoltZkCompleteFinalAcceptance, RecursiveJoltZkRecursiveFinalAcceptance,
+    RecursiveJoltZkVerifiedArtifacts,
+};
+#[cfg(all(feature = "nova", feature = "zk"))]
+pub use streaming::Stage18ZkEndToEndProof;
+#[cfg(feature = "nova")]
+pub use streaming::{
+    Stage18BlockProfile, Stage18Error, Stage18RelationProfile, Stage18ReleaseParameters,
+    Stage18StreamingMetrics, Stage18StreamingNovaProof, JOLT_NOVA_STAGE18_VERSION,
 };
 
 use crate::{

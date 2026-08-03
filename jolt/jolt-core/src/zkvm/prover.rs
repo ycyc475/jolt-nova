@@ -3976,7 +3976,7 @@ mod tests {
         program.build(guest_target.to_str().unwrap());
         let inputs = postcard::to_stdvec(&32u32).unwrap();
         let (bytecode, init_memory_state, _, e_entry) = program.decode();
-        let (_, _, _, io_device) = program.trace(&inputs, &[], &[]);
+        let (lazy_trace, _, _, io_device) = program.trace(&inputs, &[], &[]);
         let (shared_preprocessing, _program_data) = test_shared_preprocessing(
             bytecode,
             init_memory_state,
@@ -4006,20 +4006,99 @@ mod tests {
         let verifier =
             RV64IMACVerifier::new(&verifier_preprocessing, proof, public_io, None, debug_info)
                 .expect("ZK verifier construction must succeed");
-        let (_verified, artifact) = verifier
-            .verify_with_recursive_zk_relation_artifact()
-            .expect("real ZK Jolt verification must emit a Stage-17 artifact");
-        let statement = artifact.statement();
+        let (_verified, artifacts) = verifier
+            .verify_with_recursive_zk_complete_artifacts()
+            .expect("real ZK Jolt verification must emit complete Stage-18 artifacts");
+        let receipt = artifacts.verified_jolt_receipt().clone();
+        let statement = artifacts.statement();
         assert_ne!(statement.object_id, [0; 32]);
         assert_ne!(statement.deferred_group_id, [0; 32]);
         assert_ne!(statement.jolt_statement_id, [0; 32]);
-        let (circuit, group_obligation) = artifact.into_parts();
-        circuit
-            .test_constraints_are_satisfied()
-            .expect("real ZK Jolt BlindFold scalar relation must satisfy Nova constraints");
-        group_obligation
-            .verify()
-            .expect("real ZK Jolt BlindFold group obligation must verify");
+        assert_eq!(
+            receipt.recursive_execution_statement_id(),
+            statement.jolt_statement_id
+        );
+
+        let parameters =
+            crate::zkvm::block::Stage18ReleaseParameters::production(1 << 16, statement.shape_id)
+                .unwrap();
+        let pipeline = crate::zkvm::block::BlockProofPipeline::<
+            _,
+            Fr,
+            crate::zkvm::block::NovaFoldingBackend,
+        >::with_backend_and_verified_jolt_lookup_receipt(
+            receipt.digest(),
+            crate::zkvm::block::NovaFoldingBackend::new(parameters.nova_config().clone()),
+            receipt.clone(),
+        );
+        let streaming_execution = pipeline
+            .prove_streaming_blocks_with_final_proof(
+                prover_preprocessing
+                    .materialized_program()
+                    .bytecode
+                    .as_ref(),
+                lazy_trace.iter_blocks(parameters.block_target_size()),
+                &parameters,
+            )
+            .expect("real trace must stream into a Nova/Spartan execution proof");
+        let (mut end_to_end, verification_key, baseline) =
+            crate::zkvm::block::Stage18ZkEndToEndProof::<
+                Bn254Curve,
+                DoryCommitmentScheme,
+                [u8; 32],
+            >::prove_from_verified_artifacts(streaming_execution, artifacts, &parameters)
+            .expect("real Jolt artifacts must form a complete Stage-18 proof");
+        end_to_end
+            .verify(&parameters, &receipt, &verification_key)
+            .expect("complete Stage-18 proof must verify");
+        assert!(baseline.proof_bytes > 0);
+        assert_ne!(end_to_end.deferred_pcs_id(), [0; 32]);
+        assert_ne!(end_to_end.linkage_digest(), [0; 32]);
+
+        let wrong_shape = crate::zkvm::block::Stage18ReleaseParameters::production(
+            parameters.block_target_size(),
+            [0x55; 32],
+        )
+        .unwrap();
+        assert!(end_to_end
+            .verify(&wrong_shape, &receipt, &verification_key)
+            .is_err());
+
+        let wrong_receipt =
+            crate::zkvm::proof_serialization::VerifiedJoltLookupProofReceipt::new_zk_for_test(
+                0xa7,
+                receipt.trace_length(),
+            );
+        assert!(end_to_end
+            .verify(&parameters, &wrong_receipt, &verification_key)
+            .is_err());
+
+        end_to_end.toggle_recursive_transcript_for_test();
+        assert!(end_to_end
+            .verify(&parameters, &receipt, &verification_key)
+            .is_err());
+        end_to_end.toggle_recursive_transcript_for_test();
+
+        end_to_end.toggle_deferred_pcs_id_for_test();
+        assert!(end_to_end
+            .verify(&parameters, &receipt, &verification_key)
+            .is_err());
+        end_to_end.toggle_deferred_pcs_id_for_test();
+
+        end_to_end.toggle_recursive_proof_for_test();
+        assert!(end_to_end
+            .verify(&parameters, &receipt, &verification_key)
+            .is_err());
+        end_to_end.toggle_recursive_proof_for_test();
+
+        end_to_end.toggle_linkage_digest_for_test();
+        assert!(end_to_end
+            .verify(&parameters, &receipt, &verification_key)
+            .is_err());
+        end_to_end.toggle_linkage_digest_for_test();
+        end_to_end
+            .verify(&parameters, &receipt, &verification_key)
+            .expect("restored Stage-18 proof must still verify");
     }
 
     #[cfg(feature = "zk")]

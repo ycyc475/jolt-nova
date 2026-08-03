@@ -54,6 +54,12 @@ jobs:
       - name: Test clear/ZK execution statement equivalence
         run: cargo test --locked -p jolt-core --lib --no-default-features --features "nova zk" clear_and_zk_receipts_share_the_same_recursive_execution_statement
 
+      - name: Test Stage-18 bounded streaming and attack matrix
+        run: cargo test --locked -p jolt-core --lib --no-default-features --features "nova zk" stage18_ -- --test-threads=1
+
+      - name: Compile Stage-18 real Jolt ZK integration
+        run: cargo test --locked -p jolt-core --lib --no-default-features --features "host nova zk" fib_e2e_dory_zk_recursive_blindfold --no-run
+
       - name: Test real ELF trace bundle to Nova and Spartan
         run: |
           set -o pipefail

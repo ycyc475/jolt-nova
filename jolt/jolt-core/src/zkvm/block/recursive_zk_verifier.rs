@@ -35,6 +35,7 @@ use crate::{
     },
     transcripts::{PoseidonTranscript, Transcript},
     utils::math::Math,
+    zkvm::proof_serialization::VerifiedJoltLookupProofReceipt,
 };
 
 use super::{
@@ -387,6 +388,59 @@ impl<C: JoltCurve<F = Fr>> RecursiveBlindFoldGroupObligation<C> {
 pub struct RecursiveBlindFoldRelationArtifact<C: JoltCurve<F = Fr>> {
     circuit: RecursiveBlindFoldVerifierCircuit,
     group_obligation: RecursiveBlindFoldGroupObligation<C>,
+}
+
+/// Lossless Stage-18 export from one successful production ZK Jolt verifier.
+///
+/// Both components originate from the same verifier invocation: the
+/// BlindFold scalar/group relation and the exact PCS equation checked before
+/// BlindFold.  Keeping them in one typed object prevents a caller from pairing
+/// a recursive verifier artifact with an unrelated Dory opening.
+pub struct RecursiveJoltZkVerifiedArtifacts<C: JoltCurve<F = Fr>, PCS: CommitmentScheme<Field = Fr>>
+{
+    blindfold: RecursiveBlindFoldRelationArtifact<C>,
+    deferred_pcs_opening: RecursiveDeferredPcsOpening<Fr, PCS, PoseidonTranscript>,
+    verified_jolt_receipt: VerifiedJoltLookupProofReceipt,
+}
+
+impl<C, PCS> RecursiveJoltZkVerifiedArtifacts<C, PCS>
+where
+    C: JoltCurve<F = Fr>,
+    PCS: CommitmentScheme<Field = Fr>,
+{
+    pub(crate) fn new(
+        blindfold: RecursiveBlindFoldRelationArtifact<C>,
+        deferred_pcs_opening: RecursiveDeferredPcsOpening<Fr, PCS, PoseidonTranscript>,
+        verified_jolt_receipt: VerifiedJoltLookupProofReceipt,
+    ) -> Self {
+        Self {
+            blindfold,
+            deferred_pcs_opening,
+            verified_jolt_receipt,
+        }
+    }
+
+    pub fn statement(&self) -> RecursiveBlindFoldStatement {
+        self.blindfold.statement()
+    }
+
+    pub fn deferred_pcs_id(&self) -> [u8; 32] {
+        self.deferred_pcs_opening.obligation_id()
+    }
+
+    /// Exact receipt emitted by the same successful verifier invocation.
+    pub fn verified_jolt_receipt(&self) -> &VerifiedJoltLookupProofReceipt {
+        &self.verified_jolt_receipt
+    }
+
+    pub fn into_parts(
+        self,
+    ) -> (
+        RecursiveBlindFoldRelationArtifact<C>,
+        RecursiveDeferredPcsOpening<Fr, PCS, PoseidonTranscript>,
+    ) {
+        (self.blindfold, self.deferred_pcs_opening)
+    }
 }
 
 impl<C: JoltCurve<F = Fr>> RecursiveBlindFoldRelationArtifact<C> {
