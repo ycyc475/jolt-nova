@@ -14,7 +14,7 @@ use sha3::{Digest, Sha3_256};
 use crate::{
     field::JoltField,
     poly::commitment::commitment_scheme::CommitmentScheme,
-    subprotocols::blindfold::{BlindFoldWitness, VerifierR1CS},
+    subprotocols::blindfold::VerifierR1CS,
     transcripts::{PoseidonTranscript, Transcript},
 };
 
@@ -27,8 +27,10 @@ use super::{
     nova_hash_bytes_to_scalar, nova_scalar_to_storage, NovaPrimaryEngine, NovaPrimarySpartanSnark,
     NovaScalar, NovaSecondaryEngine, NovaSecondarySpartanSnark,
     RecursiveClearSumcheckStageArtifact, RecursiveClearSumcheckStageWitness,
-    RecursiveDeferredPcsOpening, RecursiveJoltFieldElement,
+    RecursiveDeferredPcsOpening, RecursiveJoltFieldElement, RecursiveJoltVerifierRelationArtifact,
 };
+#[cfg(test)]
+use crate::subprotocols::blindfold::BlindFoldWitness;
 
 const RECURSIVE_VERIFIER_Z_ARITY: usize = 8;
 
@@ -235,7 +237,8 @@ impl RecursiveJoltVerifierCircuit {
         }
     }
 
-    pub fn new(
+    #[cfg(test)]
+    pub(crate) fn new(
         object_id: [u8; 32],
         deferred_pcs_id: [u8; 32],
         initial_transcript_state: RecursiveJoltFieldElement,
@@ -270,10 +273,28 @@ impl RecursiveJoltVerifierCircuit {
         })
     }
 
-    /// Production adapter from verifier-observed native artifacts. Every stage
-    /// keeps its exact transcript checkpoint, including the non-sumcheck
-    /// transcript activity that occurred between Jolt stages.
-    pub fn from_verified_artifacts(
+    /// Production adapter from the complete artifact emitted by
+    /// `JoltVerifier::verify_with_recursive_relation_artifact`. There is no
+    /// public entry point for a caller-supplied verifier witness.
+    pub fn from_verified_relation(
+        object_id: [u8; 32],
+        deferred_pcs_id: [u8; 32],
+        artifact: RecursiveJoltVerifierRelationArtifact,
+    ) -> Result<Self, &'static str> {
+        let (artifacts, verifier_r1cs, verifier_witness) = artifact.into_circuit_parts();
+        verifier_r1cs
+            .check_satisfaction(&verifier_witness)
+            .map_err(|_| "recursive Jolt verifier artifact is not satisfied")?;
+        Self::from_relation_parts(
+            object_id,
+            deferred_pcs_id,
+            artifacts,
+            verifier_r1cs,
+            verifier_witness,
+        )
+    }
+
+    fn from_relation_parts(
         object_id: [u8; 32],
         deferred_pcs_id: [u8; 32],
         artifacts: Vec<RecursiveClearSumcheckStageArtifact>,
@@ -318,10 +339,28 @@ impl RecursiveJoltVerifierCircuit {
         })
     }
 
+    #[cfg(test)]
+    pub(crate) fn from_verified_artifacts(
+        object_id: [u8; 32],
+        deferred_pcs_id: [u8; 32],
+        artifacts: Vec<RecursiveClearSumcheckStageArtifact>,
+        verifier_r1cs: VerifierR1CS<ark_bn254::Fr>,
+        verifier_witness: Vec<ark_bn254::Fr>,
+    ) -> Result<Self, &'static str> {
+        Self::from_relation_parts(
+            object_id,
+            deferred_pcs_id,
+            artifacts,
+            verifier_r1cs,
+            verifier_witness,
+        )
+    }
+
     /// Constructs the recursive circuit directly from Jolt's native
     /// BlindFold verifier-relation witness layout. This adapter preserves the
     /// exact Lasso/register/RAM/CPU endpoint variable ordering.
-    pub fn from_blindfold_witness(
+    #[cfg(test)]
+    pub(crate) fn from_blindfold_witness(
         object_id: [u8; 32],
         deferred_pcs_id: [u8; 32],
         initial_transcript_state: RecursiveJoltFieldElement,
@@ -351,6 +390,36 @@ impl RecursiveJoltVerifierCircuit {
             initial_transcript_round: self.initial_transcript_round,
             transcript_checkpoint_root: Self::checkpoint_root(&self.stage_transcript_checkpoints),
             shape_id: self.shape_id(),
+        }
+    }
+
+    /// Test-only full synthesis gate used by real-proof integration tests.
+    #[cfg(test)]
+    pub(crate) fn test_constraints_are_satisfied(&self) -> Result<(), String> {
+        use nova_snark::frontend::test_cs::TestConstraintSystem;
+
+        let mut cs = TestConstraintSystem::<NovaScalar>::new();
+        let z = self
+            .initial_z()
+            .map_err(|error| format!("failed to derive recursive initial state: {error:?}"))?
+            .into_iter()
+            .enumerate()
+            .map(|(index, value)| {
+                AllocatedNum::alloc(cs.namespace(|| format!("real verifier z {index}")), || {
+                    Ok(value)
+                })
+                .map_err(|error| format!("failed to allocate recursive state: {error:?}"))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        self.synthesize(&mut cs, &z)
+            .map_err(|error| format!("recursive verifier synthesis failed: {error:?}"))?;
+        if cs.is_satisfied() {
+            Ok(())
+        } else {
+            Err(format!(
+                "recursive verifier constraints are unsatisfied: {:?}",
+                cs.which_is_unsatisfied()
+            ))
         }
     }
 
@@ -872,6 +941,7 @@ mod tests {
             },
             output_claims_opening_ids: Vec::new(),
             opening_aliases: Default::default(),
+            opening_vars: Default::default(),
         };
         let verifier_witness = vec![
             Fr::from(1u64),
@@ -973,6 +1043,7 @@ mod tests {
             },
             output_claims_opening_ids: Vec::new(),
             opening_aliases: Default::default(),
+            opening_vars: Default::default(),
         };
         RecursiveJoltVerifierCircuit::from_verified_artifacts(
             [3u8; 32],
@@ -1024,7 +1095,7 @@ mod tests {
         assert!(cs
             .which_is_unsatisfied()
             .unwrap_or_default()
-            .contains("bind sumcheck round 0 coefficient 0"));
+            .contains("bind sumcheck artifact round 0 to grid row 0 coefficient 0"));
     }
 
     #[test]

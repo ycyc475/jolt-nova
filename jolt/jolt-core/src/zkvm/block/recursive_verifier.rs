@@ -16,6 +16,8 @@ use crate::{
     curve::JoltCurve,
     field::JoltField,
     poly::commitment::commitment_scheme::CommitmentScheme,
+    poly::opening_proof::{OpeningId, SumcheckId},
+    subprotocols::blindfold::VerifierR1CS,
     subprotocols::sumcheck::{ClearSumcheckProof, SumcheckInstanceProof},
     transcripts::{PoseidonTranscript, Transcript},
     zkvm::{proof_serialization::JoltProof, verifier::JoltVerifierPreprocessing},
@@ -23,9 +25,7 @@ use crate::{
 #[cfg(feature = "zk")]
 use crate::{
     poly::commitment::pedersen::PedersenGenerators,
-    subprotocols::blindfold::{
-        BlindFoldProof, BlindFoldVerifier, BlindFoldVerifierInput, VerifierR1CS,
-    },
+    subprotocols::blindfold::{BlindFoldProof, BlindFoldVerifier, BlindFoldVerifierInput},
 };
 
 /// One lossless clear-sumcheck round.  The compressed polynomial omits its
@@ -94,6 +94,182 @@ pub struct RecursiveClearSumcheckStageArtifact {
     pub transcript_state_before: RecursiveJoltFieldElement,
     pub transcript_round_before: u64,
     pub witness: RecursiveClearSumcheckStageWitness,
+}
+
+/// Native Jolt verifier relation represented by one opening variable.
+///
+/// An opening can participate in its endpoint relation and in the final PCS
+/// reduction simultaneously, so bindings retain a set of relation families.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum RecursiveVerifierRelationKind {
+    Lasso,
+    Register,
+    Ram,
+    Cpu,
+    Pcs,
+}
+
+/// Auditable mapping from a native Jolt opening identifier to the exact
+/// verifier-R1CS variable that constrains it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RecursiveVerifierOpeningBinding {
+    pub opening_id: OpeningId,
+    pub canonical_opening_id: OpeningId,
+    pub variable_index: usize,
+    pub relations: Vec<RecursiveVerifierRelationKind>,
+}
+
+/// Production artifact emitted only by a successful native clear-Jolt
+/// verification. It contains the complete verifier relation and its assigned
+/// witness; callers cannot substitute a separately constructed R1CS witness.
+#[derive(Clone, Debug)]
+pub struct RecursiveJoltVerifierRelationArtifact {
+    sumcheck_artifacts: Vec<RecursiveClearSumcheckStageArtifact>,
+    verifier_r1cs: VerifierR1CS<ark_bn254::Fr>,
+    verifier_witness: Vec<ark_bn254::Fr>,
+    opening_bindings: Vec<RecursiveVerifierOpeningBinding>,
+}
+
+impl RecursiveJoltVerifierRelationArtifact {
+    fn endpoint_relation(opening_id: OpeningId) -> RecursiveVerifierRelationKind {
+        let sumcheck_id = match opening_id {
+            OpeningId::Polynomial(_, sumcheck_id)
+            | OpeningId::TrustedAdvice(sumcheck_id)
+            | OpeningId::UntrustedAdvice(sumcheck_id) => sumcheck_id,
+        };
+        match sumcheck_id {
+            SumcheckId::RegistersClaimReduction
+            | SumcheckId::RegistersReadWriteChecking
+            | SumcheckId::RegistersValEvaluation => RecursiveVerifierRelationKind::Register,
+            SumcheckId::RamReadWriteChecking
+            | SumcheckId::RamRafEvaluation
+            | SumcheckId::RamOutputCheck
+            | SumcheckId::RamValCheck
+            | SumcheckId::RamRaClaimReduction
+            | SumcheckId::RamHammingBooleanity
+            | SumcheckId::RamRaVirtualization
+            | SumcheckId::AdviceClaimReductionCyclePhase
+            | SumcheckId::AdviceClaimReduction
+            | SumcheckId::ProgramImageClaimReductionCyclePhase
+            | SumcheckId::ProgramImageClaimReduction => RecursiveVerifierRelationKind::Ram,
+            SumcheckId::SpartanOuter
+            | SumcheckId::SpartanProductVirtualization
+            | SumcheckId::SpartanShift
+            | SumcheckId::InstructionInputVirtualization => RecursiveVerifierRelationKind::Cpu,
+            SumcheckId::InstructionClaimReduction
+            | SumcheckId::InstructionReadRaf
+            | SumcheckId::InstructionRaVirtualization
+            | SumcheckId::BytecodeReadRafAddressPhase
+            | SumcheckId::BytecodeReadRaf
+            | SumcheckId::BooleanityAddressPhase
+            | SumcheckId::Booleanity
+            | SumcheckId::BytecodeClaimReductionCyclePhase
+            | SumcheckId::BytecodeClaimReduction
+            | SumcheckId::IncClaimReduction
+            | SumcheckId::HammingWeightClaimReduction => RecursiveVerifierRelationKind::Lasso,
+        }
+    }
+
+    pub(crate) fn from_verified_parts(
+        sumcheck_artifacts: Vec<RecursiveClearSumcheckStageArtifact>,
+        verifier_r1cs: VerifierR1CS<ark_bn254::Fr>,
+        verifier_witness: Vec<ark_bn254::Fr>,
+        pcs_opening_ids: &[OpeningId],
+    ) -> Result<Self, &'static str> {
+        use std::collections::BTreeSet;
+
+        if sumcheck_artifacts.len() != 8 {
+            return Err("recursive Jolt relation requires all eight sumcheck stages");
+        }
+        if verifier_witness.len() != verifier_r1cs.num_vars {
+            return Err("recursive Jolt verifier witness/R1CS dimension mismatch");
+        }
+        verifier_r1cs
+            .check_satisfaction(&verifier_witness)
+            .map_err(|_| "native Jolt verifier relation is not satisfied")?;
+
+        let pcs_ids = pcs_opening_ids
+            .iter()
+            .map(|id| verifier_r1cs.resolve_alias(*id))
+            .collect::<BTreeSet<_>>();
+        let mut opening_bindings = verifier_r1cs
+            .opening_vars
+            .iter()
+            .map(|(opening_id, variable_index)| {
+                let canonical_opening_id = verifier_r1cs.resolve_alias(*opening_id);
+                let mut relations = vec![Self::endpoint_relation(*opening_id)];
+                if pcs_ids.contains(&canonical_opening_id) {
+                    relations.push(RecursiveVerifierRelationKind::Pcs);
+                }
+                relations.sort();
+                relations.dedup();
+                RecursiveVerifierOpeningBinding {
+                    opening_id: *opening_id,
+                    canonical_opening_id,
+                    variable_index: *variable_index,
+                    relations,
+                }
+            })
+            .collect::<Vec<_>>();
+        opening_bindings.sort_by_key(|binding| (binding.variable_index, binding.opening_id));
+
+        let covered = opening_bindings
+            .iter()
+            .flat_map(|binding| binding.relations.iter().copied())
+            .collect::<BTreeSet<_>>();
+        if ![
+            RecursiveVerifierRelationKind::Lasso,
+            RecursiveVerifierRelationKind::Register,
+            RecursiveVerifierRelationKind::Ram,
+            RecursiveVerifierRelationKind::Cpu,
+            RecursiveVerifierRelationKind::Pcs,
+        ]
+        .into_iter()
+        .all(|kind| covered.contains(&kind))
+        {
+            return Err("recursive Jolt verifier relation is missing an endpoint family");
+        }
+
+        Ok(Self {
+            sumcheck_artifacts,
+            verifier_r1cs,
+            verifier_witness,
+            opening_bindings,
+        })
+    }
+
+    pub fn sumcheck_artifacts(&self) -> &[RecursiveClearSumcheckStageArtifact] {
+        &self.sumcheck_artifacts
+    }
+
+    pub fn verifier_r1cs(&self) -> &VerifierR1CS<ark_bn254::Fr> {
+        &self.verifier_r1cs
+    }
+
+    pub fn opening_bindings(&self) -> &[RecursiveVerifierOpeningBinding] {
+        &self.opening_bindings
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_tamper_verifier_witness(&mut self) {
+        if self.verifier_witness.len() > 1 {
+            self.verifier_witness[1] += ark_bn254::Fr::from(1u64);
+        }
+    }
+
+    pub(crate) fn into_circuit_parts(
+        self,
+    ) -> (
+        Vec<RecursiveClearSumcheckStageArtifact>,
+        VerifierR1CS<ark_bn254::Fr>,
+        Vec<ark_bn254::Fr>,
+    ) {
+        (
+            self.sumcheck_artifacts,
+            self.verifier_r1cs,
+            self.verifier_witness,
+        )
+    }
 }
 
 impl RecursiveClearSumcheckStageArtifact {

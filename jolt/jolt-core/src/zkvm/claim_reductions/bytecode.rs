@@ -7,14 +7,14 @@ use crate::field::JoltField;
 use crate::poly::commitment::dory::{DoryGlobals, DoryLayout};
 use crate::poly::eq_poly::EqPolynomial;
 use crate::poly::multilinear_polynomial::{MultilinearPolynomial, PolynomialBinding};
-#[cfg(feature = "zk")]
+#[cfg(any(feature = "zk", feature = "nova"))]
 use crate::poly::opening_proof::OpeningId;
 use crate::poly::opening_proof::{
     AbstractVerifierOpeningAccumulator, OpeningAccumulator, OpeningPoint, ProverOpeningAccumulator,
     SumcheckId, BIG_ENDIAN, LITTLE_ENDIAN,
 };
 use crate::poly::unipoly::UniPoly;
-#[cfg(feature = "zk")]
+#[cfg(any(feature = "zk", feature = "nova"))]
 use crate::subprotocols::blindfold::{InputClaimConstraint, OutputClaimConstraint, ValueSource};
 use crate::subprotocols::sumcheck_prover::SumcheckInstanceProver;
 use crate::subprotocols::sumcheck_verifier::{SumcheckInstanceParams, SumcheckInstanceVerifier};
@@ -155,8 +155,7 @@ impl<F: JoltField> SumcheckInstanceParams<F> for BytecodeClaimReductionParams<F>
     fn normalize_opening_point(&self, challenges: &[F::Challenge]) -> OpeningPoint<BIG_ENDIAN, F> {
         self.precommitted.normalize_opening_point(challenges)
     }
-
-    #[cfg(feature = "zk")]
+    #[cfg(any(feature = "zk", feature = "nova"))]
     fn input_claim_constraint(&self) -> InputClaimConstraint {
         match self.precommitted.phase {
             PrecommittedPhase::CycleVariables => {
@@ -176,16 +175,14 @@ impl<F: JoltField> SumcheckInstanceParams<F> for BytecodeClaimReductionParams<F>
             )),
         }
     }
-
-    #[cfg(feature = "zk")]
+    #[cfg(any(feature = "zk", feature = "nova"))]
     fn input_constraint_challenge_values(&self, _: &dyn OpeningAccumulator<F>) -> Vec<F> {
         match self.precommitted.phase {
             PrecommittedPhase::CycleVariables => self.eta_powers.to_vec(),
             PrecommittedPhase::AddressVariables => Vec::new(),
         }
     }
-
-    #[cfg(feature = "zk")]
+    #[cfg(any(feature = "zk", feature = "nova"))]
     fn output_claim_constraint(&self) -> Option<OutputClaimConstraint> {
         match self.precommitted.phase {
             PrecommittedPhase::CycleVariables => {
@@ -200,8 +197,7 @@ impl<F: JoltField> SumcheckInstanceParams<F> for BytecodeClaimReductionParams<F>
             PrecommittedPhase::AddressVariables => self.final_bytecode_output_claim_constraint(),
         }
     }
-
-    #[cfg(feature = "zk")]
+    #[cfg(any(feature = "zk", feature = "nova"))]
     fn output_constraint_challenge_values(&self, sumcheck_challenges: &[F::Challenge]) -> Vec<F> {
         match self.precommitted.phase {
             PrecommittedPhase::CycleVariables
@@ -217,7 +213,7 @@ impl<F: JoltField> SumcheckInstanceParams<F> for BytecodeClaimReductionParams<F>
 }
 
 impl<F: JoltField> BytecodeClaimReductionParams<F> {
-    #[cfg(feature = "zk")]
+    #[cfg(any(feature = "zk", feature = "nova"))]
     fn final_bytecode_output_claim_constraint(&self) -> Option<OutputClaimConstraint> {
         let terms = (0..self.bytecode_chunk_count)
             .map(|chunk_idx| {
@@ -246,7 +242,7 @@ impl<F: JoltField> BytecodeClaimReductionParams<F> {
         eq_combined * scale
     }
 
-    #[cfg(feature = "zk")]
+    #[cfg(any(feature = "zk", feature = "nova"))]
     fn final_bytecode_output_weights(&self, sumcheck_challenges: &[F::Challenge]) -> Vec<F> {
         let output_scale = self.final_bytecode_output_scale(sumcheck_challenges);
         self.chunk_rbc_weights

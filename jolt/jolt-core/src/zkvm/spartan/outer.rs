@@ -13,7 +13,7 @@ use crate::poly::eq_poly::EqPolynomial;
 use crate::poly::lagrange_poly::LagrangePolynomial;
 use crate::poly::multilinear_polynomial::{BindingOrder, PolynomialBinding};
 use crate::poly::multiquadratic_poly::MultiquadraticPolynomial;
-#[cfg(feature = "zk")]
+#[cfg(any(feature = "zk", feature = "nova"))]
 use crate::poly::opening_proof::OpeningId;
 use crate::poly::opening_proof::{
     AbstractVerifierOpeningAccumulator, OpeningAccumulator, OpeningPoint, ProverOpeningAccumulator,
@@ -21,7 +21,7 @@ use crate::poly::opening_proof::{
 };
 use crate::poly::split_eq_poly::GruenSplitEqPolynomial;
 use crate::poly::unipoly::UniPoly;
-#[cfg(feature = "zk")]
+#[cfg(any(feature = "zk", feature = "nova"))]
 use crate::subprotocols::blindfold::{
     InputClaimConstraint, OutputClaimConstraint, ProductTerm, ValueSource,
 };
@@ -40,9 +40,9 @@ use crate::utils::profiling::print_data_structure_heap_usage;
 use crate::utils::thread::unsafe_allocate_zero_vec;
 use crate::zkvm::bytecode::BytecodePreprocessing;
 use crate::zkvm::r1cs::constraints::OUTER_FIRST_ROUND_POLY_DEGREE_BOUND;
-#[cfg(feature = "zk")]
+#[cfg(any(feature = "zk", feature = "nova"))]
 use crate::zkvm::r1cs::constraints::{R1CS_CONSTRAINTS_FIRST_GROUP, R1CS_CONSTRAINTS_SECOND_GROUP};
-#[cfg(feature = "zk")]
+#[cfg(any(feature = "zk", feature = "nova"))]
 use crate::zkvm::r1cs::inputs::NUM_R1CS_INPUTS;
 use crate::zkvm::r1cs::key::UniformSpartanKey;
 use crate::zkvm::r1cs::{
@@ -122,25 +122,21 @@ impl<F: JoltField> SumcheckInstanceParams<F> for OuterUniSkipParams<F> {
     ) -> OpeningPoint<BIG_ENDIAN, F> {
         challenges.to_vec().into()
     }
-
-    #[cfg(feature = "zk")]
+    #[cfg(any(feature = "zk", feature = "nova"))]
     fn input_claim_constraint(&self) -> InputClaimConstraint {
         InputClaimConstraint::default()
     }
-
-    #[cfg(feature = "zk")]
+    #[cfg(any(feature = "zk", feature = "nova"))]
     fn input_constraint_challenge_values(&self, _: &dyn OpeningAccumulator<F>) -> Vec<F> {
         Vec::new()
     }
-
-    #[cfg(feature = "zk")]
+    #[cfg(any(feature = "zk", feature = "nova"))]
     fn output_claim_constraint(&self) -> Option<OutputClaimConstraint> {
         // Uni-skip output = evaluation at challenge r0, stored as UnivariateSkip opening
         let opening = OpeningId::virt(VirtualPolynomial::UnivariateSkip, SumcheckId::SpartanOuter);
         Some(OutputClaimConstraint::direct(opening))
     }
-
-    #[cfg(feature = "zk")]
+    #[cfg(any(feature = "zk", feature = "nova"))]
     fn output_constraint_challenge_values(&self, _sumcheck_challenges: &[F::Challenge]) -> Vec<F> {
         Vec::new()
     }
@@ -412,19 +408,16 @@ impl<F: JoltField> SumcheckInstanceParams<F> for OuterRemainingSumcheckParams<F>
         );
         uni_skip_claim
     }
-
-    #[cfg(feature = "zk")]
+    #[cfg(any(feature = "zk", feature = "nova"))]
     fn input_claim_constraint(&self) -> InputClaimConstraint {
         let opening = OpeningId::virt(VirtualPolynomial::UnivariateSkip, SumcheckId::SpartanOuter);
         InputClaimConstraint::direct(opening)
     }
-
-    #[cfg(feature = "zk")]
+    #[cfg(any(feature = "zk", feature = "nova"))]
     fn input_constraint_challenge_values(&self, _: &dyn OpeningAccumulator<F>) -> Vec<F> {
         Vec::new()
     }
-
-    #[cfg(feature = "zk")]
+    #[cfg(any(feature = "zk", feature = "nova"))]
     fn output_claim_constraint(&self) -> Option<OutputClaimConstraint> {
         // output = tau_kernel * Az * Bz
         // where Az = Σ_j az_coeff[j] * z[j] + az_const
@@ -523,8 +516,7 @@ impl<F: JoltField> SumcheckInstanceParams<F> for OuterRemainingSumcheckParams<F>
 
         Some(OutputClaimConstraint::sum_of_products(terms))
     }
-
-    #[cfg(feature = "zk")]
+    #[cfg(any(feature = "zk", feature = "nova"))]
     fn output_constraint_challenge_values(&self, sumcheck_challenges: &[F::Challenge]) -> Vec<F> {
         use std::collections::BTreeSet;
 
@@ -1028,23 +1020,19 @@ impl<F: JoltField> SumcheckInstanceParams<F> for OuterSharedState<F> {
     fn normalize_opening_point(&self, challenges: &[F::Challenge]) -> OpeningPoint<BIG_ENDIAN, F> {
         self.params.normalize_opening_point(challenges)
     }
-
-    #[cfg(feature = "zk")]
+    #[cfg(any(feature = "zk", feature = "nova"))]
     fn input_claim_constraint(&self) -> InputClaimConstraint {
         self.params.input_claim_constraint()
     }
-
-    #[cfg(feature = "zk")]
+    #[cfg(any(feature = "zk", feature = "nova"))]
     fn input_constraint_challenge_values(&self, accumulator: &dyn OpeningAccumulator<F>) -> Vec<F> {
         self.params.input_constraint_challenge_values(accumulator)
     }
-
-    #[cfg(feature = "zk")]
+    #[cfg(any(feature = "zk", feature = "nova"))]
     fn output_claim_constraint(&self) -> Option<OutputClaimConstraint> {
         self.params.output_claim_constraint()
     }
-
-    #[cfg(feature = "zk")]
+    #[cfg(any(feature = "zk", feature = "nova"))]
     fn output_constraint_challenge_values(&self, sumcheck_challenges: &[F::Challenge]) -> Vec<F> {
         self.params
             .output_constraint_challenge_values(sumcheck_challenges)

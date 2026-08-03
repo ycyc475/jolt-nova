@@ -1,7 +1,7 @@
 use crate::field::JoltField;
 use crate::poly::eq_poly::EqPolynomial;
 use crate::poly::multilinear_polynomial::{BindingOrder, MultilinearPolynomial, PolynomialBinding};
-#[cfg(feature = "zk")]
+#[cfg(any(feature = "zk", feature = "nova"))]
 use crate::poly::opening_proof::OpeningId;
 use crate::poly::opening_proof::{
     AbstractVerifierOpeningAccumulator, OpeningAccumulator, OpeningPoint, PolynomialId,
@@ -9,7 +9,7 @@ use crate::poly::opening_proof::{
 };
 use crate::poly::split_eq_poly::GruenSplitEqPolynomial;
 use crate::poly::unipoly::UniPoly;
-#[cfg(feature = "zk")]
+#[cfg(any(feature = "zk", feature = "nova"))]
 use crate::subprotocols::blindfold::{
     InputClaimConstraint, OutputClaimConstraint, ProductTerm, ValueSource,
 };
@@ -73,18 +73,15 @@ impl<F: JoltField> SumcheckInstanceParams<F> for HammingBooleanitySumcheckParams
     ) -> OpeningPoint<BIG_ENDIAN, F> {
         OpeningPoint::<LITTLE_ENDIAN, F>::new(challenges.to_vec()).match_endianness()
     }
-
-    #[cfg(feature = "zk")]
+    #[cfg(any(feature = "zk", feature = "nova"))]
     fn input_claim_constraint(&self) -> InputClaimConstraint {
         InputClaimConstraint::default()
     }
-
-    #[cfg(feature = "zk")]
+    #[cfg(any(feature = "zk", feature = "nova"))]
     fn input_constraint_challenge_values(&self, _: &dyn OpeningAccumulator<F>) -> Vec<F> {
         Vec::new()
     }
-
-    #[cfg(feature = "zk")]
+    #[cfg(any(feature = "zk", feature = "nova"))]
     fn output_claim_constraint(&self) -> Option<OutputClaimConstraint> {
         let h_opening = OpeningId::virt(
             VirtualPolynomial::RamHammingWeight,
@@ -107,8 +104,7 @@ impl<F: JoltField> SumcheckInstanceParams<F> for HammingBooleanitySumcheckParams
 
         Some(OutputClaimConstraint::sum_of_products(terms))
     }
-
-    #[cfg(feature = "zk")]
+    #[cfg(any(feature = "zk", feature = "nova"))]
     fn output_constraint_challenge_values(&self, sumcheck_challenges: &[F::Challenge]) -> Vec<F> {
         let r_cycle_final = self.normalize_opening_point(sumcheck_challenges);
 

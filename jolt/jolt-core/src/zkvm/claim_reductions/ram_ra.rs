@@ -44,9 +44,9 @@ use common::jolt_device::MemoryLayout;
 use rayon::prelude::*;
 use tracer::instruction::Cycle;
 
-#[cfg(feature = "zk")]
+#[cfg(any(feature = "zk", feature = "nova"))]
 use crate::poly::opening_proof::OpeningId;
-#[cfg(feature = "zk")]
+#[cfg(any(feature = "zk", feature = "nova"))]
 use crate::subprotocols::blindfold::{InputClaimConstraint, OutputClaimConstraint};
 
 use crate::{
@@ -674,8 +674,7 @@ impl<F: JoltField> SumcheckInstanceParams<F> for RaReductionParams<F> {
         let r_cycle_be: Vec<_> = sumcheck_challenges.iter().rev().copied().collect();
         OpeningPoint::<BIG_ENDIAN, F>::new([self.r_address.clone(), r_cycle_be].concat())
     }
-
-    #[cfg(feature = "zk")]
+    #[cfg(any(feature = "zk", feature = "nova"))]
     fn input_claim_constraint(&self) -> InputClaimConstraint {
         // input_claim = claim_raf + γ*claim_rw + γ²*claim_val
         InputClaimConstraint::weighted_openings(&[
@@ -684,20 +683,17 @@ impl<F: JoltField> SumcheckInstanceParams<F> for RaReductionParams<F> {
             OpeningId::virt(VirtualPolynomial::RamRa, SumcheckId::RamValCheck),
         ])
     }
-
-    #[cfg(feature = "zk")]
+    #[cfg(any(feature = "zk", feature = "nova"))]
     fn input_constraint_challenge_values(&self, _: &dyn OpeningAccumulator<F>) -> Vec<F> {
         vec![self.gamma, self.gamma_squared]
     }
-
-    #[cfg(feature = "zk")]
+    #[cfg(any(feature = "zk", feature = "nova"))]
     fn output_claim_constraint(&self) -> Option<OutputClaimConstraint> {
         Some(OutputClaimConstraint::all_weighted_openings(&[
             OpeningId::virt(VirtualPolynomial::RamRa, SumcheckId::RamRaClaimReduction),
         ]))
     }
-
-    #[cfg(feature = "zk")]
+    #[cfg(any(feature = "zk", feature = "nova"))]
     fn output_constraint_challenge_values(&self, sumcheck_challenges: &[F::Challenge]) -> Vec<F> {
         // Cycle-only reduction: address is fixed to `r_address`.
         let r_cycle_reduced: Vec<_> = sumcheck_challenges.iter().rev().copied().collect();

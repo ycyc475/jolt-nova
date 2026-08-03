@@ -131,6 +131,9 @@ pub struct VerifierR1CS<F: JoltField> {
     pub output_claims_opening_ids: Vec<OpeningId>,
     /// Alias map: aliased OpeningId → canonical OpeningId.
     pub opening_aliases: BTreeMap<OpeningId, OpeningId>,
+    /// Exact R1CS variable allocated to each opening. Alias keys point to the
+    /// same variable as their canonical opening.
+    pub opening_vars: BTreeMap<OpeningId, usize>,
 }
 
 impl<F: JoltField> VerifierR1CS<F> {
@@ -572,6 +575,11 @@ impl<F: JoltField> VerifierR1CSBuilder<F> {
             }
         }
 
+        let opening_vars = global_opening_vars
+            .into_iter()
+            .map(|(opening_id, variable)| (opening_id, variable.index()))
+            .collect();
+
         VerifierR1CS {
             a,
             b,
@@ -585,6 +593,7 @@ impl<F: JoltField> VerifierR1CSBuilder<F> {
             hyrax,
             output_claims_opening_ids,
             opening_aliases: self.opening_aliases,
+            opening_vars,
         }
     }
 

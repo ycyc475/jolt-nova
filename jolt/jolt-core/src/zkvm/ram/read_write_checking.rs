@@ -8,10 +8,10 @@ use crate::poly::opening_proof::{
 };
 use crate::poly::split_eq_poly::GruenSplitEqPolynomial;
 
-#[cfg(feature = "zk")]
+#[cfg(any(feature = "zk", feature = "nova"))]
 use crate::poly::opening_proof::OpeningId;
 use crate::poly::unipoly::UniPoly;
-#[cfg(feature = "zk")]
+#[cfg(any(feature = "zk", feature = "nova"))]
 use crate::subprotocols::blindfold::{
     InputClaimConstraint, OutputClaimConstraint, ProductTerm, ValueSource,
 };
@@ -153,21 +153,18 @@ impl<F: JoltField> SumcheckInstanceParams<F> for RamReadWriteCheckingParams<F> {
 
         [r_address, r_cycle].concat().into()
     }
-
-    #[cfg(feature = "zk")]
+    #[cfg(any(feature = "zk", feature = "nova"))]
     fn input_claim_constraint(&self) -> InputClaimConstraint {
         InputClaimConstraint::weighted_openings(&[
             OpeningId::virt(VirtualPolynomial::RamReadValue, SumcheckId::SpartanOuter),
             OpeningId::virt(VirtualPolynomial::RamWriteValue, SumcheckId::SpartanOuter),
         ])
     }
-
-    #[cfg(feature = "zk")]
+    #[cfg(any(feature = "zk", feature = "nova"))]
     fn input_constraint_challenge_values(&self, _: &dyn OpeningAccumulator<F>) -> Vec<F> {
         vec![self.gamma]
     }
-
-    #[cfg(feature = "zk")]
+    #[cfg(any(feature = "zk", feature = "nova"))]
     fn output_claim_constraint(&self) -> Option<OutputClaimConstraint> {
         // expected_output_claim = eq_eval * ra * (val + gamma * (val + inc)).
         //
@@ -210,8 +207,7 @@ impl<F: JoltField> SumcheckInstanceParams<F> for RamReadWriteCheckingParams<F> {
 
         Some(OutputClaimConstraint::sum_of_products(terms))
     }
-
-    #[cfg(feature = "zk")]
+    #[cfg(any(feature = "zk", feature = "nova"))]
     fn output_constraint_challenge_values(&self, sumcheck_challenges: &[F::Challenge]) -> Vec<F> {
         self.constraint_challenge_values(sumcheck_challenges)
     }

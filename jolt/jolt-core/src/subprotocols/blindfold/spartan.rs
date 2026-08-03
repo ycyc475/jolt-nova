@@ -17,6 +17,7 @@ use crate::poly::opening_proof::{
     BIG_ENDIAN,
 };
 use crate::poly::unipoly::UniPoly;
+#[cfg(any(feature = "zk", feature = "nova"))]
 use crate::subprotocols::blindfold::{InputClaimConstraint, OutputClaimConstraint};
 use crate::subprotocols::sumcheck_prover::SumcheckInstanceProver;
 use crate::subprotocols::sumcheck_verifier::{SumcheckInstanceParams, SumcheckInstanceVerifier};
@@ -65,10 +66,14 @@ impl<F: JoltField> SumcheckInstanceParams<F> for BlindFoldSpartanParams<F> {
         challenges.to_vec().into()
     }
 
+    #[cfg(any(feature = "zk", feature = "nova"))]
+
     fn input_claim_constraint(&self) -> InputClaimConstraint {
         // No input constraint - Spartan starts at 0
         InputClaimConstraint::default()
     }
+
+    #[cfg(any(feature = "zk", feature = "nova"))]
 
     fn input_constraint_challenge_values(
         &self,
@@ -77,11 +82,15 @@ impl<F: JoltField> SumcheckInstanceParams<F> for BlindFoldSpartanParams<F> {
         Vec::new()
     }
 
+    #[cfg(any(feature = "zk", feature = "nova"))]
+
     fn output_claim_constraint(&self) -> Option<OutputClaimConstraint> {
         // The output claim is verified by BlindFold's final check
         // We don't need a general constraint here
         None
     }
+
+    #[cfg(any(feature = "zk", feature = "nova"))]
 
     fn output_constraint_challenge_values(&self, _sumcheck_challenges: &[F::Challenge]) -> Vec<F> {
         Vec::new()

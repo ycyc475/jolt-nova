@@ -4,24 +4,29 @@ use crate::poly::commitment::commitment_scheme::{CommitmentScheme, ZkEvalCommitm
 use crate::poly::commitment::dory::bind_opening_inputs_zk;
 use crate::poly::commitment::dory::{bind_opening_inputs, DoryContext, DoryGlobals};
 use crate::poly::commitment::pedersen::PedersenGenerators;
-#[cfg(feature = "zk")]
+#[cfg(any(feature = "zk", feature = "nova"))]
 use crate::poly::lagrange_poly::LagrangeHelper;
-#[cfg(feature = "zk")]
+#[cfg(any(feature = "zk", feature = "nova"))]
 use crate::poly::opening_proof::AbstractVerifierOpeningAccumulator;
 #[cfg(feature = "zk")]
 use crate::subprotocols::blindfold::{
-    pedersen_generator_count_for_r1cs, BakedPublicInputs, BlindFoldVerifier,
-    BlindFoldVerifierInput, ClaimBindingConfig, InputClaimConstraint, OutputClaimConstraint,
-    StageConfig, ValueSource, VerifierR1CSBuilder,
+    pedersen_generator_count_for_r1cs, BlindFoldVerifier, BlindFoldVerifierInput,
+    ClaimBindingConfig,
+};
+#[cfg(any(feature = "zk", feature = "nova"))]
+use crate::subprotocols::blindfold::{
+    BakedPublicInputs, BlindFoldWitness, ExtraConstraintWitness, FinalOutputWitness,
+    InputClaimConstraint, OutputClaimConstraint, RoundWitness, StageConfig, StageWitness,
+    ValueSource, VerifierR1CS, VerifierR1CSBuilder,
 };
 use crate::subprotocols::sumcheck::BatchedSumcheck;
 #[cfg(any(feature = "zk", feature = "nova"))]
 use crate::subprotocols::sumcheck::SumcheckInstanceProof;
 #[cfg(feature = "nova")]
 use crate::subprotocols::sumcheck::SumcheckVerifierTrace;
-#[cfg(feature = "zk")]
+#[cfg(any(feature = "zk", feature = "nova"))]
 use crate::subprotocols::sumcheck_verifier::SumcheckInstanceParams;
-#[cfg(feature = "zk")]
+#[cfg(any(feature = "zk", feature = "nova"))]
 use crate::subprotocols::univariate_skip::UniSkipFirstRoundProofVariant;
 use crate::zkvm::bytecode::chunks::DEFAULT_COMMITTED_BYTECODE_CHUNK_COUNT;
 use crate::zkvm::bytecode::chunks::{
@@ -34,7 +39,7 @@ use crate::zkvm::program::{CommittedProgramProverData, ProgramMetadata, ProgramP
 use crate::zkvm::proof_serialization::VerifiedJoltLookupOpeningReceipt;
 #[cfg(feature = "prover")]
 use crate::zkvm::prover::JoltProverPreprocessing;
-#[cfg(feature = "zk")]
+#[cfg(any(feature = "zk", feature = "nova"))]
 use crate::zkvm::r1cs::constraints::{
     OUTER_FIRST_ROUND_POLY_NUM_COEFFS, OUTER_UNIVARIATE_SKIP_DOMAIN_SIZE,
     PRODUCT_VIRTUAL_FIRST_ROUND_POLY_NUM_COEFFS, PRODUCT_VIRTUAL_UNIVARIATE_SKIP_DOMAIN_SIZE,
@@ -106,7 +111,7 @@ use std::fs::File;
 use std::io::{Read, Write};
 use std::path::Path;
 
-#[cfg(feature = "zk")]
+#[cfg(any(feature = "zk", feature = "nova"))]
 struct StageVerifyResult<F: JoltField> {
     challenges: Vec<F::Challenge>,
     batched_output_constraint: Option<OutputClaimConstraint>,
@@ -120,7 +125,7 @@ struct StageVerifyResult<F: JoltField> {
     oc_block_ids: Vec<Vec<OpeningId>>,
 }
 
-#[cfg(not(feature = "zk"))]
+#[cfg(not(any(feature = "zk", feature = "nova")))]
 struct StageVerifyResult<F: JoltField> {
     #[allow(dead_code)]
     challenges: Vec<F::Challenge>,
@@ -132,7 +137,7 @@ type Stage6aVerifyResult<F> = (
     StageVerifyResult<F>,
 );
 
-#[cfg(feature = "zk")]
+#[cfg(any(feature = "zk", feature = "nova"))]
 impl<F: JoltField> StageVerifyResult<F> {
     fn new(
         challenges: Vec<F::Challenge>,
@@ -184,7 +189,7 @@ impl<F: JoltField> StageVerifyResult<F> {
     }
 }
 
-#[cfg(feature = "zk")]
+#[cfg(any(feature = "zk", feature = "nova"))]
 fn batch_output_constraints<
     F: JoltField,
     T: Transcript,
@@ -199,7 +204,7 @@ fn batch_output_constraints<
     OutputClaimConstraint::batch(&constraints)
 }
 
-#[cfg(feature = "zk")]
+#[cfg(any(feature = "zk", feature = "nova"))]
 fn batch_input_constraints<
     F: JoltField,
     T: Transcript,
@@ -214,7 +219,7 @@ fn batch_input_constraints<
     InputClaimConstraint::batch_required(&constraints, instances.len())
 }
 
-#[cfg(feature = "zk")]
+#[cfg(any(feature = "zk", feature = "nova"))]
 fn scale_batching_coefficients<
     F: JoltField,
     T: Transcript,
@@ -264,6 +269,15 @@ pub struct JoltVerifier<
     pub one_hot_params: OneHotParams,
     #[cfg(feature = "nova")]
     recursive_sumcheck_traces: Vec<SumcheckVerifierTrace<F, ProofTranscript>>,
+    #[cfg(feature = "nova")]
+    recursive_relation_capture: Option<RecursiveVerifierRelationCapture<F>>,
+}
+
+#[cfg(feature = "nova")]
+struct RecursiveVerifierRelationCapture<F: JoltField> {
+    verifier_r1cs: VerifierR1CS<F>,
+    verifier_witness: Vec<F>,
+    pcs_opening_ids: Vec<OpeningId>,
 }
 
 #[derive(Clone, Debug)]
@@ -417,6 +431,8 @@ impl<
             one_hot_params,
             #[cfg(feature = "nova")]
             recursive_sumcheck_traces: Vec::with_capacity(8),
+            #[cfg(feature = "nova")]
+            recursive_relation_capture: None,
         })
     }
 
@@ -851,6 +867,25 @@ impl<
             }
             #[cfg(not(feature = "zk"))]
             return Err(ProofVerifyError::ZkFeatureRequired);
+        } else {
+            #[cfg(feature = "nova")]
+            {
+                let capture = self.build_clear_recursive_relation(
+                    [
+                        &stage1_result,
+                        &stage2_result,
+                        &stage3_result,
+                        &stage4_result,
+                        &stage5_result,
+                        &stage6a_result,
+                        &stage6b_result,
+                        &stage7_result,
+                    ],
+                    [uniskip_challenge1, uniskip_challenge2],
+                    &stage8_data,
+                )?;
+                self.recursive_relation_capture = Some(capture);
+            }
         }
 
         Ok(self)
@@ -866,7 +901,7 @@ impl<
         )?;
 
         // Drain uniskip OC block IDs (pending_claims were drained inside verify_transcript)
-        #[cfg(feature = "zk")]
+        #[cfg(any(feature = "zk", feature = "nova"))]
         let uniskip_oc_ids = self.opening_accumulator.take_pending_claim_ids();
 
         let spartan_outer_remaining = OuterRemainingSumcheckVerifier::new(
@@ -889,7 +924,7 @@ impl<
         #[cfg(feature = "nova")]
         self.recursive_sumcheck_traces.push(_stage1_trace);
 
-        #[cfg(feature = "zk")]
+        #[cfg(any(feature = "zk", feature = "nova"))]
         {
             let regular_oc_ids = self.opening_accumulator.take_pending_claim_ids();
 
@@ -947,7 +982,7 @@ impl<
 
             Ok((stage_result, uni_skip_challenge))
         }
-        #[cfg(not(feature = "zk"))]
+        #[cfg(not(any(feature = "zk", feature = "nova")))]
         Ok((
             StageVerifyResult {
                 challenges: r_stage1,
@@ -964,7 +999,7 @@ impl<
             &mut self.transcript,
         )?;
 
-        #[cfg(feature = "zk")]
+        #[cfg(any(feature = "zk", feature = "nova"))]
         let uniskip_oc_ids = self.opening_accumulator.take_pending_claim_ids();
 
         let ram_read_write_checking = RamReadWriteCheckingVerifier::new(
@@ -1022,7 +1057,7 @@ impl<
         #[cfg(feature = "nova")]
         self.recursive_sumcheck_traces.push(_stage2_trace);
 
-        #[cfg(feature = "zk")]
+        #[cfg(any(feature = "zk", feature = "nova"))]
         {
             let regular_oc_ids = self.opening_accumulator.take_pending_claim_ids();
 
@@ -1071,7 +1106,7 @@ impl<
 
             Ok((stage_result, uni_skip_challenge))
         }
-        #[cfg(not(feature = "zk"))]
+        #[cfg(not(any(feature = "zk", feature = "nova")))]
         Ok((
             StageVerifyResult {
                 challenges: r_stage2,
@@ -1112,7 +1147,7 @@ impl<
         #[cfg(feature = "nova")]
         self.recursive_sumcheck_traces.push(_stage3_trace);
 
-        #[cfg(feature = "zk")]
+        #[cfg(any(feature = "zk", feature = "nova"))]
         {
             let regular_oc_ids = self.opening_accumulator.take_pending_claim_ids();
             let batched_output_constraint = batch_output_constraints(&instances);
@@ -1145,7 +1180,7 @@ impl<
                 vec![regular_oc_ids],
             ))
         }
-        #[cfg(not(feature = "zk"))]
+        #[cfg(not(any(feature = "zk", feature = "nova")))]
         Ok(StageVerifyResult {
             challenges: r_stage3,
         })
@@ -1220,7 +1255,7 @@ impl<
         #[cfg(feature = "nova")]
         self.recursive_sumcheck_traces.push(_stage4_trace);
 
-        #[cfg(feature = "zk")]
+        #[cfg(any(feature = "zk", feature = "nova"))]
         {
             let regular_oc_ids = self.opening_accumulator.take_pending_claim_ids();
             let batched_output_constraint = batch_output_constraints(&instances);
@@ -1253,7 +1288,7 @@ impl<
                 vec![regular_oc_ids],
             ))
         }
-        #[cfg(not(feature = "zk"))]
+        #[cfg(not(any(feature = "zk", feature = "nova")))]
         Ok(StageVerifyResult {
             challenges: r_stage4,
         })
@@ -1295,7 +1330,7 @@ impl<
         #[cfg(feature = "nova")]
         self.recursive_sumcheck_traces.push(_stage5_trace);
 
-        #[cfg(feature = "zk")]
+        #[cfg(any(feature = "zk", feature = "nova"))]
         {
             let regular_oc_ids = self.opening_accumulator.take_pending_claim_ids();
             let batched_output_constraint = batch_output_constraints(&instances);
@@ -1328,7 +1363,7 @@ impl<
                 vec![regular_oc_ids],
             ))
         }
-        #[cfg(not(feature = "zk"))]
+        #[cfg(not(any(feature = "zk", feature = "nova")))]
         Ok(StageVerifyResult {
             challenges: r_stage5,
         })
@@ -1377,7 +1412,7 @@ impl<
         .inspect_err(|err| tracing::error!("Stage 6a: {err}"))?;
         #[cfg(feature = "nova")]
         self.recursive_sumcheck_traces.push(_stage6a_trace);
-        #[cfg(feature = "zk")]
+        #[cfg(any(feature = "zk", feature = "nova"))]
         {
             let regular_oc_ids = self.opening_accumulator.take_pending_claim_ids();
             let batched_output_constraint = batch_output_constraints(&instances);
@@ -1415,7 +1450,7 @@ impl<
                 stage_result,
             ))
         }
-        #[cfg(not(feature = "zk"))]
+        #[cfg(not(any(feature = "zk", feature = "nova")))]
         Ok((
             bytecode_read_raf.into_params(),
             booleanity.into_params(),
@@ -1551,7 +1586,7 @@ impl<
         #[cfg(feature = "nova")]
         self.recursive_sumcheck_traces.push(_stage6b_trace);
 
-        #[cfg(feature = "zk")]
+        #[cfg(any(feature = "zk", feature = "nova"))]
         {
             let regular_oc_ids = self.opening_accumulator.take_pending_claim_ids();
             let batched_output_constraint = batch_output_constraints(&instances);
@@ -1584,9 +1619,267 @@ impl<
                 vec![regular_oc_ids],
             ))
         }
-        #[cfg(not(feature = "zk"))]
+        #[cfg(not(any(feature = "zk", feature = "nova")))]
         Ok(StageVerifyResult {
             challenges: r_stage6b,
+        })
+    }
+
+    /// Constructs the complete clear-Jolt verifier relation from values that
+    /// were observed during this successful native verification. No relation
+    /// witness is accepted from the caller.
+    #[cfg(feature = "nova")]
+    fn build_clear_recursive_relation(
+        &self,
+        stage_results: [&StageVerifyResult<F>; 8],
+        uniskip_challenges: [F::Challenge; 2],
+        stage8_data: &Stage8VerifyData<F>,
+    ) -> Result<RecursiveVerifierRelationCapture<F>, ProofVerifyError> {
+        if self.recursive_sumcheck_traces.len() != 8 {
+            return Err(ProofVerifyError::InternalError);
+        }
+
+        let stage_proofs = [
+            &self.proof.stage1_sumcheck_proof,
+            &self.proof.stage2_sumcheck_proof,
+            &self.proof.stage3_sumcheck_proof,
+            &self.proof.stage4_sumcheck_proof,
+            &self.proof.stage5_sumcheck_proof,
+            &self.proof.stage6a_sumcheck_proof,
+            &self.proof.stage6b_sumcheck_proof,
+            &self.proof.stage7_sumcheck_proof,
+        ];
+        let outer_power_sums = LagrangeHelper::power_sums::<
+            OUTER_UNIVARIATE_SKIP_DOMAIN_SIZE,
+            OUTER_FIRST_ROUND_POLY_NUM_COEFFS,
+        >();
+        let product_power_sums = LagrangeHelper::power_sums::<
+            PRODUCT_VIRTUAL_UNIVARIATE_SKIP_DOMAIN_SIZE,
+            PRODUCT_VIRTUAL_FIRST_ROUND_POLY_NUM_COEFFS,
+        >();
+
+        let opening_witness = |constraint: &OutputClaimConstraint, challenge_values: &[F]| {
+            FinalOutputWitness::general(
+                challenge_values.to_vec(),
+                constraint
+                    .required_openings
+                    .iter()
+                    .map(|opening_id| self.opening_accumulator.get_opening(*opening_id))
+                    .collect(),
+            )
+        };
+
+        let mut stage_configs = Vec::with_capacity(10);
+        let mut stage_witnesses = Vec::with_capacity(10);
+        let mut initial_claims = Vec::with_capacity(10);
+        let mut baked_challenges = Vec::new();
+        let mut baked_input_challenges = Vec::new();
+        let mut baked_output_challenges = Vec::new();
+
+        for (stage_index, (proof, result)) in stage_proofs.iter().zip(stage_results).enumerate() {
+            if stage_index < 2 {
+                let uniskip_proof = if stage_index == 0 {
+                    &self.proof.stage1_uni_skip_first_round_proof
+                } else {
+                    &self.proof.stage2_uni_skip_first_round_proof
+                };
+                let standard = match uniskip_proof {
+                    UniSkipFirstRoundProofVariant::Standard(proof) => proof,
+                    UniSkipFirstRoundProofVariant::Zk(_) => {
+                        return Err(ProofVerifyError::ZkFeatureRequired);
+                    }
+                };
+                if standard.uni_poly.coeffs.is_empty() {
+                    return Err(ProofVerifyError::InternalError);
+                }
+                let power_sums = if stage_index == 0 {
+                    outer_power_sums.to_vec()
+                } else {
+                    product_power_sums.to_vec()
+                };
+                if standard.uni_poly.coeffs.len() > power_sums.len() {
+                    return Err(ProofVerifyError::InternalError);
+                }
+                let claimed_sum = standard
+                    .uni_poly
+                    .coeffs
+                    .iter()
+                    .zip(&power_sums)
+                    .map(|(coefficient, power_sum)| *coefficient * F::from_i128(*power_sum))
+                    .sum();
+                let input_constraint = result
+                    .uniskip_input_constraint
+                    .clone()
+                    .ok_or(ProofVerifyError::InternalError)?;
+                let initial_input = opening_witness(
+                    &input_constraint,
+                    &result.uniskip_input_constraint_challenge_values,
+                );
+                let mut config = if stage_index == 0 {
+                    StageConfig::new_uniskip(standard.uni_poly.degree(), power_sums)
+                } else {
+                    StageConfig::new_uniskip_chain(standard.uni_poly.degree(), power_sums)
+                }
+                .with_input_constraint(input_constraint);
+
+                baked_input_challenges
+                    .extend_from_slice(&result.uniskip_input_constraint_challenge_values);
+                let final_output =
+                    if let Some(constraint) = result.uniskip_output_constraint.clone() {
+                        let witness = opening_witness(
+                            &constraint,
+                            &result.uniskip_output_constraint_challenge_values,
+                        );
+                        baked_output_challenges
+                            .extend_from_slice(&result.uniskip_output_constraint_challenge_values);
+                        config = config.with_constraint(constraint);
+                        Some(witness)
+                    } else {
+                        None
+                    };
+                let challenge: F = uniskip_challenges[stage_index].into();
+                let round = RoundWitness::with_claimed_sum(
+                    standard.uni_poly.coeffs.clone(),
+                    challenge,
+                    claimed_sum,
+                );
+                stage_witnesses.push(match final_output {
+                    Some(final_output) => {
+                        StageWitness::with_both(vec![round], initial_input, final_output)
+                    }
+                    None => StageWitness::with_initial_input(vec![round], initial_input),
+                });
+                stage_configs.push(config);
+                initial_claims.push(claimed_sum);
+                baked_challenges.push(challenge);
+            }
+
+            let clear_proof = match proof {
+                SumcheckInstanceProof::Clear(proof) => proof,
+                SumcheckInstanceProof::Zk(_) => return Err(ProofVerifyError::ZkFeatureRequired),
+            };
+            if clear_proof.compressed_polys.len() != result.challenges.len() {
+                return Err(ProofVerifyError::InternalError);
+            }
+            let initial_claim = self.recursive_sumcheck_traces[stage_index].initial_claim;
+            let input_constraint = result.batched_input_constraint.clone();
+            let initial_input =
+                opening_witness(&input_constraint, &result.input_constraint_challenge_values);
+            let round_degrees = clear_proof
+                .compressed_polys
+                .iter()
+                .map(|polynomial| polynomial.coeffs_except_linear_term.len())
+                .collect::<Vec<_>>();
+            let mut config = StageConfig::new_chain_with_round_degrees(round_degrees)
+                .with_input_constraint(input_constraint);
+            baked_input_challenges.extend_from_slice(&result.input_constraint_challenge_values);
+
+            let mut current_claim = initial_claim;
+            let mut rounds = Vec::with_capacity(clear_proof.compressed_polys.len());
+            for (compressed, challenge) in
+                clear_proof.compressed_polys.iter().zip(&result.challenges)
+            {
+                let Some(c0) = compressed.coeffs_except_linear_term.first().copied() else {
+                    return Err(ProofVerifyError::InternalError);
+                };
+                let higher_sum: F = compressed.coeffs_except_linear_term[1..]
+                    .iter()
+                    .copied()
+                    .sum();
+                let c1 = current_claim - c0 - c0 - higher_sum;
+                let mut coefficients =
+                    Vec::with_capacity(compressed.coeffs_except_linear_term.len() + 1);
+                coefficients.push(c0);
+                coefficients.push(c1);
+                coefficients.extend_from_slice(&compressed.coeffs_except_linear_term[1..]);
+                let challenge: F = (*challenge).into();
+                let round = RoundWitness::with_claimed_sum(coefficients, challenge, current_claim);
+                current_claim = round.evaluate(challenge);
+                rounds.push(round);
+                baked_challenges.push(challenge);
+            }
+            if current_claim != self.recursive_sumcheck_traces[stage_index].final_claim {
+                return Err(ProofVerifyError::SumcheckVerificationError);
+            }
+
+            let final_output = if let Some(constraint) = result.batched_output_constraint.clone() {
+                let witness =
+                    opening_witness(&constraint, &result.output_constraint_challenge_values);
+                baked_output_challenges
+                    .extend_from_slice(&result.output_constraint_challenge_values);
+                config = config.with_constraint(constraint);
+                Some(witness)
+            } else {
+                None
+            };
+            stage_witnesses.push(match final_output {
+                Some(final_output) => StageWitness::with_both(rounds, initial_input, final_output),
+                None => StageWitness::with_initial_input(rounds, initial_input),
+            });
+            stage_configs.push(config);
+            initial_claims.push(initial_claim);
+        }
+
+        let extra_constraint = OutputClaimConstraint::linear(
+            stage8_data
+                .opening_ids
+                .iter()
+                .enumerate()
+                .map(|(index, opening_id)| {
+                    (
+                        ValueSource::challenge(index),
+                        ValueSource::opening(*opening_id),
+                    )
+                })
+                .collect(),
+        );
+        let extra_opening_values = stage8_data
+            .opening_ids
+            .iter()
+            .map(|opening_id| self.opening_accumulator.get_opening(*opening_id))
+            .collect::<Vec<_>>();
+        let joint_claim = stage8_data
+            .constraint_coeffs
+            .iter()
+            .zip(&extra_opening_values)
+            .map(|(coefficient, opening)| *coefficient * opening)
+            .sum();
+        let extra_witness = ExtraConstraintWitness {
+            output_value: joint_claim,
+            blinding: F::zero(),
+            challenge_values: stage8_data.constraint_coeffs.clone(),
+            opening_values: extra_opening_values,
+        };
+        let baked = BakedPublicInputs {
+            challenges: baked_challenges,
+            initial_claims: initial_claims.clone(),
+            batching_coefficients: Vec::new(),
+            output_constraint_challenges: baked_output_challenges,
+            input_constraint_challenges: baked_input_challenges,
+            extra_constraint_challenges: stage8_data.constraint_coeffs.clone(),
+        };
+        let verifier_r1cs = VerifierR1CSBuilder::new_with_extra(
+            &stage_configs,
+            std::slice::from_ref(&extra_constraint),
+            &baked,
+            Vec::new(),
+            self.opening_accumulator.aliases.clone(),
+        )
+        .build();
+        let relation_witness = BlindFoldWitness::with_extra_constraints(
+            initial_claims,
+            stage_witnesses,
+            vec![extra_witness],
+        );
+        let verifier_witness = relation_witness.assign(&verifier_r1cs);
+        verifier_r1cs
+            .check_satisfaction(&verifier_witness)
+            .map_err(|_| ProofVerifyError::InternalError)?;
+
+        Ok(RecursiveVerifierRelationCapture {
+            verifier_r1cs,
+            verifier_witness,
+            pcs_opening_ids: stage8_data.opening_ids.clone(),
         })
     }
 
@@ -1948,7 +2241,7 @@ impl<
         #[cfg(feature = "nova")]
         self.recursive_sumcheck_traces.push(_stage7_trace);
 
-        #[cfg(feature = "zk")]
+        #[cfg(any(feature = "zk", feature = "nova"))]
         {
             let regular_oc_ids = self.opening_accumulator.take_pending_claim_ids();
             let batched_output_constraint = batch_output_constraints(&instances);
@@ -1981,7 +2274,7 @@ impl<
                 vec![regular_oc_ids],
             ))
         }
-        #[cfg(not(feature = "zk"))]
+        #[cfg(not(any(feature = "zk", feature = "nova")))]
         Ok(StageVerifyResult {
             challenges: r_stage7,
         })
@@ -2301,18 +2594,19 @@ where
     C: JoltCurve<F = ark_bn254::Fr>,
     PCS: CommitmentScheme<Field = ark_bn254::Fr> + ZkEvalCommitment<C>,
 {
-    /// Runs the production verifier and returns the eight exact clear-sumcheck
-    /// artifacts observed during that successful run.
-    pub fn verify_with_recursive_sumcheck_artifacts(
+    /// Runs the complete native clear-Jolt verifier and returns the production
+    /// recursive relation artifact derived from that exact successful run.
+    /// The caller supplies neither a verifier R1CS nor an assigned witness.
+    pub fn verify_with_recursive_relation_artifact(
         self,
     ) -> Result<
         (
             Self,
-            Vec<crate::zkvm::block::RecursiveClearSumcheckStageArtifact>,
+            crate::zkvm::block::RecursiveJoltVerifierRelationArtifact,
         ),
         ProofVerifyError,
     > {
-        let verified = self.verify_preserving_state()?;
+        let mut verified = self.verify_preserving_state()?;
         if verified.recursive_sumcheck_traces.len() != 8 {
             return Err(ProofVerifyError::InternalError);
         }
@@ -2346,7 +2640,34 @@ where
                 SumcheckInstanceProof::Zk(_) => Err(ProofVerifyError::ZkFeatureRequired),
             })
             .collect::<Result<Vec<_>, _>>()?;
-        Ok((verified, artifacts))
+        let capture = verified
+            .recursive_relation_capture
+            .take()
+            .ok_or(ProofVerifyError::InternalError)?;
+        let relation =
+            crate::zkvm::block::RecursiveJoltVerifierRelationArtifact::from_verified_parts(
+                artifacts,
+                capture.verifier_r1cs,
+                capture.verifier_witness,
+                &capture.pcs_opening_ids,
+            )
+            .map_err(|_| ProofVerifyError::InternalError)?;
+        Ok((verified, relation))
+    }
+
+    /// Runs the production verifier and returns the eight exact clear-sumcheck
+    /// artifacts observed during that successful run.
+    pub fn verify_with_recursive_sumcheck_artifacts(
+        self,
+    ) -> Result<
+        (
+            Self,
+            Vec<crate::zkvm::block::RecursiveClearSumcheckStageArtifact>,
+        ),
+        ProofVerifyError,
+    > {
+        let (verified, relation) = self.verify_with_recursive_relation_artifact()?;
+        Ok((verified, relation.sumcheck_artifacts().to_vec()))
     }
 }
 

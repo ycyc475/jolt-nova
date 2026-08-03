@@ -2729,6 +2729,8 @@ mod tests {
         let (jolt_proof, debug_info) = prover.prove();
         let serialized_proof = jolt_proof.serialize_to_bytes().unwrap();
         let jolt_proof = RV64IMACProof::deserialize_from_bytes(&serialized_proof).unwrap();
+        #[cfg(feature = "nova")]
+        let recursive_io_device = io_device.clone();
 
         let verifier_preprocessing = JoltVerifierPreprocessing::from(&prover_preprocessing);
         let verifier = RV64IMACVerifier::new(
@@ -2770,6 +2772,66 @@ mod tests {
         assert_ne!(receipt.stage7_sumcheck_digest(), [0; 32]);
         assert_ne!(receipt.joint_opening_proof_digest(), [0; 32]);
         assert_ne!(receipt.digest(), [0; 32]);
+
+        #[cfg(feature = "nova")]
+        {
+            use crate::zkvm::block::{RecursiveJoltVerifierCircuit, RecursiveVerifierRelationKind};
+            use std::collections::BTreeSet;
+
+            let recursive_proof = RV64IMACProof::deserialize_from_bytes(&serialized_proof).unwrap();
+            let recursive_verifier = RV64IMACVerifier::new(
+                &verifier_preprocessing,
+                recursive_proof,
+                recursive_io_device,
+                None,
+                None,
+            )
+            .expect("failed to create recursive-relation verifier");
+            let (_verified, relation) = recursive_verifier
+                .verify_with_recursive_relation_artifact()
+                .expect("failed to derive complete recursive verifier relation");
+            assert_eq!(relation.sumcheck_artifacts().len(), 8);
+            assert!(relation.verifier_r1cs().num_constraints > 0);
+            assert!(!relation.opening_bindings().is_empty());
+            for binding in relation.opening_bindings() {
+                assert!(binding.variable_index < relation.verifier_r1cs().num_vars);
+                assert_eq!(
+                    relation.verifier_r1cs().opening_vars[&binding.opening_id],
+                    binding.variable_index
+                );
+            }
+            let covered = relation
+                .opening_bindings()
+                .iter()
+                .flat_map(|binding| binding.relations.iter().copied())
+                .collect::<BTreeSet<_>>();
+            assert_eq!(
+                covered,
+                BTreeSet::from([
+                    RecursiveVerifierRelationKind::Lasso,
+                    RecursiveVerifierRelationKind::Register,
+                    RecursiveVerifierRelationKind::Ram,
+                    RecursiveVerifierRelationKind::Cpu,
+                    RecursiveVerifierRelationKind::Pcs,
+                ])
+            );
+            let mut tampered_relation = relation.clone();
+            tampered_relation.test_tamper_verifier_witness();
+            assert!(RecursiveJoltVerifierCircuit::from_verified_relation(
+                [0x16; 32],
+                [0x50; 32],
+                tampered_relation,
+            )
+            .is_err());
+            let circuit = RecursiveJoltVerifierCircuit::from_verified_relation(
+                [0x16; 32], [0x50; 32], relation,
+            )
+            .expect("production recursive circuit must accept verifier-derived relation");
+            assert_eq!(circuit.statement().object_id, [0x16; 32]);
+            circuit
+                .test_constraints_are_satisfied()
+                .expect("real verifier artifact must satisfy the complete Nova step circuit");
+        }
     }
 
     #[test]

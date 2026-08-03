@@ -10,14 +10,14 @@ use crate::field::JoltField;
 use crate::poly::commitment::dory::DoryGlobals;
 use crate::poly::eq_poly::EqPolynomial;
 use crate::poly::multilinear_polynomial::{MultilinearPolynomial, PolynomialEvaluation};
-#[cfg(feature = "zk")]
+#[cfg(any(feature = "zk", feature = "nova"))]
 use crate::poly::opening_proof::OpeningId;
 use crate::poly::opening_proof::{
     AbstractVerifierOpeningAccumulator, OpeningAccumulator, OpeningPoint, ProverOpeningAccumulator,
     SumcheckId, BIG_ENDIAN, LITTLE_ENDIAN,
 };
 use crate::poly::unipoly::UniPoly;
-#[cfg(feature = "zk")]
+#[cfg(any(feature = "zk", feature = "nova"))]
 use crate::subprotocols::blindfold::{InputClaimConstraint, OutputClaimConstraint, ValueSource};
 use crate::subprotocols::sumcheck_prover::SumcheckInstanceProver;
 use crate::subprotocols::sumcheck_verifier::{SumcheckInstanceParams, SumcheckInstanceVerifier};
@@ -122,8 +122,7 @@ impl<F: JoltField> SumcheckInstanceParams<F> for ProgramImageClaimReductionParam
     fn normalize_opening_point(&self, challenges: &[F::Challenge]) -> OpeningPoint<BIG_ENDIAN, F> {
         self.precommitted.normalize_opening_point(challenges)
     }
-
-    #[cfg(feature = "zk")]
+    #[cfg(any(feature = "zk", feature = "nova"))]
     fn input_claim_constraint(&self) -> InputClaimConstraint {
         match self.precommitted.phase {
             PrecommittedPhase::CycleVariables => InputClaimConstraint::direct(OpeningId::virt(
@@ -138,13 +137,11 @@ impl<F: JoltField> SumcheckInstanceParams<F> for ProgramImageClaimReductionParam
             }
         }
     }
-
-    #[cfg(feature = "zk")]
+    #[cfg(any(feature = "zk", feature = "nova"))]
     fn input_constraint_challenge_values(&self, _: &dyn OpeningAccumulator<F>) -> Vec<F> {
         Vec::new()
     }
-
-    #[cfg(feature = "zk")]
+    #[cfg(any(feature = "zk", feature = "nova"))]
     fn output_claim_constraint(&self) -> Option<OutputClaimConstraint> {
         match self.precommitted.phase {
             PrecommittedPhase::CycleVariables => {
@@ -161,8 +158,7 @@ impl<F: JoltField> SumcheckInstanceParams<F> for ProgramImageClaimReductionParam
             }
         }
     }
-
-    #[cfg(feature = "zk")]
+    #[cfg(any(feature = "zk", feature = "nova"))]
     fn output_constraint_challenge_values(&self, sumcheck_challenges: &[F::Challenge]) -> Vec<F> {
         match self.precommitted.phase {
             PrecommittedPhase::CycleVariables
@@ -178,7 +174,7 @@ impl<F: JoltField> SumcheckInstanceParams<F> for ProgramImageClaimReductionParam
 }
 
 impl<F: JoltField> ProgramImageClaimReductionParams<F> {
-    #[cfg(feature = "zk")]
+    #[cfg(any(feature = "zk", feature = "nova"))]
     fn final_program_image_output_claim_constraint(&self) -> Option<OutputClaimConstraint> {
         Some(OutputClaimConstraint::linear(vec![(
             ValueSource::Challenge(0),

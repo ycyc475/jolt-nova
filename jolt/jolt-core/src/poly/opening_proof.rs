@@ -478,7 +478,7 @@ where
         self.openings.get(&key).unwrap().1
     }
 
-    fn resolve_alias(&self, mut key: OpeningId) -> OpeningId {
+    pub fn resolve_alias(&self, mut key: OpeningId) -> OpeningId {
         while let Some(next) = self.aliases.get(&key) {
             key = *next;
         }
@@ -768,11 +768,21 @@ where
         }
     }
 
-    fn resolve_alias(&self, mut key: OpeningId) -> OpeningId {
+    pub fn resolve_alias(&self, mut key: OpeningId) -> OpeningId {
         while let Some(next) = self.aliases.get(&key) {
             key = *next;
         }
         key
+    }
+
+    /// Returns the verifier-observed claim for an opening after resolving
+    /// aliases established by native Jolt opening deduplication.
+    pub fn get_opening(&self, key: OpeningId) -> F {
+        let canonical = self.resolve_alias(key);
+        self.openings
+            .get(&canonical)
+            .unwrap_or_else(|| panic!("missing verifier opening for {canonical:?}"))
+            .1
     }
 
     fn index_opening_id(&mut self, key: OpeningId) {

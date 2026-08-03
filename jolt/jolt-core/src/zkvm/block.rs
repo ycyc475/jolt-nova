@@ -34,7 +34,8 @@ pub use recursive_verifier::{
     RecursiveClearSumcheckRoundWitness, RecursiveClearSumcheckStageArtifact,
     RecursiveClearSumcheckStageContext, RecursiveClearSumcheckStageWitness,
     RecursiveDeferredPcsOpening, RecursiveJoltVerifierObject, RecursiveJoltVerifierObjectParts,
-    RecursiveVerifierPcsStrategy,
+    RecursiveJoltVerifierRelationArtifact, RecursiveVerifierOpeningBinding,
+    RecursiveVerifierPcsStrategy, RecursiveVerifierRelationKind,
 };
 #[cfg(all(feature = "nova", feature = "zk"))]
 pub use recursive_verifier::{

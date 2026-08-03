@@ -4,9 +4,9 @@ use allocative::Allocative;
 use rayon::prelude::*;
 use tracer::instruction::Cycle;
 
-#[cfg(feature = "zk")]
+#[cfg(any(feature = "zk", feature = "nova"))]
 use crate::poly::opening_proof::OpeningId;
-#[cfg(feature = "zk")]
+#[cfg(any(feature = "zk", feature = "nova"))]
 use crate::subprotocols::blindfold::{
     InputClaimConstraint, OutputClaimConstraint, ProductTerm, ValueSource,
 };
@@ -111,8 +111,7 @@ impl<F: JoltField> SumcheckInstanceParams<F> for InstructionInputParams<F> {
     ) -> OpeningPoint<BIG_ENDIAN, F> {
         OpeningPoint::<LITTLE_ENDIAN, F>::new(sumcheck_challenges.to_vec()).match_endianness()
     }
-
-    #[cfg(feature = "zk")]
+    #[cfg(any(feature = "zk", feature = "nova"))]
     fn input_claim_constraint(&self) -> InputClaimConstraint {
         InputClaimConstraint::weighted_openings(&[
             OpeningId::virt(
@@ -125,13 +124,11 @@ impl<F: JoltField> SumcheckInstanceParams<F> for InstructionInputParams<F> {
             ),
         ])
     }
-
-    #[cfg(feature = "zk")]
+    #[cfg(any(feature = "zk", feature = "nova"))]
     fn input_constraint_challenge_values(&self, _: &dyn OpeningAccumulator<F>) -> Vec<F> {
         vec![self.gamma]
     }
-
-    #[cfg(feature = "zk")]
+    #[cfg(any(feature = "zk", feature = "nova"))]
     fn output_claim_constraint(&self) -> Option<OutputClaimConstraint> {
         // expected_output_claim = E2 * (right_input + γ * left_input)
         // where:
@@ -207,8 +204,7 @@ impl<F: JoltField> SumcheckInstanceParams<F> for InstructionInputParams<F> {
 
         Some(OutputClaimConstraint::sum_of_products(terms))
     }
-
-    #[cfg(feature = "zk")]
+    #[cfg(any(feature = "zk", feature = "nova"))]
     fn output_constraint_challenge_values(&self, sumcheck_challenges: &[F::Challenge]) -> Vec<F> {
         let r = self.normalize_opening_point(sumcheck_challenges);
         let e2 = EqPolynomial::mle_endian(&r, &self.r_cycle_stage_2);

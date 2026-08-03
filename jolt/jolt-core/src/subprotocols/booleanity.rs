@@ -26,9 +26,9 @@ use std::iter::zip;
 use common::jolt_device::MemoryLayout;
 use tracer::instruction::Cycle;
 
-#[cfg(feature = "zk")]
+#[cfg(any(feature = "zk", feature = "nova"))]
 use crate::poly::opening_proof::OpeningId;
-#[cfg(feature = "zk")]
+#[cfg(any(feature = "zk", feature = "nova"))]
 use crate::subprotocols::blindfold::{
     InputClaimConstraint, OutputClaimConstraint, ProductTerm, ValueSource,
 };
@@ -641,29 +641,25 @@ impl<F: JoltField> SumcheckInstanceParams<F> for BooleanityAddressPhaseParams<F>
     fn normalize_opening_point(&self, challenges: &[F::Challenge]) -> OpeningPoint<BIG_ENDIAN, F> {
         self.common.normalize_opening_point(challenges)
     }
-
-    #[cfg(feature = "zk")]
+    #[cfg(any(feature = "zk", feature = "nova"))]
     fn input_claim_constraint(&self) -> InputClaimConstraint {
         InputClaimConstraint::default()
     }
-
-    #[cfg(feature = "zk")]
+    #[cfg(any(feature = "zk", feature = "nova"))]
     fn input_constraint_challenge_values(
         &self,
         _accumulator: &dyn OpeningAccumulator<F>,
     ) -> Vec<F> {
         Vec::new()
     }
-
-    #[cfg(feature = "zk")]
+    #[cfg(any(feature = "zk", feature = "nova"))]
     fn output_claim_constraint(&self) -> Option<OutputClaimConstraint> {
         Some(OutputClaimConstraint::direct(OpeningId::virt(
             VirtualPolynomial::BooleanityAddrClaim,
             SumcheckId::BooleanityAddressPhase,
         )))
     }
-
-    #[cfg(feature = "zk")]
+    #[cfg(any(feature = "zk", feature = "nova"))]
     fn output_constraint_challenge_values(&self, _sumcheck_challenges: &[F::Challenge]) -> Vec<F> {
         Vec::new()
     }
@@ -721,24 +717,21 @@ impl<F: JoltField> SumcheckInstanceParams<F> for BooleanityCyclePhaseParams<F> {
         self.common
             .normalize_opening_point(&self.full_challenges(challenges))
     }
-
-    #[cfg(feature = "zk")]
+    #[cfg(any(feature = "zk", feature = "nova"))]
     fn input_claim_constraint(&self) -> InputClaimConstraint {
         InputClaimConstraint::direct(OpeningId::virt(
             VirtualPolynomial::BooleanityAddrClaim,
             SumcheckId::BooleanityAddressPhase,
         ))
     }
-
-    #[cfg(feature = "zk")]
+    #[cfg(any(feature = "zk", feature = "nova"))]
     fn input_constraint_challenge_values(
         &self,
         _accumulator: &dyn OpeningAccumulator<F>,
     ) -> Vec<F> {
         Vec::new()
     }
-
-    #[cfg(feature = "zk")]
+    #[cfg(any(feature = "zk", feature = "nova"))]
     fn output_claim_constraint(&self) -> Option<OutputClaimConstraint> {
         let mut terms = Vec::with_capacity(2 * self.common.polynomial_types.len());
         for (i, poly_type) in self.common.polynomial_types.iter().enumerate() {
@@ -754,8 +747,7 @@ impl<F: JoltField> SumcheckInstanceParams<F> for BooleanityCyclePhaseParams<F> {
         }
         Some(OutputClaimConstraint::sum_of_products(terms))
     }
-
-    #[cfg(feature = "zk")]
+    #[cfg(any(feature = "zk", feature = "nova"))]
     fn output_constraint_challenge_values(&self, sumcheck_challenges: &[F::Challenge]) -> Vec<F> {
         let full = self.full_challenges(sumcheck_challenges);
         let eq_eval: F = EqPolynomial::<F>::mle(&full, &self.common.combined_r_big_endian());

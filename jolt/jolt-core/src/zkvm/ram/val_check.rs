@@ -3,9 +3,8 @@ use num_traits::Zero;
 use std::{array, iter::zip, sync::Arc};
 use tracer::{instruction::Cycle, JoltDevice};
 
-#[cfg(feature = "zk")]
 use crate::poly::opening_proof::OpeningId;
-#[cfg(feature = "zk")]
+#[cfg(any(feature = "zk", feature = "nova"))]
 use crate::subprotocols::blindfold::{
     InputClaimConstraint, OutputClaimConstraint, ProductTerm, ValueSource,
 };
@@ -83,10 +82,8 @@ pub struct RamValCheckSumcheckParams<F: JoltField> {
 
     /// Public constant portion of init_eval used by BlindFold constraints.
     /// In committed-program mode this is inputs-only; program image is an opening.
-    #[cfg(feature = "zk")]
     pub init_eval_public: F,
     /// Advice contributions decomposed for BlindFold: each is (-selector, opening_id).
-    #[cfg(feature = "zk")]
     pub advice_contributions: Vec<(F, OpeningId)>,
     pub include_program_image_claims: bool,
 }
@@ -127,14 +124,12 @@ impl<F: JoltField> RamValCheckSumcheckParams<F> {
             MultilinearPolynomial::from(initial_ram_state.to_vec());
         let init_eval = val_init.evaluate(&r_address.r);
 
-        #[cfg(feature = "zk")]
         let init_eval_public = if include_program_image_claims {
             super::eval_inputs_mle::<F>(program_io, &r_address.r)
         } else {
             super::eval_initial_ram_mle::<F>(ram_preprocessing, program_io, &r_address.r)
         };
 
-        #[cfg(feature = "zk")]
         let advice_contributions = super::compute_advice_init_contributions(
             opening_accumulator,
             &program_io.memory_layout,
@@ -143,10 +138,6 @@ impl<F: JoltField> RamValCheckSumcheckParams<F> {
             SumcheckId::RamValCheck,
         );
 
-        // Suppress unused warnings in non-zk builds.
-        #[cfg(not(feature = "zk"))]
-        let _ = (ram_preprocessing, program_io);
-
         Self {
             T: trace_len,
             K,
@@ -154,9 +145,7 @@ impl<F: JoltField> RamValCheckSumcheckParams<F> {
             r_address,
             r_cycle,
             init_eval,
-            #[cfg(feature = "zk")]
             init_eval_public,
-            #[cfg(feature = "zk")]
             advice_contributions,
             include_program_image_claims,
         }
@@ -221,9 +210,6 @@ impl<F: JoltField> RamValCheckSumcheckParams<F> {
             opening_accumulator,
         );
 
-        #[cfg(not(feature = "zk"))]
-        let _ = (init_eval_public_base, advice_contributions);
-        #[cfg(feature = "zk")]
         let init_eval_public = init_eval_public_base;
 
         Self {
@@ -233,9 +219,7 @@ impl<F: JoltField> RamValCheckSumcheckParams<F> {
             r_address,
             r_cycle,
             init_eval,
-            #[cfg(feature = "zk")]
             init_eval_public,
-            #[cfg(feature = "zk")]
             advice_contributions,
             include_program_image_claims,
         }
@@ -269,8 +253,7 @@ impl<F: JoltField> SumcheckInstanceParams<F> for RamValCheckSumcheckParams<F> {
     ) -> OpeningPoint<BIG_ENDIAN, F> {
         OpeningPoint::<LITTLE_ENDIAN, F>::new(challenges.to_vec()).match_endianness()
     }
-
-    #[cfg(feature = "zk")]
+    #[cfg(any(feature = "zk", feature = "nova"))]
     fn input_claim_constraint(&self) -> InputClaimConstraint {
         // input_claim = (val_rw - init_eval) + γ*(val_final - init_eval)
         //             = val_rw + γ*val_final - (1+γ)*init_eval
@@ -316,8 +299,7 @@ impl<F: JoltField> SumcheckInstanceParams<F> for RamValCheckSumcheckParams<F> {
         }
         InputClaimConstraint::sum_of_products(terms)
     }
-
-    #[cfg(feature = "zk")]
+    #[cfg(any(feature = "zk", feature = "nova"))]
     fn input_constraint_challenge_values(&self, _: &dyn OpeningAccumulator<F>) -> Vec<F> {
         let one_plus_gamma = F::one() + self.gamma;
         let mut values = vec![self.gamma, -one_plus_gamma * self.init_eval_public];
@@ -330,8 +312,7 @@ impl<F: JoltField> SumcheckInstanceParams<F> for RamValCheckSumcheckParams<F> {
         }
         values
     }
-
-    #[cfg(feature = "zk")]
+    #[cfg(any(feature = "zk", feature = "nova"))]
     fn output_claim_constraint(&self) -> Option<OutputClaimConstraint> {
         // output = inc * wa * (lt_eval + γ)
         //
@@ -348,8 +329,7 @@ impl<F: JoltField> SumcheckInstanceParams<F> for RamValCheckSumcheckParams<F> {
 
         Some(OutputClaimConstraint::sum_of_products(terms))
     }
-
-    #[cfg(feature = "zk")]
+    #[cfg(any(feature = "zk", feature = "nova"))]
     fn output_constraint_challenge_values(&self, sumcheck_challenges: &[F::Challenge]) -> Vec<F> {
         let r = self.normalize_opening_point(sumcheck_challenges);
 
