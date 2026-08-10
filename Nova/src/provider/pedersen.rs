@@ -618,13 +618,7 @@ where
     let half = self.ck.len() / 2;
     let weights = [*w1, *w2];
 
-    let ck = (0..half)
-      .into_par_iter()
-      .map(|i| {
-        let bases = [self.ck[i], self.ck[i + half]];
-        E::GE::vartime_double_scalar_mul(&weights, &bases).affine()
-      })
-      .collect();
+    let ck = E::GE::batch_vartime_double_scalar_mul(&weights, &self.ck[..half], &self.ck[half..]);
 
     CommitmentKey {
       ck: Arc::new(ck),

@@ -7,7 +7,7 @@ use core::{
 use halo2curves::{group::cofactor::CofactorCurveAffine, serde::SerdeObject, CurveAffine};
 use num_integer::Integer;
 use num_traits::ToPrimitive;
-use rayon::iter::{IntoParallelRefIterator, ParallelIterator};
+use rayon::iter::{IndexedParallelIterator, IntoParallelRefIterator, ParallelIterator};
 use serde::{Deserialize, Serialize};
 
 /// A helper trait for types with a group operation.
@@ -84,6 +84,20 @@ pub trait DlogGroupExt: DlogGroup {
     bases: &[Self::AffineGroupElement; 2],
   ) -> Self {
     Self::vartime_multiscalar_mul(scalars, bases)
+  }
+
+  /// Computes many two-term multiexponentiations that share the same scalars.
+  fn batch_vartime_double_scalar_mul(
+    scalars: &[Self::Scalar; 2],
+    left_bases: &[Self::AffineGroupElement],
+    right_bases: &[Self::AffineGroupElement],
+  ) -> Vec<Self::AffineGroupElement> {
+    assert_eq!(left_bases.len(), right_bases.len());
+    left_bases
+      .par_iter()
+      .zip(right_bases)
+      .map(|(left, right)| Self::vartime_double_scalar_mul(scalars, &[*left, *right]).affine())
+      .collect()
   }
 
   /// A method to compute a batch of multiexponentations

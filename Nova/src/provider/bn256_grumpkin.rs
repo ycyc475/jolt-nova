@@ -8,7 +8,7 @@ use crate::{
   traits::{Group, PrimeFieldExt, TranscriptReprTrait},
 };
 use digest::{ExtendableOutput, Update};
-use ff::{Field, FromUniformBytes};
+use ff::{Field, FromUniformBytes, PrimeField, WithSmallOrderMulGroup};
 use halo2curves::{
   bn256::{Bn256, G1Affine as Bn256Affine, G2Affine, G2Compressed, Gt, G1 as Bn256Point, G2},
   group::{cofactor::CofactorCurveAffine, Curve, Group as AnotherGroup},
@@ -32,6 +32,70 @@ pub mod grumpkin {
   pub use halo2curves::grumpkin::{Fq as Base, Fr as Scalar, G1Affine as Affine, G1 as Point};
 }
 
+const BN_ENDO_GAMMA_1: [u64; 4] = [0xd91d232ec7e0b3d7, 0x2, 0, 0];
+const BN_ENDO_GAMMA_2: [u64; 4] = [0x5398fd0300ff6565, 0x4ccef014a773d2d2, 0x02, 0];
+const BN_ENDO_B_1: [u64; 4] = [0x89d3256894d213e3, 0, 0, 0];
+const BN_ENDO_B_2: [u64; 4] = [0x0be4e1541221250b, 0x6f4d8248eeb859fd, 0, 0];
+
+fn add_mul_carry(acc: u64, left: u64, right: u64, carry: u64) -> (u64, u64) {
+  let result = u128::from(acc) + u128::from(left) * u128::from(right) + u128::from(carry);
+  (result as u64, (result >> 64) as u64)
+}
+
+fn mul_512(left: [u64; 4], right: [u64; 4]) -> [u64; 8] {
+  let mut result = [0u64; 8];
+  for (i, left_limb) in left.into_iter().enumerate() {
+    let mut carry = 0;
+    for (j, right_limb) in right.into_iter().enumerate() {
+      let (limb, next_carry) = add_mul_carry(result[i + j], left_limb, right_limb, carry);
+      result[i + j] = limb;
+      carry = next_carry;
+    }
+    result[i + 4] = carry;
+  }
+  result
+}
+
+fn scalar_limbs(scalar: &bn256::Scalar) -> [u64; 4] {
+  let repr = scalar.to_repr();
+  let bytes = repr.as_ref();
+  std::array::from_fn(|i| u64::from_le_bytes(bytes[i * 8..(i + 1) * 8].try_into().unwrap()))
+}
+
+fn scalar_is_negative(scalar: &bn256::Scalar) -> bool {
+  let limbs = scalar_limbs(scalar);
+  limbs[3] != 0
+}
+
+/// GLV decomposition matching halo2curves' BN256 endomorphism parameters.
+fn decompose_bn256_scalar(scalar: &bn256::Scalar) -> (u128, bool, u128, bool) {
+  let input = scalar_limbs(scalar);
+  let gamma_2_product = mul_512(BN_ENDO_GAMMA_2, input);
+  let gamma_1_product = mul_512(BN_ENDO_GAMMA_1, input);
+  let c_1: [u64; 4] = gamma_2_product[4..8].try_into().unwrap();
+  let c_2: [u64; 4] = gamma_1_product[4..8].try_into().unwrap();
+  let q_1_product = mul_512(c_1, BN_ENDO_B_1);
+  let q_2_product = mul_512(c_2, BN_ENDO_B_2);
+  let q_1 = bn256::Scalar::from_raw(q_1_product[0..4].try_into().unwrap());
+  let q_2 = bn256::Scalar::from_raw(q_2_product[0..4].try_into().unwrap());
+
+  let k_2 = q_2 - q_1;
+  let k_1 = *scalar + k_2 * bn256::Scalar::ZETA;
+  let k_1_negative = scalar_is_negative(&k_1);
+  let k_2_negative = scalar_is_negative(&k_2);
+  let k_1 = if k_1_negative { -k_1 } else { k_1 };
+  let k_2 = if k_2_negative { -k_2 } else { k_2 };
+  let k_1_limbs = scalar_limbs(&k_1);
+  let k_2_limbs = scalar_limbs(&k_2);
+
+  (
+    u128::from(k_1_limbs[0]) | (u128::from(k_1_limbs[1]) << 64),
+    k_1_negative,
+    u128::from(k_2_limbs[0]) | (u128::from(k_2_limbs[1]) << 64),
+    k_2_negative,
+  )
+}
+
 crate::impl_traits_no_dlog_ext!(
   bn256,
   Bn256Point,
@@ -52,6 +116,19 @@ impl DlogGroupExt for bn256::Point {
     bases: &[Self::AffineGroupElement; 2],
   ) -> Self {
     super::msm::vartime_double_scalar_mul(scalars, bases)
+  }
+
+  #[cfg(not(feature = "blitzar"))]
+  fn batch_vartime_double_scalar_mul(
+    scalars: &[Self::Scalar; 2],
+    left_bases: &[Self::AffineGroupElement],
+    right_bases: &[Self::AffineGroupElement],
+  ) -> Vec<Self::AffineGroupElement> {
+    let decomposed = [
+      decompose_bn256_scalar(&scalars[0]),
+      decompose_bn256_scalar(&scalars[1]),
+    ];
+    super::msm::batch_vartime_double_scalar_mul_endo(&decomposed, left_bases, right_bases)
   }
 
   fn vartime_multiscalar_mul_small<T: Integer + Into<u64> + Copy + Sync + ToPrimitive>(
@@ -377,5 +454,47 @@ mod evm_serde_tests {
       result.is_err(),
       "on-curve but non-subgroup G2 point must be rejected"
     );
+  }
+}
+
+#[cfg(test)]
+mod endo_double_scalar_tests {
+  use super::*;
+  use halo2curves::group::Curve;
+  use rand_core::OsRng;
+
+  #[test]
+  fn test_bn256_batch_endo_double_scalar_mul() {
+    let left_bases = (0..16)
+      .map(|_| (bn256::Point::generator() * bn256::Scalar::random(OsRng)).to_affine())
+      .collect::<Vec<_>>();
+    let right_bases = (0..16)
+      .map(|_| (bn256::Point::generator() * bn256::Scalar::random(OsRng)).to_affine())
+      .collect::<Vec<_>>();
+
+    let mut scalar_cases = vec![
+      [bn256::Scalar::ZERO, bn256::Scalar::ZERO],
+      [bn256::Scalar::ONE, bn256::Scalar::ZERO],
+      [bn256::Scalar::ZERO, bn256::Scalar::ONE],
+      [-bn256::Scalar::ONE, bn256::Scalar::ONE],
+    ];
+    scalar_cases
+      .extend((0..64).map(|_| [bn256::Scalar::random(OsRng), bn256::Scalar::random(OsRng)]));
+
+    for scalars in scalar_cases {
+      let expected = left_bases
+        .iter()
+        .zip(&right_bases)
+        .map(|(left, right)| {
+          crate::provider::msm::vartime_double_scalar_mul(&scalars, &[*left, *right]).to_affine()
+        })
+        .collect::<Vec<_>>();
+      let actual = <bn256::Point as DlogGroupExt>::batch_vartime_double_scalar_mul(
+        &scalars,
+        &left_bases,
+        &right_bases,
+      );
+      assert_eq!(actual, expected);
+    }
   }
 }

@@ -15,7 +15,10 @@
 //!
 //! The MSM implementations (for integer types and field types) are adapted from halo2/jolt.
 use ff::{Field, PrimeField};
-use halo2curves::{group::Group, CurveAffine};
+use halo2curves::{
+  group::{Curve, Group},
+  CurveAffine, CurveExt,
+};
 use num_integer::Integer;
 use num_traits::{ToPrimitive, Zero};
 use rayon::{current_num_threads, prelude::*};
@@ -472,6 +475,130 @@ pub(crate) fn vartime_double_scalar_mul<C: CurveAffine>(
       }
       if table_index != 0 {
         acc += table[table_index];
+        started = true;
+      }
+    }
+  }
+  acc
+}
+
+const ENDO_WNAF_WINDOW: u32 = 4;
+const ENDO_WNAF_TABLE_SIZE: usize = 1 << (ENDO_WNAF_WINDOW - 2);
+
+/// Computes BN-family two-scalar multiplications after GLV decomposition.
+/// The decomposition is shared by every generator pair in an IPA round.
+pub(crate) fn batch_vartime_double_scalar_mul_endo<C: CurveAffine>(
+  decomposed: &[(u128, bool, u128, bool); 2],
+  left_bases: &[C],
+  right_bases: &[C],
+) -> Vec<C> {
+  assert_eq!(left_bases.len(), right_bases.len());
+
+  let digits = [
+    u128_wnaf(decomposed[0].0),
+    u128_wnaf(decomposed[0].2),
+    u128_wnaf(decomposed[1].0),
+    u128_wnaf(decomposed[1].2),
+  ];
+  let negate_bases = [
+    decomposed[0].1,
+    !decomposed[0].3,
+    decomposed[1].1,
+    !decomposed[1].3,
+  ];
+
+  left_bases
+    .par_iter()
+    .zip(right_bases)
+    .map(|(left, right)| {
+      vartime_endo_double_scalar_mul_with_schedule(&digits, &negate_bases, &[*left, *right])
+        .to_affine()
+    })
+    .collect()
+}
+
+fn u128_wnaf(scalar: u128) -> Vec<i8> {
+  let mut scalar_low = scalar;
+  let mut scalar_high = false;
+  let mut digits = Vec::with_capacity(129);
+  let mask = (1u128 << ENDO_WNAF_WINDOW) - 1;
+  let midpoint = 1u128 << (ENDO_WNAF_WINDOW - 1);
+  let radix = 1u128 << ENDO_WNAF_WINDOW;
+
+  while scalar_high || scalar_low != 0 {
+    let digit = if scalar_low & 1 == 1 {
+      let residue = scalar_low & mask;
+      let digit = if residue >= midpoint {
+        i16::try_from(residue).unwrap() - i16::try_from(radix).unwrap()
+      } else {
+        i16::try_from(residue).unwrap()
+      };
+
+      if digit < 0 {
+        let (next, carry) = scalar_low.overflowing_add(u128::from(digit.unsigned_abs()));
+        assert!(!(scalar_high && carry));
+        scalar_low = next;
+        scalar_high |= carry;
+      } else {
+        let (next, borrow) = scalar_low.overflowing_sub(u128::try_from(digit).unwrap());
+        if borrow {
+          assert!(scalar_high);
+          scalar_high = false;
+        }
+        scalar_low = next;
+      }
+      i8::try_from(digit).unwrap()
+    } else {
+      0
+    };
+    digits.push(digit);
+
+    scalar_low = (scalar_low >> 1) | (u128::from(scalar_high) << 127);
+    scalar_high = false;
+  }
+  digits
+}
+
+fn vartime_endo_double_scalar_mul_with_schedule<C: CurveAffine>(
+  digits: &[Vec<i8>; 4],
+  negate_bases: &[bool; 4],
+  bases: &[C; 2],
+) -> C::Curve {
+  let left: C::Curve = bases[0].into();
+  let right: C::Curve = bases[1].into();
+  let mut component_bases = [left, left.endo(), right, right.endo()];
+  for (base, negate) in component_bases.iter_mut().zip(negate_bases) {
+    if *negate {
+      *base = -*base;
+    }
+  }
+
+  let tables = component_bases.map(|base| {
+    let mut table = [C::Curve::identity(); ENDO_WNAF_TABLE_SIZE];
+    table[0] = base;
+    let twice = base.double();
+    for i in 1..ENDO_WNAF_TABLE_SIZE {
+      table[i] = table[i - 1] + twice;
+    }
+    table
+  });
+
+  let num_bits = digits.iter().map(Vec::len).max().unwrap_or(0);
+  let mut acc = C::Curve::identity();
+  let mut started = false;
+  for bit in (0..num_bits).rev() {
+    if started {
+      acc = acc.double();
+    }
+    for (component_digits, table) in digits.iter().zip(&tables) {
+      let digit = component_digits.get(bit).copied().unwrap_or(0);
+      if digit != 0 {
+        let table_index = usize::from(digit.unsigned_abs() >> 1);
+        if digit.is_negative() {
+          acc -= table[table_index];
+        } else {
+          acc += table[table_index];
+        }
         started = true;
       }
     }
