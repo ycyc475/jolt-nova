@@ -20,12 +20,31 @@ use core::{
 use ff::Field;
 use num_integer::Integer;
 use num_traits::ToPrimitive;
+use once_cell::sync::Lazy;
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 use serde_with::serde_as;
+use std::{
+  any::{Any, TypeId},
+  collections::HashMap,
+  sync::{Arc, Mutex},
+  time::Instant,
+};
 
 #[cfg(feature = "io")]
 const KEY_FILE_HEAD: [u8; 12] = *b"PEDERSEN_KEY";
+
+type SetupCacheKey = (TypeId, Vec<u8>, usize);
+type ErasedCommitmentKey = Arc<dyn Any + Send + Sync>;
+
+/// Process-local cache for transparent Pedersen generators.
+///
+/// `DlogGroup::from_label` is deterministic, and a key generated for a larger
+/// size has exactly the same prefix as a smaller key with the same curve and
+/// label. Reusing that prefix avoids repeating hash-to-curve setup while the
+/// returned owned key preserves the existing public API and serialization.
+static PEDERSEN_SETUP_CACHE: Lazy<Mutex<HashMap<SetupCacheKey, ErasedCommitmentKey>>> =
+  Lazy::new(|| Mutex::new(HashMap::new()));
 
 /// A type that holds commitment generators
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -33,7 +52,7 @@ pub struct CommitmentKey<E: Engine>
 where
   E::GE: DlogGroup,
 {
-  ck: Vec<<E::GE as DlogGroup>::AffineGroupElement>,
+  ck: Arc<Vec<<E::GE as DlogGroup>::AffineGroupElement>>,
   h: <E::GE as DlogGroup>::AffineGroupElement,
 }
 
@@ -237,7 +256,7 @@ where
   }
 }
 
-impl<E: Engine> CommitmentEngineTrait<E> for CommitmentEngine<E>
+impl<E: Engine + 'static> CommitmentEngineTrait<E> for CommitmentEngine<E>
 where
   E::GE: DlogGroupExt,
 {
@@ -246,14 +265,81 @@ where
   type DerandKey = DerandKey<E>;
 
   fn setup(label: &'static [u8], n: usize) -> Result<Self::CommitmentKey, NovaError> {
-    let gens = E::GE::from_label(label, n.next_power_of_two() + 1);
+    let started = Instant::now();
+    let requested_size = n.next_power_of_two();
+    let engine = TypeId::of::<E>();
+    let mut cached_size = None;
+    let cached = {
+      let cache = PEDERSEN_SETUP_CACHE
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+      cache
+        .iter()
+        .filter(|((cached_engine, cached_label, size), _)| {
+          *cached_engine == engine && cached_label.as_slice() == label && *size >= requested_size
+        })
+        .min_by_key(|((_, _, size), _)| *size)
+        .map(|((_, _, size), key)| {
+          cached_size = Some(*size);
+          Arc::clone(key)
+        })
+    };
+    if let Some(cached) = cached {
+      let cached = cached
+        .downcast_ref::<CommitmentKey<E>>()
+        .expect("Pedersen setup cache type is bound by its engine TypeId");
+      if std::env::var_os("JOLT_NOVA_PROFILE_SETUP").is_some() {
+        eprintln!(
+          "jolt_nova_pedersen_setup engine={} requested={} cached={} hit=true elapsed_micros={}",
+          std::any::type_name::<E>(),
+          requested_size,
+          cached_size.expect("cache hit records its size"),
+          started.elapsed().as_micros(),
+        );
+      }
+      return Ok(Self::CommitmentKey {
+        ck: if cached.ck.len() == requested_size {
+          Arc::clone(&cached.ck)
+        } else {
+          Arc::new(cached.ck[..requested_size].to_vec())
+        },
+        h: cached.h,
+      });
+    }
+
+    let gens = E::GE::from_label(label, requested_size + 1);
 
     let (h, ck) = gens.split_first().unwrap();
-
-    Ok(Self::CommitmentKey {
-      ck: ck.to_vec(),
+    let commitment_key = Self::CommitmentKey {
+      ck: Arc::new(ck.to_vec()),
       h: *h,
-    })
+    };
+    let mut cache = PEDERSEN_SETUP_CACHE
+      .lock()
+      .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let has_larger_key = cache.keys().any(|(cached_engine, cached_label, size)| {
+      *cached_engine == engine && cached_label.as_slice() == label && *size >= requested_size
+    });
+    if !has_larger_key {
+      cache.retain(|(cached_engine, cached_label, size), _| {
+        *cached_engine != engine || cached_label.as_slice() != label || *size > requested_size
+      });
+      cache.insert(
+        (engine, label.to_vec(), requested_size),
+        Arc::new(commitment_key.clone()),
+      );
+    }
+    drop(cache);
+    if std::env::var_os("JOLT_NOVA_PROFILE_SETUP").is_some() {
+      eprintln!(
+        "jolt_nova_pedersen_setup engine={} requested={} cached={} hit=false elapsed_micros={}",
+        std::any::type_name::<E>(),
+        requested_size,
+        requested_size,
+        started.elapsed().as_micros(),
+      );
+    }
+    Ok(commitment_key)
   }
 
   fn derand_key(ck: &Self::CommitmentKey) -> Self::DerandKey {
@@ -334,7 +420,7 @@ where
     let (first, second) = points.split_at(1);
 
     Ok(Self::CommitmentKey {
-      ck: second.to_vec(),
+      ck: Arc::new(second.to_vec()),
       h: first[0],
     })
   }
@@ -375,7 +461,7 @@ where
     }
     let ck_affine = acc.par_iter().map(|g| g.affine()).collect();
     Ok(CommitmentKey {
-      ck: ck_affine,
+      ck: Arc::new(ck_affine),
       h: ck.h,
     })
   }
@@ -454,18 +540,18 @@ where
     Self: Sized;
 }
 
-impl<E: Engine<CE = CommitmentEngine<E>>> CommitmentKeyExtTrait<E> for CommitmentKey<E>
+impl<E: Engine<CE = CommitmentEngine<E>> + 'static> CommitmentKeyExtTrait<E> for CommitmentKey<E>
 where
   E::GE: DlogGroupExt,
 {
   fn split_at(&self, n: usize) -> (CommitmentKey<E>, CommitmentKey<E>) {
     (
       CommitmentKey {
-        ck: self.ck[0..n].to_vec(),
+        ck: Arc::new(self.ck[0..n].to_vec()),
         h: self.h,
       },
       CommitmentKey {
-        ck: self.ck[n..].to_vec(),
+        ck: Arc::new(self.ck[n..].to_vec()),
         h: self.h,
       },
     )
@@ -473,40 +559,43 @@ where
 
   fn combine(&self, other: &CommitmentKey<E>) -> CommitmentKey<E> {
     let ck = {
-      let mut c = self.ck.clone();
-      c.extend(other.ck.clone());
-      c
+      let mut combined = Vec::with_capacity(self.ck.len() + other.ck.len());
+      combined.extend_from_slice(&self.ck);
+      combined.extend_from_slice(&other.ck);
+      Arc::new(combined)
     };
     CommitmentKey { ck, h: self.h }
   }
 
   // combines the left and right halves of `self` using `w1` and `w2` as the weights
   fn fold(&self, w1: &E::Scalar, w2: &E::Scalar) -> CommitmentKey<E> {
-    let w = vec![*w1, *w2];
-    let (L, R) = self.split_at(self.ck.len() / 2);
+    let weights = vec![*w1, *w2];
+    let (left, right) = self.split_at(self.ck.len() / 2);
 
     let ck = (0..self.ck.len() / 2)
       .into_par_iter()
       .map(|i| {
-        let bases = [L.ck[i], R.ck[i]].to_vec();
-        E::GE::vartime_multiscalar_mul(&w, &bases).affine()
+        let bases = [left.ck[i], right.ck[i]].to_vec();
+        E::GE::vartime_multiscalar_mul(&weights, &bases).affine()
       })
       .collect();
 
-    CommitmentKey { ck, h: self.h }
+    CommitmentKey {
+      ck: Arc::new(ck),
+      h: self.h,
+    }
   }
 
   /// Scales each element in `self` by `r`
   fn scale(&self, r: &E::Scalar) -> Self {
     let ck_scaled = self
       .ck
-      .clone()
-      .into_par_iter()
-      .map(|g| E::GE::vartime_multiscalar_mul(&[*r], &[g]).affine())
+      .par_iter()
+      .map(|g| E::GE::vartime_multiscalar_mul(&[*r], &[*g]).affine())
       .collect();
 
     CommitmentKey {
-      ck: ck_scaled,
+      ck: Arc::new(ck_scaled),
       h: self.h,
     }
   }
@@ -520,11 +609,32 @@ where
 
     // cmt is derandomized by the point that this is called
     Ok(CommitmentKey {
-      ck,
+      ck: Arc::new(ck),
       h: E::GE::zero().affine(), // this is okay, since this method is used in IPA only,
                                  // and we only use non-blinding commits afterwards
                                  // bc we don't use ZK IPA
     })
+  }
+}
+
+#[cfg(test)]
+mod setup_cache_tests {
+  use super::*;
+  use crate::{provider::Bn256EngineIPA, traits::commitment::CommitmentEngineTrait};
+
+  type E = Bn256EngineIPA;
+
+  #[test]
+  fn deterministic_setup_reuses_exact_key_and_preserves_prefixes() {
+    const LABEL: &[u8] = b"pedersen-setup-cache-test";
+    let large = CommitmentEngine::<E>::setup(LABEL, 17).unwrap();
+    let exact = CommitmentEngine::<E>::setup(LABEL, 20).unwrap();
+    assert!(Arc::ptr_eq(&large.ck, &exact.ck));
+    assert_eq!(large.h, exact.h);
+
+    let small = CommitmentEngine::<E>::setup(LABEL, 8).unwrap();
+    assert_eq!(small.h, large.h);
+    assert_eq!(small.ck.as_slice(), &large.ck[..8]);
   }
 }
 
