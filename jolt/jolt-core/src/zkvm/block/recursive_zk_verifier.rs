@@ -80,6 +80,61 @@ type ZkVerificationKey = nova_snark::nova::VerifierKey<
     NovaSecondarySpartanSnark,
 >;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RecursiveBlindFoldProfilePhase {
+    PreflightVerification,
+    ArtifactPreparation,
+    NovaSetup,
+    SpartanSetup,
+    NovaInitialization,
+    NovaProveStep,
+    NovaSelfVerification,
+    SpartanProve,
+    ProofSerialization,
+    EnvelopeAssembly,
+    EndToEndSelfVerification,
+}
+
+impl RecursiveBlindFoldProfilePhase {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::PreflightVerification => "preflight-verification",
+            Self::ArtifactPreparation => "artifact-preparation",
+            Self::NovaSetup => "nova-setup",
+            Self::SpartanSetup => "spartan-setup",
+            Self::NovaInitialization => "nova-initialization",
+            Self::NovaProveStep => "nova-prove-step",
+            Self::NovaSelfVerification => "nova-self-verification",
+            Self::SpartanProve => "spartan-prove",
+            Self::ProofSerialization => "proof-serialization",
+            Self::EnvelopeAssembly => "envelope-assembly",
+            Self::EndToEndSelfVerification => "end-to-end-self-verification",
+        }
+    }
+}
+
+pub trait RecursiveBlindFoldProfileObserver {
+    fn phase_started(&mut self, _phase: RecursiveBlindFoldProfilePhase) {}
+
+    fn phase_finished(&mut self, _phase: RecursiveBlindFoldProfilePhase) {}
+
+    fn observe<T>(
+        &mut self,
+        phase: RecursiveBlindFoldProfilePhase,
+        operation: impl FnOnce() -> T,
+    ) -> T
+    where
+        Self: Sized,
+    {
+        self.phase_started(phase);
+        let result = operation();
+        self.phase_finished(phase);
+        result
+    }
+}
+
+impl RecursiveBlindFoldProfileObserver for () {}
+
 #[derive(Clone, Debug)]
 enum PoseidonOperation {
     Append { chunks: Vec<Fr>, bytes: Vec<u8> },
@@ -820,13 +875,32 @@ impl RecursiveBlindFoldVerifierCircuit {
         ),
         String,
     > {
-        let public_params = nova_snark::nova::PublicParams::setup(
-            self,
-            &*nova_snark::traits::snark::default_ck_hint::<NovaPrimaryEngine>(),
-            &*nova_snark::traits::snark::default_ck_hint::<NovaSecondaryEngine>(),
-        )
-        .map_err(|error| format!("BlindFold Nova setup failed: {error:?}"))?;
-        let (prover_key, verifier_key) = ZkCompressedSnark::setup(&public_params)
+        self.setup_pinned_with_observer(&mut ())
+    }
+
+    pub fn setup_pinned_with_observer(
+        &self,
+        observer: &mut impl RecursiveBlindFoldProfileObserver,
+    ) -> Result<
+        (
+            RecursiveBlindFoldVerifierProverParameters,
+            RecursiveBlindFoldVerifierVerificationKey,
+        ),
+        String,
+    > {
+        let public_params = observer
+            .observe(RecursiveBlindFoldProfilePhase::NovaSetup, || {
+                nova_snark::nova::PublicParams::setup(
+                    self,
+                    &*nova_snark::traits::snark::default_ck_hint::<NovaPrimaryEngine>(),
+                    &*nova_snark::traits::snark::default_ck_hint::<NovaSecondaryEngine>(),
+                )
+            })
+            .map_err(|error| format!("BlindFold Nova setup failed: {error:?}"))?;
+        let (prover_key, verifier_key) = observer
+            .observe(RecursiveBlindFoldProfilePhase::SpartanSetup, || {
+                ZkCompressedSnark::setup(&public_params)
+            })
             .map_err(|error| format!("BlindFold Spartan setup failed: {error:?}"))?;
         let shape_id = self.shape_id();
         Ok((
@@ -1071,27 +1145,48 @@ impl RecursiveBlindFoldVerifierProverParameters {
         &self,
         circuit: &RecursiveBlindFoldVerifierCircuit,
     ) -> Result<RecursiveBlindFoldSpartanProof, String> {
+        self.prove_with_observer(circuit, &mut ())
+    }
+
+    pub fn prove_with_observer(
+        &self,
+        circuit: &RecursiveBlindFoldVerifierCircuit,
+        observer: &mut impl RecursiveBlindFoldProfileObserver,
+    ) -> Result<RecursiveBlindFoldSpartanProof, String> {
         if circuit.shape_id() != self.shape_id {
             return Err("BlindFold circuit does not match pinned setup".to_string());
         }
         let z0 = circuit.initial_z().map_err(|error| format!("{error:?}"))?;
-        let mut recursive = ZkRecursiveSnark::new(&self.public_params, circuit, &z0)
+        let mut recursive = observer
+            .observe(RecursiveBlindFoldProfilePhase::NovaInitialization, || {
+                ZkRecursiveSnark::new(&self.public_params, circuit, &z0)
+            })
             .map_err(|error| format!("BlindFold Nova initialization failed: {error:?}"))?;
-        recursive
-            .prove_step(&self.public_params, circuit)
+        observer
+            .observe(RecursiveBlindFoldProfilePhase::NovaProveStep, || {
+                recursive.prove_step(&self.public_params, circuit)
+            })
             .map_err(|error| format!("BlindFold Nova proving failed: {error:?}"))?;
-        let output = recursive
-            .verify(&self.public_params, 1, &z0)
+        let output = observer
+            .observe(RecursiveBlindFoldProfilePhase::NovaSelfVerification, || {
+                recursive.verify(&self.public_params, 1, &z0)
+            })
             .map_err(|error| format!("BlindFold Nova self-check failed: {error:?}"))?;
         if output.len() != ZK_RECURSIVE_Z_ARITY || output[6] != NovaScalar::one() {
             return Err("BlindFold Nova did not derive acceptance".to_string());
         }
-        let compressed =
-            ZkCompressedSnark::prove(&self.public_params, &self.prover_key, &recursive)
-                .map_err(|error| format!("BlindFold Spartan proving failed: {error:?}"))?;
+        let compressed = observer
+            .observe(RecursiveBlindFoldProfilePhase::SpartanProve, || {
+                ZkCompressedSnark::prove(&self.public_params, &self.prover_key, &recursive)
+            })
+            .map_err(|error| format!("BlindFold Spartan proving failed: {error:?}"))?;
+        let proof_bytes = observer
+            .observe(RecursiveBlindFoldProfilePhase::ProofSerialization, || {
+                postcard::to_stdvec(&compressed)
+            })
+            .map_err(|error| format!("BlindFold proof serialization failed: {error}"))?;
         Ok(RecursiveBlindFoldSpartanProof {
-            proof_bytes: postcard::to_stdvec(&compressed)
-                .map_err(|error| format!("BlindFold proof serialization failed: {error}"))?,
+            proof_bytes,
             public_output: output.into_iter().map(nova_scalar_to_storage).collect(),
         })
     }

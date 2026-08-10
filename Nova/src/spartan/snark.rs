@@ -117,8 +117,25 @@ impl<E: Engine, EE: EvaluationEngineTrait<E>> RelaxedR1CSSNARKTrait<E> for Relax
     U: &RelaxedR1CSInstance<E>,
     W: &RelaxedR1CSWitness<E>,
   ) -> Result<Self, NovaError> {
+    let profile_enabled = std::env::var_os("JOLT_NOVA_PROFILE_SPARTAN").is_some();
+    let profile_engine = std::any::type_name::<E>();
+    let profile_total = std::time::Instant::now();
+    let mut profile_last = profile_total;
+    let mut profile_phase = |phase: &str| {
+      let now = std::time::Instant::now();
+      if profile_enabled {
+        eprintln!(
+          "jolt_nova_spartan_profile engine={profile_engine} phase={phase} elapsed_micros={} total_micros={}",
+          now.duration_since(profile_last).as_micros(),
+          now.duration_since(profile_total).as_micros(),
+        );
+      }
+      profile_last = now;
+    };
+
     // pad the R1CSShape
     let S = S.pad();
+    profile_phase("shape-padding");
     // sanity check that R1CSShape has all required size characteristics
     assert!(S.is_regular_shape());
 
@@ -131,6 +148,7 @@ impl<E: Engine, EE: EvaluationEngineTrait<E>> RelaxedR1CSSNARKTrait<E> for Relax
 
     // compute the full satisfying assignment by concatenating W.W, U.u, and U.X
     let mut z = [W.W.clone(), vec![U.u], U.X.clone()].concat();
+    profile_phase("witness-preparation");
 
     let (num_rounds_x, num_rounds_y) = (
       usize::try_from(S.num_cons.ilog2()).unwrap(),
@@ -154,6 +172,7 @@ impl<E: Engine, EE: EvaluationEngineTrait<E>> RelaxedR1CSSNARKTrait<E> for Relax
         MultilinearPolynomial::new(poly_uCz_E),
       )
     };
+    profile_phase("r1cs-multiply");
 
     let (sc_proof_outer, r_x, claims_outer) = SumcheckProof::prove_cubic_with_three_inputs(
       &E::Scalar::ZERO, // claim is zero
@@ -163,6 +182,7 @@ impl<E: Engine, EE: EvaluationEngineTrait<E>> RelaxedR1CSSNARKTrait<E> for Relax
       &mut poly_uCz_E,
       &mut transcript,
     )?;
+    profile_phase("outer-sumcheck");
 
     // claims from the end of sum-check
     let (claim_Az, claim_Bz): (E::Scalar, E::Scalar) = (claims_outer[0], claims_outer[1]);
@@ -172,6 +192,7 @@ impl<E: Engine, EE: EvaluationEngineTrait<E>> RelaxedR1CSSNARKTrait<E> for Relax
       b"claims_outer",
       &[claim_Az, claim_Bz, claim_Cz, eval_E].as_slice(),
     );
+    profile_phase("outer-claims");
 
     // inner sum-check
     let r = transcript.squeeze(b"r")?;
@@ -190,6 +211,7 @@ impl<E: Engine, EE: EvaluationEngineTrait<E>> RelaxedR1CSSNARKTrait<E> for Relax
         .map(|i| evals_A[i] + r * evals_B[i] + r * r * evals_C[i])
         .collect::<Vec<E::Scalar>>()
     };
+    profile_phase("matrix-evaluation-table");
 
     let poly_z = {
       z.resize(S.num_vars * 2, E::Scalar::ZERO);
@@ -203,6 +225,7 @@ impl<E: Engine, EE: EvaluationEngineTrait<E>> RelaxedR1CSSNARKTrait<E> for Relax
       &mut MultilinearPolynomial::new(poly_z),
       &mut transcript,
     )?;
+    profile_phase("inner-sumcheck");
 
     // Add additional claims about W and E polynomials to the list from CC
     // We will reduce a vector of claims of evaluations at different points into claims about them at the same point.
@@ -230,6 +253,7 @@ impl<E: Engine, EE: EvaluationEngineTrait<E>> RelaxedR1CSSNARKTrait<E> for Relax
 
     let (batched_u, batched_w, _chal, sc_proof_batch, claims_batch_left) =
       super::batch_eval_reduce(u_vec, w_vec, &mut transcript)?;
+    profile_phase("batch-evaluation-reduction");
 
     let eval_arg = EE::prove(
       ck,
@@ -240,6 +264,7 @@ impl<E: Engine, EE: EvaluationEngineTrait<E>> RelaxedR1CSSNARKTrait<E> for Relax
       &batched_u.x,
       &batched_u.e,
     )?;
+    profile_phase("evaluation-argument");
 
     Ok(RelaxedR1CSSNARK {
       sc_proof_outer,

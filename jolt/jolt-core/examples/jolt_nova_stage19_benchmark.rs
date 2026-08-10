@@ -1,3 +1,5 @@
+extern crate jolt_inlines_keccak256;
+
 use std::{
     cell::RefCell,
     error::Error,
@@ -21,10 +23,11 @@ use jolt_core::{
     poly::commitment::dory::DoryCommitmentScheme,
     zkvm::{
         block::{
-            stage19_hex_digest, BlockProofPipeline, NovaFoldingBackend, Stage18ReleaseParameters,
-            Stage18ZkEndToEndProof, Stage19BenchmarkArtifact, Stage19BenchmarkSample,
-            Stage19MemoryBytes, Stage19Platform, Stage19ProofSizes, Stage19RelationMeasurement,
-            Stage19TimingsMicros, JOLT_NOVA_STAGE19_LOOKUP_BACKEND,
+            stage19_hex_digest, BlockProofPipeline, NovaFoldingBackend,
+            RecursiveBlindFoldProfileObserver, RecursiveBlindFoldProfilePhase,
+            Stage18ReleaseParameters, Stage18ZkEndToEndProof, Stage19BenchmarkArtifact,
+            Stage19BenchmarkSample, Stage19MemoryBytes, Stage19Platform, Stage19ProofSizes,
+            Stage19RelationMeasurement, Stage19TimingsMicros, JOLT_NOVA_STAGE19_LOOKUP_BACKEND,
             JOLT_NOVA_STAGE19_PROFILE_METHOD,
         },
         program::ProgramPreprocessing,
@@ -33,6 +36,7 @@ use jolt_core::{
         RV64IMACProof, RV64IMACProver, RV64IMACVerifier, Serializable,
     },
 };
+use serde::Serialize;
 use serde_json::Value;
 use sha3::{Digest, Sha3_256};
 
@@ -70,6 +74,9 @@ struct Args {
 
     #[arg(long)]
     block_profile_output: Option<PathBuf>,
+
+    #[arg(long)]
+    blindfold_profile_output: Option<PathBuf>,
 
     #[arg(long)]
     baseline_input: Option<PathBuf>,
@@ -230,6 +237,80 @@ impl Drop for PeakMemorySampler {
     }
 }
 
+#[derive(Debug, Serialize)]
+struct BlindFoldPhaseMeasurement {
+    phase: &'static str,
+    elapsed_micros: u64,
+    memory_start: Option<u64>,
+    memory_peak: Option<u64>,
+    memory_peak_delta: Option<u64>,
+}
+
+struct ActiveBlindFoldPhase {
+    phase: RecursiveBlindFoldProfilePhase,
+    started: Instant,
+    memory_sampler: PeakMemorySampler,
+}
+
+struct BlindFoldProfileCollector {
+    memory_sample_interval_ms: u64,
+    active: Option<ActiveBlindFoldPhase>,
+    measurements: Vec<BlindFoldPhaseMeasurement>,
+}
+
+impl BlindFoldProfileCollector {
+    fn new(memory_sample_interval_ms: u64) -> Self {
+        Self {
+            memory_sample_interval_ms,
+            active: None,
+            measurements: Vec::new(),
+        }
+    }
+
+    fn finish(mut self) -> Vec<BlindFoldPhaseMeasurement> {
+        if let Some(active) = self.active.take() {
+            self.record_finished(active);
+        }
+        self.measurements
+    }
+
+    fn record_finished(&mut self, active: ActiveBlindFoldPhase) {
+        let elapsed_micros = elapsed_micros(active.started);
+        let memory = active.memory_sampler.finish();
+        self.measurements.push(BlindFoldPhaseMeasurement {
+            phase: active.phase.as_str(),
+            elapsed_micros,
+            memory_start: memory.start,
+            memory_peak: memory.peak,
+            memory_peak_delta: memory.peak_delta,
+        });
+    }
+}
+
+impl RecursiveBlindFoldProfileObserver for BlindFoldProfileCollector {
+    fn phase_started(&mut self, phase: RecursiveBlindFoldProfilePhase) {
+        if let Some(active) = self.active.take() {
+            self.record_finished(active);
+        }
+        self.active = Some(ActiveBlindFoldPhase {
+            phase,
+            started: Instant::now(),
+            memory_sampler: PeakMemorySampler::start(self.memory_sample_interval_ms),
+        });
+    }
+
+    fn phase_finished(&mut self, phase: RecursiveBlindFoldProfilePhase) {
+        let Some(active) = self.active.take() else {
+            return;
+        };
+        if active.phase != phase {
+            self.record_finished(active);
+            return;
+        }
+        self.record_finished(active);
+    }
+}
+
 fn main() {
     let args = Args::parse();
     let result = thread::Builder::new()
@@ -256,9 +337,15 @@ fn run(mut args: Args) -> Result<(), Box<dyn Error>> {
         .block_profile_output
         .clone()
         .unwrap_or_else(|| sibling_path(&args.output, "blocks.jsonl"));
+    let blindfold_profile_path = args
+        .blindfold_profile_output
+        .clone()
+        .unwrap_or_else(|| sibling_path(&args.output, "blindfold.jsonl"));
     ensure_parent(&profile_path)?;
+    ensure_parent(&blindfold_profile_path)?;
     let profile_writer = Rc::new(RefCell::new(BufWriter::new(File::create(&profile_path)?)));
     let profile_error = Rc::new(RefCell::new(None::<io::Error>));
+    let mut blindfold_profile_writer = BufWriter::new(File::create(&blindfold_profile_path)?);
 
     for warmup in 0..args.warmup_runs {
         println!("stage19 warmup {}/{}", warmup + 1, args.warmup_runs);
@@ -274,17 +361,28 @@ fn run(mut args: Args) -> Result<(), Box<dyn Error>> {
                 "stage19 measurement run={run_index}/{} block_size={block_size}",
                 args.measurement_runs
             );
-            samples.push(run_cell(
+            let (sample, blindfold_phases) = run_cell(
                 &mut prepared,
                 &args,
                 *block_size,
                 run_index,
                 Some(Rc::clone(&profile_writer)),
                 Some(Rc::clone(&profile_error)),
-            )?);
+            )?;
+            serde_json::to_writer(
+                &mut blindfold_profile_writer,
+                &serde_json::json!({
+                    "run_index": run_index,
+                    "block_target_size": block_size,
+                    "phases": blindfold_phases,
+                }),
+            )?;
+            blindfold_profile_writer.write_all(b"\n")?;
+            samples.push(sample);
         }
     }
     profile_writer.borrow_mut().flush()?;
+    blindfold_profile_writer.flush()?;
     if let Some(error) = profile_error.borrow_mut().take() {
         return Err(error.into());
     }
@@ -327,6 +425,10 @@ fn run(mut args: Args) -> Result<(), Box<dyn Error>> {
     println!("stage19_json={}", args.output.display());
     println!("stage19_markdown={}", markdown_path.display());
     println!("stage19_block_profiles={}", profile_path.display());
+    println!(
+        "stage19_blindfold_profiles={}",
+        blindfold_profile_path.display()
+    );
     println!("stage19_matrix_digest={}", artifact.matrix_digest);
     println!("stage19_bottleneck={}", artifact.bottleneck.phase);
     if artifact
@@ -392,7 +494,7 @@ fn run_cell(
     run_index: usize,
     profile_writer: Option<Rc<RefCell<BufWriter<File>>>>,
     profile_error: Option<Rc<RefCell<Option<io::Error>>>>,
-) -> Result<Stage19BenchmarkSample, Box<dyn Error>> {
+) -> Result<(Stage19BenchmarkSample, Vec<BlindFoldPhaseMeasurement>), Box<dyn Error>> {
     let total_started = Instant::now();
     let trace_started = Instant::now();
     let block_iterator = tracer::trace_blocks(
@@ -490,14 +592,19 @@ fn run_cell(
     let metrics = streaming.metrics().clone();
 
     let blindfold_started = Instant::now();
+    let mut blindfold_profile = BlindFoldProfileCollector::new(args.memory_sample_interval_ms);
     let (end_to_end, verification_key, blindfold_baseline) = Stage18ZkEndToEndProof::<
         Bn254Curve,
         DoryCommitmentScheme,
         [u8; 32],
-    >::prove_from_verified_artifacts(
-        streaming, artifacts, &parameters
+    >::prove_from_verified_artifacts_with_observer(
+        streaming,
+        artifacts,
+        &parameters,
+        &mut blindfold_profile,
     )?;
     let recursive_blindfold_prove = elapsed_micros(blindfold_started);
+    let blindfold_phases = blindfold_profile.finish();
 
     let final_verify_started = Instant::now();
     end_to_end.verify(&parameters, &receipt, &verification_key)?;
@@ -572,7 +679,7 @@ fn run_cell(
         sample.active_cycles,
         sample.timings_micros.measured_total as f64 / 1_000.0
     );
-    Ok(sample)
+    Ok((sample, blindfold_phases))
 }
 
 fn normalize_and_validate_args(args: &mut Args) -> Result<(), String> {
@@ -616,9 +723,17 @@ fn normalize_and_validate_args(args: &mut Args) -> Result<(), String> {
             .clone()
             .unwrap_or_else(|| sibling_path(&args.output, "blocks.jsonl")),
     );
+    paths.push(
+        args.blindfold_profile_output
+            .clone()
+            .unwrap_or_else(|| sibling_path(&args.output, "blindfold.jsonl")),
+    );
     let unique = paths.iter().collect::<std::collections::BTreeSet<_>>();
     if unique.len() != paths.len() {
-        return Err("JSON, Markdown, and block-profile outputs must be distinct".to_string());
+        return Err(
+            "JSON, Markdown, block-profile, and BlindFold-profile outputs must be distinct"
+                .to_string(),
+        );
     }
     Ok(())
 }
@@ -672,6 +787,7 @@ mod tests {
             output: PathBuf::from("stage19.json"),
             markdown_output: None,
             block_profile_output: None,
+            blindfold_profile_output: None,
             baseline_input: None,
             max_regression_percent: 15.0,
             guest_target: PathBuf::from("target-stage-19-guest"),

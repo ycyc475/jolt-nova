@@ -60,6 +60,7 @@ pub use recursive_verifier_circuit::{
 #[cfg(all(feature = "nova", feature = "zk"))]
 pub use recursive_zk_verifier::{
     RecursiveBlindFoldBaseline, RecursiveBlindFoldGroupObligation,
+    RecursiveBlindFoldProfileObserver, RecursiveBlindFoldProfilePhase,
     RecursiveBlindFoldRelationArtifact, RecursiveBlindFoldSpartanProof,
     RecursiveBlindFoldStatement, RecursiveBlindFoldVerifierCircuit,
     RecursiveBlindFoldVerifierProverParameters, RecursiveBlindFoldVerifierVerificationKey,

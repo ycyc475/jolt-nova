@@ -478,62 +478,106 @@ where
         ),
         Stage18Error,
     > {
-        let receipt = artifacts.verified_jolt_receipt().clone();
-        streaming_execution.verify(parameters, &receipt)?;
-        if streaming_execution.verified_jolt_receipt_digest() != receipt.digest() {
-            return Err(Stage18Error::LinkageMismatch(
-                "streaming proof was not produced from this verifier invocation",
-            ));
-        }
-        let recursive_statement = artifacts.statement();
-        if recursive_statement.jolt_statement_id != streaming_execution.jolt_statement_id() {
-            return Err(Stage18Error::LinkageMismatch(
-                "block folding and recursive verifier use different Jolt statements",
-            ));
-        }
-        if recursive_statement.shape_id != parameters.recursive_verifier_shape_id() {
-            return Err(Stage18Error::LinkageMismatch(
-                "recursive verifier shape is not the release-pinned shape",
-            ));
-        }
+        Self::prove_from_verified_artifacts_with_observer(
+            streaming_execution,
+            artifacts,
+            parameters,
+            &mut (),
+        )
+    }
 
-        let deferred_pcs_id = artifacts.deferred_pcs_id();
-        let (blindfold_artifact, deferred_pcs_opening) = artifacts.into_parts();
-        let (circuit, group_obligation) = blindfold_artifact.into_parts();
-        if circuit.statement() != recursive_statement {
-            return Err(Stage18Error::LinkageMismatch(
-                "recursive circuit statement changed during artifact decomposition",
-            ));
-        }
+    pub fn prove_from_verified_artifacts_with_observer(
+        streaming_execution: Stage18StreamingNovaProof<Digest>,
+        artifacts: RecursiveJoltZkVerifiedArtifacts<C, PCS>,
+        parameters: &Stage18ReleaseParameters,
+        observer: &mut impl RecursiveBlindFoldProfileObserver,
+    ) -> Result<
+        (
+            Self,
+            RecursiveBlindFoldVerifierVerificationKey,
+            RecursiveBlindFoldBaseline,
+        ),
+        Stage18Error,
+    > {
+        let (receipt, recursive_statement) = observer.observe(
+            RecursiveBlindFoldProfilePhase::PreflightVerification,
+            || {
+                let receipt = artifacts.verified_jolt_receipt().clone();
+                streaming_execution.verify(parameters, &receipt)?;
+                if streaming_execution.verified_jolt_receipt_digest() != receipt.digest() {
+                    return Err(Stage18Error::LinkageMismatch(
+                        "streaming proof was not produced from this verifier invocation",
+                    ));
+                }
+                let recursive_statement = artifacts.statement();
+                if recursive_statement.jolt_statement_id != streaming_execution.jolt_statement_id()
+                {
+                    return Err(Stage18Error::LinkageMismatch(
+                        "block folding and recursive verifier use different Jolt statements",
+                    ));
+                }
+                if recursive_statement.shape_id != parameters.recursive_verifier_shape_id() {
+                    return Err(Stage18Error::LinkageMismatch(
+                        "recursive verifier shape is not the release-pinned shape",
+                    ));
+                }
+                Ok((receipt, recursive_statement))
+            },
+        )?;
+
+        let (deferred_pcs_id, circuit, group_obligation, deferred_pcs_opening) =
+            observer.observe(RecursiveBlindFoldProfilePhase::ArtifactPreparation, || {
+                let deferred_pcs_id = artifacts.deferred_pcs_id();
+                let (blindfold_artifact, deferred_pcs_opening) = artifacts.into_parts();
+                let (circuit, group_obligation) = blindfold_artifact.into_parts();
+                if circuit.statement() != recursive_statement {
+                    return Err(Stage18Error::LinkageMismatch(
+                        "recursive circuit statement changed during artifact decomposition",
+                    ));
+                }
+                Ok((
+                    deferred_pcs_id,
+                    circuit,
+                    group_obligation,
+                    deferred_pcs_opening,
+                ))
+            })?;
         let (prover_parameters, verification_key) = circuit
-            .setup_pinned()
+            .setup_pinned_with_observer(observer)
             .map_err(Stage18Error::RecursiveVerification)?;
         let recursive_proof = prover_parameters
-            .prove(&circuit)
+            .prove_with_observer(&circuit, observer)
             .map_err(Stage18Error::RecursiveVerification)?;
-        let baseline = circuit.baseline(&recursive_proof);
-        let recursive_acceptance = RecursiveJoltZkCompleteFinalAcceptance {
-            blindfold: RecursiveJoltZkRecursiveFinalAcceptance {
-                recursive_proof,
-                group_obligation,
-            },
-            deferred_pcs_opening,
-        };
-        let linkage_digest = digest_stage18_zk_end_to_end_linkage(
-            &streaming_execution,
-            &recursive_statement,
-            &recursive_acceptance,
-            deferred_pcs_id,
-            parameters.digest(),
-        );
-        let proof = Self {
-            streaming_execution,
-            recursive_statement,
-            recursive_acceptance,
-            deferred_pcs_id,
-            linkage_digest,
-        };
-        proof.verify(parameters, &receipt, &verification_key)?;
+        let (proof, baseline) =
+            observer.observe(RecursiveBlindFoldProfilePhase::EnvelopeAssembly, || {
+                let baseline = circuit.baseline(&recursive_proof);
+                let recursive_acceptance = RecursiveJoltZkCompleteFinalAcceptance {
+                    blindfold: RecursiveJoltZkRecursiveFinalAcceptance {
+                        recursive_proof,
+                        group_obligation,
+                    },
+                    deferred_pcs_opening,
+                };
+                let linkage_digest = digest_stage18_zk_end_to_end_linkage(
+                    &streaming_execution,
+                    &recursive_statement,
+                    &recursive_acceptance,
+                    deferred_pcs_id,
+                    parameters.digest(),
+                );
+                let proof = Self {
+                    streaming_execution,
+                    recursive_statement,
+                    recursive_acceptance,
+                    deferred_pcs_id,
+                    linkage_digest,
+                };
+                (proof, baseline)
+            });
+        observer.observe(
+            RecursiveBlindFoldProfilePhase::EndToEndSelfVerification,
+            || proof.verify(parameters, &receipt, &verification_key),
+        )?;
         Ok((proof, verification_key, baseline))
     }
 
