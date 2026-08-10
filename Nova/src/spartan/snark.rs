@@ -26,6 +26,7 @@ use ff::Field;
 use once_cell::sync::OnceCell;
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
+use std::sync::Arc;
 
 /// A type that represents the prover's key
 #[derive(Serialize, Deserialize)]
@@ -33,6 +34,8 @@ use serde::{Deserialize, Serialize};
 pub struct ProverKey<E: Engine, EE: EvaluationEngineTrait<E>> {
   pk_ee: EE::ProverKey,
   vk_digest: E::Scalar, // digest of the verifier's key
+  #[serde(skip)]
+  S: Option<Arc<R1CSShape<E>>>,
 }
 
 /// A type that represents the verifier's key
@@ -40,7 +43,7 @@ pub struct ProverKey<E: Engine, EE: EvaluationEngineTrait<E>> {
 #[serde(bound = "")]
 pub struct VerifierKey<E: Engine, EE: EvaluationEngineTrait<E>> {
   vk_ee: EE::VerifierKey,
-  S: R1CSShape<E>,
+  S: Arc<R1CSShape<E>>,
   #[serde(skip, default = "OnceCell::new")]
   digest: OnceCell<E::Scalar>,
 }
@@ -48,7 +51,7 @@ pub struct VerifierKey<E: Engine, EE: EvaluationEngineTrait<E>> {
 impl<E: Engine, EE: EvaluationEngineTrait<E>> SimpleDigestible for VerifierKey<E, EE> {}
 
 impl<E: Engine, EE: EvaluationEngineTrait<E>> VerifierKey<E, EE> {
-  fn new(shape: R1CSShape<E>, vk_ee: EE::VerifierKey) -> Self {
+  fn new(shape: Arc<R1CSShape<E>>, vk_ee: EE::VerifierKey) -> Self {
     VerifierKey {
       vk_ee,
       S: shape,
@@ -97,13 +100,14 @@ impl<E: Engine, EE: EvaluationEngineTrait<E>> RelaxedR1CSSNARKTrait<E> for Relax
   ) -> Result<(Self::ProverKey, Self::VerifierKey), NovaError> {
     let (pk_ee, vk_ee) = EE::setup(ck)?;
 
-    let S = S.pad();
+    let S = Arc::new(S.pad());
 
-    let vk: VerifierKey<E, EE> = VerifierKey::new(S, vk_ee);
+    let vk: VerifierKey<E, EE> = VerifierKey::new(Arc::clone(&S), vk_ee);
 
     let pk = ProverKey {
       pk_ee,
       vk_digest: vk.digest(),
+      S: Some(S),
     };
 
     Ok((pk, vk))
@@ -113,7 +117,7 @@ impl<E: Engine, EE: EvaluationEngineTrait<E>> RelaxedR1CSSNARKTrait<E> for Relax
   fn prove(
     ck: &CommitmentKey<E>,
     pk: &Self::ProverKey,
-    S: &R1CSShape<E>,
+    _S: &R1CSShape<E>,
     U: &RelaxedR1CSInstance<E>,
     W: &RelaxedR1CSWitness<E>,
   ) -> Result<Self, NovaError> {
@@ -133,13 +137,16 @@ impl<E: Engine, EE: EvaluationEngineTrait<E>> RelaxedR1CSSNARKTrait<E> for Relax
       profile_last = now;
     };
 
-    // pad the R1CSShape
-    let S = S.pad();
+    // Setup binds this padded shape into `vk_digest`. Reuse the same allocation
+    // from an in-memory prover key. Serialized keys omit this cache and retain
+    // the original padding path after deserialization.
+    let fallback_shape = pk.S.is_none().then(|| _S.pad());
+    let S = pk.S.as_deref().or(fallback_shape.as_ref()).unwrap();
     profile_phase("shape-padding");
     // sanity check that R1CSShape has all required size characteristics
     assert!(S.is_regular_shape());
 
-    let W = W.pad(&S); // pad the witness
+    let W = W.pad(S); // pad the witness
     let mut transcript = E::TE::new(b"RelaxedR1CSSNARK");
 
     // append the digest of vk (which includes R1CS matrices) and the RelaxedR1CSInstance to the transcript
@@ -202,7 +209,7 @@ impl<E: Engine, EE: EvaluationEngineTrait<E>> RelaxedR1CSSNARKTrait<E> for Relax
       // compute the initial evaluation table for R(\tau, x)
       let evals_rx = EqPolynomial::evals_from_points(&r_x.clone());
 
-      let (evals_A, evals_B, evals_C) = compute_eval_table_sparse(&S, &evals_rx);
+      let (evals_A, evals_B, evals_C) = compute_eval_table_sparse(S, &evals_rx);
 
       assert_eq!(evals_A.len(), evals_B.len());
       assert_eq!(evals_A.len(), evals_C.len());

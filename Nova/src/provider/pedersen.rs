@@ -598,7 +598,7 @@ where
     assert_eq!(extra.ck.len(), 1);
 
     Commitment {
-      comm: E::GE::vartime_multiscalar_mul(scalars, &self.ck[range])
+      comm: E::GE::vartime_multiscalar_mul_dense(scalars, &self.ck[range])
         + E::GE::group(&extra.ck[0]) * *extra_scalar,
     }
   }

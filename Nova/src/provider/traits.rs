@@ -78,6 +78,16 @@ pub trait DlogGroupExt: DlogGroup {
   /// A method to compute a multiexponentation
   fn vartime_multiscalar_mul(scalars: &[Self::Scalar], bases: &[Self::AffineGroupElement]) -> Self;
 
+  /// Computes an MSM whose scalars are expected to be dense field elements.
+  /// Implementations may bypass small-scalar classification and dispatch
+  /// directly to their full-width MSM backend.
+  fn vartime_multiscalar_mul_dense(
+    scalars: &[Self::Scalar],
+    bases: &[Self::AffineGroupElement],
+  ) -> Self {
+    Self::vartime_multiscalar_mul(scalars, bases)
+  }
+
   /// Computes a two-term multiexponentiation.
   fn vartime_double_scalar_mul(
     scalars: &[Self::Scalar; 2],

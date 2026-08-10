@@ -111,6 +111,14 @@ impl DlogGroupExt for bn256::Point {
   }
 
   #[cfg(not(feature = "blitzar"))]
+  fn vartime_multiscalar_mul_dense(
+    scalars: &[Self::Scalar],
+    bases: &[Self::AffineGroupElement],
+  ) -> Self {
+    halo2curves::msm::msm_best(scalars, bases)
+  }
+
+  #[cfg(not(feature = "blitzar"))]
   fn vartime_double_scalar_mul(
     scalars: &[Self::Scalar; 2],
     bases: &[Self::AffineGroupElement; 2],
@@ -496,5 +504,22 @@ mod endo_double_scalar_tests {
       );
       assert_eq!(actual, expected);
     }
+  }
+
+  #[test]
+  fn test_bn256_dense_msm() {
+    let mut scalars = (0..257)
+      .map(|_| bn256::Scalar::random(OsRng))
+      .collect::<Vec<_>>();
+    scalars[0] = bn256::Scalar::ZERO;
+    scalars[1] = bn256::Scalar::ONE;
+    let bases = (0..scalars.len())
+      .map(|_| (bn256::Point::generator() * bn256::Scalar::random(OsRng)).to_affine())
+      .collect::<Vec<_>>();
+
+    assert_eq!(
+      <bn256::Point as DlogGroupExt>::vartime_multiscalar_mul_dense(&scalars, &bases),
+      crate::provider::msm::msm(&scalars, &bases)
+    );
   }
 }

@@ -288,6 +288,11 @@ mod tests {
     // produce keys
     let (pk, vk) =
       DirectSNARK::<E, S, CubicCircuit<<E as Engine>::Scalar>>::setup(circuit.clone()).unwrap();
+    let pk_bytes =
+      bincode::serde::encode_to_vec(&pk, bincode::config::legacy()).expect("serialize prover key");
+    let (pk, _): (ProverKey<E, S>, usize) =
+      bincode::serde::decode_from_slice(&pk_bytes, bincode::config::legacy())
+        .expect("deserialize prover key");
 
     let num_steps = 3;
 
