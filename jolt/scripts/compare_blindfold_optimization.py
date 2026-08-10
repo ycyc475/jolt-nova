@@ -173,7 +173,7 @@ def main() -> None:
         "recursive_delta_mib",
     )
     lines = [
-        "# BlindFold generator cache A/B 报告",
+        "# BlindFold optimization A/B 报告",
         "",
         f"- workload：`{result['workload']}`",
         f"- block size：{result['block_target_size']}",

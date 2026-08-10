@@ -180,7 +180,7 @@ where
   ) -> Result<Self, NovaError> {
     transcript.dom_sep(Self::protocol_name());
 
-    let (ck, _) = ck.split_at(U.b_vec.len());
+    let ck = ck.prefix(U.b_vec.len());
 
     if U.b_vec.len() != W.a_vec.len() {
       return Err(NovaError::InvalidInputLength);
@@ -209,29 +209,11 @@ where
       NovaError,
     > {
       let n = a_vec.len();
-      let (ck_L, ck_R) = ck.split_at(n / 2);
-
       let c_L = inner_product(&a_vec[0..n / 2], &b_vec[n / 2..n]);
       let c_R = inner_product(&a_vec[n / 2..n], &b_vec[0..n / 2]);
 
-      let L = CE::<E>::commit(
-        &ck_R.combine(&ck_c),
-        &a_vec[0..n / 2]
-          .iter()
-          .chain(iter::once(&c_L))
-          .copied()
-          .collect::<Vec<E::Scalar>>(),
-        &E::Scalar::ZERO,
-      );
-      let R = CE::<E>::commit(
-        &ck_L.combine(&ck_c),
-        &a_vec[n / 2..n]
-          .iter()
-          .chain(iter::once(&c_R))
-          .copied()
-          .collect::<Vec<E::Scalar>>(),
-        &E::Scalar::ZERO,
-      );
+      let L = ck.commit_range_with_extra(n / 2..n, &a_vec[0..n / 2], &ck_c, &c_L);
+      let R = ck.commit_range_with_extra(0..n / 2, &a_vec[n / 2..n], &ck_c, &c_R);
 
       transcript.absorb(b"L", &L);
       transcript.absorb(b"R", &R);
@@ -291,7 +273,7 @@ where
     U: &InnerProductInstance<E>,
     transcript: &mut E::TE,
   ) -> Result<(), NovaError> {
-    let (ck, _) = ck.split_at(U.b_vec.len());
+    let ck = ck.prefix(U.b_vec.len());
 
     transcript.dom_sep(Self::protocol_name());
     if U.b_vec.len() != n

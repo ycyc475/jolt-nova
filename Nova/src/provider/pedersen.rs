@@ -518,10 +518,27 @@ pub trait CommitmentKeyExtTrait<E: Engine>
 where
   E::GE: DlogGroup,
 {
+  /// Returns the first `n` generators, sharing storage when the full key is requested.
+  fn prefix(&self, n: usize) -> Self
+  where
+    Self: Sized;
+
   /// Splits the commitment key into two pieces at a specified point
   fn split_at(&self, n: usize) -> (Self, Self)
   where
     Self: Sized;
+
+  /// Commits to `scalars` over a generator range and one extra generator.
+  ///
+  /// This is the allocation-free equivalent of combining the selected key
+  /// range with a one-element key and committing with zero blinding.
+  fn commit_range_with_extra(
+    &self,
+    range: Range<usize>,
+    scalars: &[E::Scalar],
+    extra: &Self,
+    extra_scalar: &E::Scalar,
+  ) -> <E::CE as CommitmentEngineTrait<E>>::Commitment;
 
   /// Combines two commitment keys into one
   fn combine(&self, other: &Self) -> Self;
@@ -544,6 +561,18 @@ impl<E: Engine<CE = CommitmentEngine<E>> + 'static> CommitmentKeyExtTrait<E> for
 where
   E::GE: DlogGroupExt,
 {
+  fn prefix(&self, n: usize) -> CommitmentKey<E> {
+    assert!(n <= self.ck.len());
+    CommitmentKey {
+      ck: if n == self.ck.len() {
+        Arc::clone(&self.ck)
+      } else {
+        Arc::new(self.ck[..n].to_vec())
+      },
+      h: self.h,
+    }
+  }
+
   fn split_at(&self, n: usize) -> (CommitmentKey<E>, CommitmentKey<E>) {
     (
       CommitmentKey {
@@ -555,6 +584,23 @@ where
         h: self.h,
       },
     )
+  }
+
+  fn commit_range_with_extra(
+    &self,
+    range: Range<usize>,
+    scalars: &[E::Scalar],
+    extra: &CommitmentKey<E>,
+    extra_scalar: &E::Scalar,
+  ) -> <E::CE as CommitmentEngineTrait<E>>::Commitment {
+    assert_eq!(range.len(), scalars.len());
+    assert!(range.end <= self.ck.len());
+    assert_eq!(extra.ck.len(), 1);
+
+    Commitment {
+      comm: E::GE::vartime_multiscalar_mul(scalars, &self.ck[range])
+        + E::GE::group(&extra.ck[0]) * *extra_scalar,
+    }
   }
 
   fn combine(&self, other: &CommitmentKey<E>) -> CommitmentKey<E> {
@@ -569,13 +615,13 @@ where
 
   // combines the left and right halves of `self` using `w1` and `w2` as the weights
   fn fold(&self, w1: &E::Scalar, w2: &E::Scalar) -> CommitmentKey<E> {
-    let weights = vec![*w1, *w2];
-    let (left, right) = self.split_at(self.ck.len() / 2);
+    let half = self.ck.len() / 2;
+    let weights = [*w1, *w2];
 
-    let ck = (0..self.ck.len() / 2)
+    let ck = (0..half)
       .into_par_iter()
       .map(|i| {
-        let bases = [left.ck[i], right.ck[i]].to_vec();
+        let bases = [self.ck[i], self.ck[i + half]];
         E::GE::vartime_multiscalar_mul(&weights, &bases).affine()
       })
       .collect();
