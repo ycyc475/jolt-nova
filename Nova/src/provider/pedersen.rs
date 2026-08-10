@@ -622,7 +622,7 @@ where
       .into_par_iter()
       .map(|i| {
         let bases = [self.ck[i], self.ck[i + half]];
-        E::GE::vartime_multiscalar_mul(&weights, &bases).affine()
+        E::GE::vartime_double_scalar_mul(&weights, &bases).affine()
       })
       .collect();
 

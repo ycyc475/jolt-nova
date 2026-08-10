@@ -13,7 +13,7 @@ use core::iter;
 use ff::Field;
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
-use std::marker::PhantomData;
+use std::{marker::PhantomData, time::Instant};
 
 /// Provides an implementation of the prover key
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -178,6 +178,9 @@ where
     W: &InnerProductWitness<E>,
     transcript: &mut E::TE,
   ) -> Result<Self, NovaError> {
+    let profile_enabled = std::env::var_os("JOLT_NOVA_PROFILE_IPA").is_some();
+    let profile_engine = std::any::type_name::<E>();
+    let profile_total = Instant::now();
     transcript.dom_sep(Self::protocol_name());
 
     let ck = ck.prefix(U.b_vec.len());
@@ -193,52 +196,6 @@ where
     let r = transcript.squeeze(b"r")?;
     let ck_c = ck_c.scale(&r);
 
-    // a closure that executes a step of the recursive inner product argument
-    let prove_inner = |a_vec: &[E::Scalar],
-                       b_vec: &[E::Scalar],
-                       ck: &CommitmentKey<E>,
-                       transcript: &mut E::TE|
-     -> Result<
-      (
-        Commitment<E>,
-        Commitment<E>,
-        Vec<E::Scalar>,
-        Vec<E::Scalar>,
-        CommitmentKey<E>,
-      ),
-      NovaError,
-    > {
-      let n = a_vec.len();
-      let c_L = inner_product(&a_vec[0..n / 2], &b_vec[n / 2..n]);
-      let c_R = inner_product(&a_vec[n / 2..n], &b_vec[0..n / 2]);
-
-      let L = ck.commit_range_with_extra(n / 2..n, &a_vec[0..n / 2], &ck_c, &c_L);
-      let R = ck.commit_range_with_extra(0..n / 2, &a_vec[n / 2..n], &ck_c, &c_R);
-
-      transcript.absorb(b"L", &L);
-      transcript.absorb(b"R", &R);
-
-      let r = transcript.squeeze(b"r")?;
-      let r_inverse = r.invert().unwrap();
-
-      // fold the left half and the right half
-      let a_vec_folded = a_vec[0..n / 2]
-        .par_iter()
-        .zip(a_vec[n / 2..n].par_iter())
-        .map(|(a_L, a_R)| *a_L * r + r_inverse * *a_R)
-        .collect::<Vec<E::Scalar>>();
-
-      let b_vec_folded = b_vec[0..n / 2]
-        .par_iter()
-        .zip(b_vec[n / 2..n].par_iter())
-        .map(|(b_L, b_R)| *b_L * r_inverse + r * *b_R)
-        .collect::<Vec<E::Scalar>>();
-
-      let ck_folded = ck.fold(&r_inverse, &r);
-
-      Ok((L, R, a_vec_folded, b_vec_folded, ck_folded))
-    };
-
     // two vectors to hold the logarithmic number of group elements
     let mut L_vec: Vec<Commitment<E>> = Vec::new();
     let mut R_vec: Vec<Commitment<E>> = Vec::new();
@@ -247,15 +204,56 @@ where
     let mut a_vec = W.a_vec.to_vec();
     let mut b_vec = U.b_vec.to_vec();
     let mut ck = ck;
-    for _i in 0..usize::try_from(U.b_vec.len().ilog2()).unwrap() {
-      let (L, R, a_vec_folded, b_vec_folded, ck_folded) =
-        prove_inner(&a_vec, &b_vec, &ck, transcript)?;
+    for round in 0..usize::try_from(U.b_vec.len().ilog2()).unwrap() {
+      let round_started = Instant::now();
+      let n = a_vec.len();
+
+      let phase_started = Instant::now();
+      let c_L = inner_product(&a_vec[0..n / 2], &b_vec[n / 2..n]);
+      let c_R = inner_product(&a_vec[n / 2..n], &b_vec[0..n / 2]);
+      let inner_product_micros = phase_started.elapsed().as_micros();
+
+      let phase_started = Instant::now();
+      let L = ck.commit_range_with_extra(n / 2..n, &a_vec[0..n / 2], &ck_c, &c_L);
+      let R = ck.commit_range_with_extra(0..n / 2, &a_vec[n / 2..n], &ck_c, &c_R);
+      let commitment_micros = phase_started.elapsed().as_micros();
+
+      let phase_started = Instant::now();
+      transcript.absorb(b"L", &L);
+      transcript.absorb(b"R", &R);
+      let r = transcript.squeeze(b"r")?;
+      let r_inverse = r.invert().unwrap();
+      let transcript_micros = phase_started.elapsed().as_micros();
+
+      let phase_started = Instant::now();
+      let a_vec_folded = a_vec[0..n / 2]
+        .par_iter()
+        .zip(a_vec[n / 2..n].par_iter())
+        .map(|(a_L, a_R)| *a_L * r + r_inverse * *a_R)
+        .collect::<Vec<E::Scalar>>();
+      let b_vec_folded = b_vec[0..n / 2]
+        .par_iter()
+        .zip(b_vec[n / 2..n].par_iter())
+        .map(|(b_L, b_R)| *b_L * r_inverse + r * *b_R)
+        .collect::<Vec<E::Scalar>>();
+      let scalar_fold_micros = phase_started.elapsed().as_micros();
+
+      let phase_started = Instant::now();
+      let ck_folded = ck.fold(&r_inverse, &r);
+      let generator_fold_micros = phase_started.elapsed().as_micros();
+
       L_vec.push(L);
       R_vec.push(R);
-
       a_vec = a_vec_folded;
       b_vec = b_vec_folded;
       ck = ck_folded;
+      if profile_enabled {
+        eprintln!(
+          "jolt_nova_ipa_profile engine={profile_engine} round={round} input_len={n} inner_product_micros={inner_product_micros} commitment_micros={commitment_micros} transcript_micros={transcript_micros} scalar_fold_micros={scalar_fold_micros} generator_fold_micros={generator_fold_micros} round_total_micros={} total_micros={}",
+          round_started.elapsed().as_micros(),
+          profile_total.elapsed().as_micros(),
+        );
+      }
     }
 
     Ok(InnerProductArgument {

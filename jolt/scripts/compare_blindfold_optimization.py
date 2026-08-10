@@ -196,7 +196,7 @@ def main() -> None:
     lines.extend(
         [
             "",
-            "正值表示耗时或内存下降。该优化只改善同一进程中首次证明之后的热路径；冷启动仍需生成 generator key。",
+            "正值表示耗时或内存下降。表中 measurement samples 位于 warmup 后的热路径；冷路径需要单独测量。",
             "",
         ]
     )

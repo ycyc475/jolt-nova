@@ -78,6 +78,14 @@ pub trait DlogGroupExt: DlogGroup {
   /// A method to compute a multiexponentation
   fn vartime_multiscalar_mul(scalars: &[Self::Scalar], bases: &[Self::AffineGroupElement]) -> Self;
 
+  /// Computes a two-term multiexponentiation.
+  fn vartime_double_scalar_mul(
+    scalars: &[Self::Scalar; 2],
+    bases: &[Self::AffineGroupElement; 2],
+  ) -> Self {
+    Self::vartime_multiscalar_mul(scalars, bases)
+  }
+
   /// A method to compute a batch of multiexponentations
   fn batch_vartime_multiscalar_mul(
     scalars: &[Vec<Self::Scalar>],
@@ -374,6 +382,13 @@ macro_rules! impl_traits {
         bases: &[Self::AffineGroupElement],
       ) -> Self {
         msm(scalars, bases)
+      }
+
+      fn vartime_double_scalar_mul(
+        scalars: &[Self::Scalar; 2],
+        bases: &[Self::AffineGroupElement; 2],
+      ) -> Self {
+        $crate::provider::msm::vartime_double_scalar_mul(scalars, bases)
       }
 
       fn vartime_multiscalar_mul_small<T: Integer + Into<u64> + Copy + Sync + ToPrimitive>(

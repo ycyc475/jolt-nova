@@ -428,6 +428,57 @@ fn msm_simple<C: CurveAffine>(coeffs: &[C::Scalar], bases: &[C]) -> C::Curve {
     })
 }
 
+/// Computes `scalars[0] * bases[0] + scalars[1] * bases[1]` with a joint
+/// two-bit window. The two scalars share the doubling chain, which avoids the
+/// duplicated doublings performed by two independent scalar multiplications.
+pub(crate) fn vartime_double_scalar_mul<C: CurveAffine>(
+  scalars: &[C::Scalar; 2],
+  bases: &[C; 2],
+) -> C::Curve {
+  let left: C::Curve = bases[0].into();
+  let right: C::Curve = bases[1].into();
+  let mut left_multiples = [C::Curve::identity(); 4];
+  let mut right_multiples = [C::Curve::identity(); 4];
+  left_multiples[1] = left;
+  left_multiples[2] = left + left;
+  left_multiples[3] = left_multiples[2] + left;
+  right_multiples[1] = right;
+  right_multiples[2] = right + right;
+  right_multiples[3] = right_multiples[2] + right;
+
+  let mut table = [C::Curve::identity(); 16];
+  for left_digit in 0..4 {
+    for right_digit in 0..4 {
+      table[(left_digit << 2) | right_digit] =
+        left_multiples[left_digit] + right_multiples[right_digit];
+    }
+  }
+
+  let left_repr = scalars[0].to_repr();
+  let right_repr = scalars[1].to_repr();
+  let left_bytes = left_repr.as_ref();
+  let right_bytes = right_repr.as_ref();
+  debug_assert_eq!(left_bytes.len(), right_bytes.len());
+
+  let mut acc = C::Curve::identity();
+  let mut started = false;
+  for byte_index in (0..left_bytes.len()).rev() {
+    for shift in [6, 4, 2, 0] {
+      let left_digit = usize::from((left_bytes[byte_index] >> shift) & 0b11);
+      let right_digit = usize::from((right_bytes[byte_index] >> shift) & 0b11);
+      let table_index = (left_digit << 2) | right_digit;
+      if started {
+        acc = acc.double().double();
+      }
+      if table_index != 0 {
+        acc += table[table_index];
+        started = true;
+      }
+    }
+  }
+  acc
+}
+
 /// Accumulate bases (sum of affine points, for binary MSM).
 fn accumulate_bases<C: CurveAffine>(bases: &[C]) -> C::Curve {
   let num_threads = current_num_threads();
@@ -746,6 +797,30 @@ mod tests {
     test_general_msm_with::<grumpkin::Scalar, grumpkin::Affine>();
     test_general_msm_with::<secp256k1::Scalar, secp256k1::Affine>();
     test_general_msm_with::<secq256k1::Scalar, secq256k1::Affine>();
+  }
+
+  fn test_double_scalar_mul_with<F: PrimeField, A: CurveAffine<ScalarExt = F>>() {
+    for _ in 0..8 {
+      let scalars = [F::random(OsRng), F::random(OsRng)];
+      let bases = [
+        A::from(A::generator() * F::random(OsRng)),
+        A::from(A::generator() * F::random(OsRng)),
+      ];
+      assert_eq!(
+        vartime_double_scalar_mul(&scalars, &bases),
+        msm_simple(&scalars, &bases)
+      );
+    }
+  }
+
+  #[test]
+  fn test_double_scalar_mul() {
+    test_double_scalar_mul_with::<pallas::Scalar, pallas::Affine>();
+    test_double_scalar_mul_with::<vesta::Scalar, vesta::Affine>();
+    test_double_scalar_mul_with::<bn256::Scalar, bn256::Affine>();
+    test_double_scalar_mul_with::<grumpkin::Scalar, grumpkin::Affine>();
+    test_double_scalar_mul_with::<secp256k1::Scalar, secp256k1::Affine>();
+    test_double_scalar_mul_with::<secq256k1::Scalar, secq256k1::Affine>();
   }
 
   fn test_msm_ux_with<F: PrimeField, A: CurveAffine<ScalarExt = F>>() {

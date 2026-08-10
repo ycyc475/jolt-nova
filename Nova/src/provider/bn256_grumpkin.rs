@@ -46,6 +46,14 @@ impl DlogGroupExt for bn256::Point {
     msm(scalars, bases)
   }
 
+  #[cfg(not(feature = "blitzar"))]
+  fn vartime_double_scalar_mul(
+    scalars: &[Self::Scalar; 2],
+    bases: &[Self::AffineGroupElement; 2],
+  ) -> Self {
+    super::msm::vartime_double_scalar_mul(scalars, bases)
+  }
+
   fn vartime_multiscalar_mul_small<T: Integer + Into<u64> + Copy + Sync + ToPrimitive>(
     scalars: &[T],
     bases: &[Self::AffineGroupElement],
@@ -65,6 +73,14 @@ impl DlogGroupExt for bn256::Point {
 
   #[cfg(feature = "blitzar")]
   fn vartime_multiscalar_mul(scalars: &[Self::Scalar], bases: &[Self::AffineGroupElement]) -> Self {
+    super::blitzar::vartime_multiscalar_mul(scalars, bases)
+  }
+
+  #[cfg(feature = "blitzar")]
+  fn vartime_double_scalar_mul(
+    scalars: &[Self::Scalar; 2],
+    bases: &[Self::AffineGroupElement; 2],
+  ) -> Self {
     super::blitzar::vartime_multiscalar_mul(scalars, bases)
   }
 
