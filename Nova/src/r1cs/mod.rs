@@ -1085,6 +1085,14 @@ impl<E: Engine> RelaxedR1CSWitness<E> {
       self.r_E,
     )
   }
+
+  /// Consumes the witness while removing its commitment blindings.
+  pub fn derandomize_owned(mut self) -> (Self, E::Scalar, E::Scalar) {
+    let (r_W, r_E) = (self.r_W, self.r_E);
+    self.r_W = E::Scalar::ZERO;
+    self.r_E = E::Scalar::ZERO;
+    (self, r_W, r_E)
+  }
 }
 
 impl<E: Engine> RelaxedR1CSInstance<E> {

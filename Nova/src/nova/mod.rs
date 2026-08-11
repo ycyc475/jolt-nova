@@ -821,6 +821,8 @@ where
       &l_ur_secondary,
       &l_wr_secondary,
     )?;
+    drop(r_Wf_secondary);
+    drop(l_wr_secondary);
 
     // fold primary U/W with random inst/wit to get U2/W2
     let (l_ur_primary, l_wr_primary) = pp
@@ -837,10 +839,11 @@ where
       &l_ur_primary,
       &l_wr_primary,
     )?;
+    drop(l_wr_primary);
 
     // derandomize/unblind commitments
     let (derandom_r_Wn_primary, wit_blind_r_Wn_primary, err_blind_r_Wn_primary) =
-      r_Wn_primary.derandomize();
+      r_Wn_primary.derandomize_owned();
     let derandom_r_Un_primary = r_Un_primary.derandomize(
       &E1::CE::derand_key(&pp.ck_primary),
       &wit_blind_r_Wn_primary,
@@ -848,7 +851,7 @@ where
     );
 
     let (derandom_r_Wn_secondary, wit_blind_r_Wn_secondary, err_blind_r_Wn_secondary) =
-      r_Wn_secondary.derandomize();
+      r_Wn_secondary.derandomize_owned();
     let derandom_r_Un_secondary = r_Un_secondary.derandomize(
       &E2::CE::derand_key(&pp.ck_secondary),
       &wit_blind_r_Wn_secondary,

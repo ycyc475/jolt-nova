@@ -146,7 +146,8 @@ impl<E: Engine, EE: EvaluationEngineTrait<E>> RelaxedR1CSSNARKTrait<E> for Relax
     // sanity check that R1CSShape has all required size characteristics
     assert!(S.is_regular_shape());
 
-    let W = W.pad(S); // pad the witness
+    let padded_witness = (W.W.len() != S.num_vars || W.E.len() != S.num_cons).then(|| W.pad(S));
+    let W = padded_witness.as_ref().unwrap_or(W);
     let mut transcript = E::TE::new(b"RelaxedR1CSSNARK");
 
     // append the digest of vk (which includes R1CS matrices) and the RelaxedR1CSInstance to the transcript
@@ -194,7 +195,8 @@ impl<E: Engine, EE: EvaluationEngineTrait<E>> RelaxedR1CSSNARKTrait<E> for Relax
     // claims from the end of sum-check
     let (claim_Az, claim_Bz): (E::Scalar, E::Scalar) = (claims_outer[0], claims_outer[1]);
     let claim_Cz = poly_Cz.evaluate(&r_x);
-    let eval_E = MultilinearPolynomial::new(W.E.clone()).evaluate(&r_x);
+    let eval_E = MultilinearPolynomial::evaluate_with(&W.E, &r_x);
+    drop(poly_Cz);
     transcript.absorb(
       b"claims_outer",
       &[claim_Az, claim_Bz, claim_Cz, eval_E].as_slice(),
@@ -244,7 +246,10 @@ impl<E: Engine, EE: EvaluationEngineTrait<E>> RelaxedR1CSSNARKTrait<E> for Relax
     // to the batched polynomial.
     let eval_W = MultilinearPolynomial::evaluate_with(&W.W, &r_y[1..]);
 
-    let w_vec = vec![PolyEvalWitness { p: W.W }, PolyEvalWitness { p: W.E }];
+    let w_vec = vec![
+      PolyEvalWitness { p: W.W.clone() },
+      PolyEvalWitness { p: W.E.clone() },
+    ];
     let u_vec = vec![
       PolyEvalInstance {
         c: U.comm_W,

@@ -19,20 +19,23 @@ use serde::{Deserialize, Serialize};
 pub struct PrecomputedSparseMatrix<F: PrimeField> {
   num_rows: usize,
   num_cols: usize,
-  /// Per-row spans into each category's column array: (start, count)
-  row_unit_pos: Vec<(usize, usize)>,
-  row_unit_neg: Vec<(usize, usize)>,
-  row_small: Vec<(usize, usize)>,
-  row_general: Vec<(usize, usize)>,
+  /// CSR-style row offsets into each category's column array.
+  ///
+  /// A single compact `num_rows + 1` offset vector carries the same
+  /// information as the old `(start, count)` pair without duplicating counts.
+  row_unit_pos: Vec<u32>,
+  row_unit_neg: Vec<u32>,
+  row_small: Vec<u32>,
+  row_general: Vec<u32>,
   /// Column indices for val=+1 entries
-  unit_pos_cols: Vec<usize>,
+  unit_pos_cols: Vec<u32>,
   /// Column indices for val=-1 entries
-  unit_neg_cols: Vec<usize>,
+  unit_neg_cols: Vec<u32>,
   /// (column_index, signed_coeff) for small integer entries (|coeff| in 2..=7)
-  small_cols: Vec<usize>,
+  small_cols: Vec<u32>,
   small_coeffs: Vec<i8>,
   /// (column_index, coefficient) for general entries
-  general_cols: Vec<usize>,
+  general_cols: Vec<u32>,
   general_vals: Vec<F>,
 }
 
@@ -42,15 +45,19 @@ impl<F: PrimeField> PrecomputedSparseMatrix<F> {
     let num_rows = m.indptr.len() - 1;
     let one = F::ONE;
     let neg_one = -F::ONE;
+    let compact_index = |value: usize| match u32::try_from(value) {
+      Ok(index) => index,
+      Err(_) => panic!("precomputed sparse matrix index exceeds u32::MAX"),
+    };
 
     // Precompute small positive/negative field elements for comparison
     let small_pos: Vec<F> = (2u64..=7).map(F::from).collect();
     let small_neg: Vec<F> = (2u64..=7).map(|k| -F::from(k)).collect();
 
-    let mut row_unit_pos = Vec::with_capacity(num_rows);
-    let mut row_unit_neg = Vec::with_capacity(num_rows);
-    let mut row_small = Vec::with_capacity(num_rows);
-    let mut row_general = Vec::with_capacity(num_rows);
+    let mut row_unit_pos = Vec::with_capacity(num_rows + 1);
+    let mut row_unit_neg = Vec::with_capacity(num_rows + 1);
+    let mut row_small = Vec::with_capacity(num_rows + 1);
+    let mut row_general = Vec::with_capacity(num_rows + 1);
     let mut unit_pos_cols = Vec::new();
     let mut unit_neg_cols = Vec::new();
     let mut small_cols = Vec::new();
@@ -58,16 +65,17 @@ impl<F: PrimeField> PrecomputedSparseMatrix<F> {
     let mut general_cols = Vec::new();
     let mut general_vals = Vec::new();
 
-    for ptrs in m.indptr.windows(2) {
-      let up_start = unit_pos_cols.len();
-      let un_start = unit_neg_cols.len();
-      let sm_start = small_cols.len();
-      let g_start = general_cols.len();
+    row_unit_pos.push(0);
+    row_unit_neg.push(0);
+    row_small.push(0);
+    row_general.push(0);
 
+    for ptrs in m.indptr.windows(2) {
       for (&val, &col) in m.data[ptrs[0]..ptrs[1]]
         .iter()
         .zip(&m.indices[ptrs[0]..ptrs[1]])
       {
+        let col = compact_index(col);
         if val == one {
           unit_pos_cols.push(col);
         } else if val == neg_one {
@@ -84,10 +92,10 @@ impl<F: PrimeField> PrecomputedSparseMatrix<F> {
         }
       }
 
-      row_unit_pos.push((up_start, unit_pos_cols.len() - up_start));
-      row_unit_neg.push((un_start, unit_neg_cols.len() - un_start));
-      row_small.push((sm_start, small_cols.len() - sm_start));
-      row_general.push((g_start, general_cols.len() - g_start));
+      row_unit_pos.push(compact_index(unit_pos_cols.len()));
+      row_unit_neg.push(compact_index(unit_neg_cols.len()));
+      row_small.push(compact_index(small_cols.len()));
+      row_general.push(compact_index(general_cols.len()));
     }
 
     Self {
@@ -136,24 +144,23 @@ impl<F: PrimeField> PrecomputedSparseMatrix<F> {
   fn compute_row_single(&self, row: usize, v: &[F]) -> F {
     let mut sum = F::ZERO;
 
-    let (start, count) = self.row_unit_pos[row];
-    for i in start..(start + count) {
-      sum += v[self.unit_pos_cols[i]];
+    for i in self.row_unit_pos[row]..self.row_unit_pos[row + 1] {
+      sum += v[self.unit_pos_cols[i as usize] as usize];
     }
 
-    let (start, count) = self.row_unit_neg[row];
-    for i in start..(start + count) {
-      sum -= v[self.unit_neg_cols[i]];
+    for i in self.row_unit_neg[row]..self.row_unit_neg[row + 1] {
+      sum -= v[self.unit_neg_cols[i as usize] as usize];
     }
 
-    let (start, count) = self.row_small[row];
-    for i in start..(start + count) {
-      sum += Self::small_mul(self.small_coeffs[i], v[self.small_cols[i]]);
+    for i in self.row_small[row]..self.row_small[row + 1] {
+      sum += Self::small_mul(
+        self.small_coeffs[i as usize],
+        v[self.small_cols[i as usize] as usize],
+      );
     }
 
-    let (start, count) = self.row_general[row];
-    for i in start..(start + count) {
-      sum += self.general_vals[i] * v[self.general_cols[i]];
+    for i in self.row_general[row]..self.row_general[row + 1] {
+      sum += self.general_vals[i as usize] * v[self.general_cols[i as usize] as usize];
     }
 
     sum
@@ -164,32 +171,28 @@ impl<F: PrimeField> PrecomputedSparseMatrix<F> {
     let mut s1 = F::ZERO;
     let mut s2 = F::ZERO;
 
-    let (start, count) = self.row_unit_pos[row];
-    for i in start..(start + count) {
-      let col = self.unit_pos_cols[i];
+    for i in self.row_unit_pos[row]..self.row_unit_pos[row + 1] {
+      let col = self.unit_pos_cols[i as usize] as usize;
       s1 += v1[col];
       s2 += v2[col];
     }
 
-    let (start, count) = self.row_unit_neg[row];
-    for i in start..(start + count) {
-      let col = self.unit_neg_cols[i];
+    for i in self.row_unit_neg[row]..self.row_unit_neg[row + 1] {
+      let col = self.unit_neg_cols[i as usize] as usize;
       s1 -= v1[col];
       s2 -= v2[col];
     }
 
-    let (start, count) = self.row_small[row];
-    for i in start..(start + count) {
-      let col = self.small_cols[i];
-      let c = self.small_coeffs[i];
+    for i in self.row_small[row]..self.row_small[row + 1] {
+      let col = self.small_cols[i as usize] as usize;
+      let c = self.small_coeffs[i as usize];
       s1 += Self::small_mul(c, v1[col]);
       s2 += Self::small_mul(c, v2[col]);
     }
 
-    let (start, count) = self.row_general[row];
-    for i in start..(start + count) {
-      let col = self.general_cols[i];
-      let val = self.general_vals[i];
+    for i in self.row_general[row]..self.row_general[row + 1] {
+      let col = self.general_cols[i as usize] as usize;
+      let val = self.general_vals[i as usize];
       s1 += val * v1[col];
       s2 += val * v2[col];
     }
